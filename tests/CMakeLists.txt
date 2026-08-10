@@ -1,0 +1,486 @@
+# ─── Unit tests (no FFmpeg dependency) ───────────────────────────────────────
+add_executable(liveqx-tests
+    test_timeline.cpp
+    test_timeline_prepare_callback.cpp
+    test_spsc_queue.cpp
+    test_audio_mixer.cpp
+    test_frame_pool.cpp
+    test_compositor.cpp
+    test_easing.cpp
+    test_systemd_notifier.cpp
+    test_preloader.cpp
+    test_preloader_warm_set.cpp
+    test_preloader_warmset_repro.cpp
+    test_clip_graveyard.cpp
+    test_clip_graveyard_behaviour.cpp
+    test_clip_graveyard_stress.cpp
+    test_broadcast_playback.cpp
+    test_rolling_counter.cpp
+    test_rate_limited_log.cpp
+    test_channel_health.cpp
+    test_watchdog.cpp
+    test_timeline_hot_mutation.cpp
+    test_share_scanner.cpp
+    test_cpu_affinity.cpp
+    test_log_routing.cpp
+    test_legacy_migration.cpp
+    test_playback_sink.cpp
+    test_schedule_entry.cpp
+    test_scheduler.cpp
+    test_schedule_controller.cpp
+    test_live_input_clip.cpp
+    test_live_input_factory.cpp
+    test_live_clip.cpp
+    test_on_loss_provider.cpp
+    test_playlist_entry.cpp
+    test_multicast_input_cfg.cpp
+    test_multicast_output_cfg.cpp
+    test_multicast_loopback.cpp
+    test_rtmp_input_cfg.cpp
+    test_rtmp_output_cfg.cpp
+    test_rtsp_input_cfg.cpp
+    test_hls_output_cfg.cpp
+    test_hls_orphan_sweep.cpp
+    test_url_sanitize.cpp
+    test_output_manager.cpp
+    test_process_metrics.cpp
+    test_state_persistence.cpp
+    test_state_saver.cpp
+    test_gateway_cfg.cpp
+    test_gateway_loopback.cpp
+    test_gateway_manager.cpp
+    test_auth_db.cpp
+    test_password_hasher.cpp
+    test_jwt_issuer.cpp
+    test_auth_service.cpp
+    test_auth_sessions.cpp
+    test_rbac_middleware.cpp
+    test_auth_cli.cpp
+    test_master_key.cpp
+    test_master_key_reset.cpp
+    test_ldap_client.cpp
+    test_smtp_client.cpp
+    test_smtp_config_repo.cpp
+    test_time_config_repo.cpp
+    test_time_source.cpp
+    test_ntp_source.cpp
+    test_event_bus.cpp
+    test_sse_filter.cpp
+    test_simd_runtime.cpp
+    test_crossfade_simd.cpp
+    test_audio_mixer_simd.cpp
+    test_channel_profiler.cpp
+    test_profile_sampler.cpp
+    test_paths.cpp
+    test_tls.cpp
+    test_tls_config.cpp
+    test_ts_packet.cpp
+    test_ts_psi_parser.cpp
+    test_ts_psi_builder.cpp
+    test_rtp_encapsulator.cpp
+    test_fec_matrix.cpp
+    test_fec_encoder.cpp
+    test_fec_recovery.cpp
+    test_ts_program_table.cpp
+    test_ts_pcr_restamper.cpp
+    test_demux_gateway.cpp
+    test_remux_gateway.cpp
+    test_transcode_gateway.cpp
+    test_udp_socket.cpp
+    test_psi_probe.cpp
+    test_pes_assembler.cpp
+    test_mount_spec.cpp
+    test_mountd_rpc.cpp
+    test_subprocess.cpp
+    test_unit_generator.cpp
+    test_systemctl_client.cpp
+    test_creds_helper.cpp
+    test_mountd_handlers.cpp
+    test_mounts_db.cpp
+    test_mountd_rpc_client.cpp
+    test_mount_manager.cpp
+    ../src/mounts/MountSpec.cpp
+    ../src/mounts/RpcProtocol.cpp
+    ../src/mounts/RpcServer.cpp
+    ../src/mounts/Subprocess.cpp
+    ../src/mounts/UnitGenerator.cpp
+    ../src/mounts/SystemctlClient.cpp
+    ../src/mounts/CredsHelper.cpp
+    ../src/mounts/MountTester.cpp
+    ../src/mounts/MountdHandlers.cpp
+    ../src/mounts/MountsDb.cpp
+    ../src/mounts/MountdRpcClient.cpp
+    ../src/mounts/MountManager.cpp
+    ../src/gateway/ts/Crc32.cpp
+    ../src/gateway/ts/Descriptors.cpp
+    ../src/gateway/ts/PsiParser.cpp
+    ../src/gateway/ts/PsiBuilder.cpp
+    ../src/gateway/ts/ProgramTable.cpp
+    ../src/gateway/ts/PcrRestamper.cpp
+    ../src/gateway/ts/PesAssembler.cpp
+    ../src/gateway/fec/RtpEncapsulator.cpp
+    ../src/gateway/fec/FecMatrix.cpp
+    ../src/gateway/fec/FecEncoder.cpp
+    ../src/gateway/net/UdpSocket.cpp
+    ../src/gateway/probe/PsiProbe.cpp
+    ../src/gateway/DemuxGateway.cpp
+    ../src/gateway/RemuxGateway.cpp
+    ../src/gateway/TranscodeGateway.cpp
+    ../src/gateway/GatewayFactory.cpp
+    ../src/gateway/GatewayCfg.cpp
+    ../src/utils/Paths.cpp
+    ../src/utils/Tls.cpp
+    ../src/utils/TlsConfig.cpp
+    ../src/utils/RuntimeLock.cpp
+    ../src/metrics/ChannelProfiler.cpp
+    ../src/metrics/ProfileSampler.cpp
+    ../src/audio/AudioMixerAvx2.cpp
+    ../src/utils/SimdRuntime.cpp
+    ../src/events/EventBus.cpp
+    ../src/api/SseFilter.cpp
+    ../src/gateway/Gateway.cpp
+    ../src/gateway/GatewayCfg.cpp
+    ../src/gateway/GatewayManager.cpp
+    ../src/auth/AuthTypes.cpp
+    ../src/auth/AuthDb.cpp
+    ../src/auth/PasswordHasher.cpp
+    ../src/auth/JwtIssuer.cpp
+    ../src/auth/AuthService.cpp
+    ../src/auth/RbacMiddleware.cpp
+    ../src/auth/AuthCli.cpp
+    ../src/auth/MasterKey.cpp
+    ../src/auth/MasterKeyReset.cpp
+    ../src/auth/LdapClient.cpp
+    ../src/auth/LdapConfigRepo.cpp
+    ../src/auth/SmtpClient.cpp
+    ../src/auth/SmtpConfigRepo.cpp
+    ../src/auth/TimeConfig.cpp
+    ../src/auth/TimeConfigRepo.cpp
+    ../src/auth/TimeSource.cpp
+    ../src/auth/SntpClient.cpp
+    ../src/auth/NtpSource.cpp
+    ../src/persistence/StatePersistence.cpp
+    ../src/persistence/ChannelStateSaver.cpp
+    ../src/metrics/ProcessMetrics.cpp
+    ../src/output/OutputManager.cpp
+    ../src/output/MulticastOutput.cpp
+    ../src/clips/LiveClip.cpp
+    ../src/clips/OnLossProvider.cpp
+    ../src/clips/PlaylistEntry.cpp
+    ../src/clips/ClipGraveyard.cpp
+    ../src/logging/FilePlaybackSink.cpp
+    ../src/logging/SqlitePlaybackSink.cpp
+    ../src/core/ScheduleEntry.cpp
+    ../src/core/Scheduler.cpp
+    ../src/core/ScheduleController.cpp
+    ../src/content/ShareScanner.cpp
+    ../src/utils/CpuAffinity.cpp
+    ../src/utils/Log.cpp
+    ../src/utils/PathUtils.cpp
+    ../src/utils/LegacyMigration.cpp
+    ../src/utils/SystemdNotifier.cpp
+    ../src/core/FramePool.cpp
+    ../src/core/Timeline.cpp
+    ../src/core/Preloader.cpp
+    ../src/core/Watchdog.cpp
+    ../src/metrics/ChannelHealth.cpp
+    ../src/render/CpuCompositor.cpp
+    ../src/transitions/CrossFade.cpp
+    ../src/transitions/CrossFadeAvx2.cpp
+    ../src/transitions/Dissolve.cpp
+    ../src/transitions/FadeToBlack.cpp
+    ../src/transitions/Wipe.cpp
+    ../src/transitions/Push.cpp
+    ../src/audio/AudioMixer.cpp
+)
+set_source_files_properties(
+    ../src/transitions/CrossFadeAvx2.cpp
+    ../src/audio/AudioMixerAvx2.cpp
+    PROPERTIES COMPILE_OPTIONS "-mavx2")
+target_include_directories(liveqx-tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(liveqx-tests PRIVATE
+    GTest::gtest_main
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
+    SQLite::SQLite3
+    PkgConfig::SODIUM
+    jwt-cpp::jwt-cpp
+    openldap_client
+    CURL::libcurl
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    date::date-tz
+)
+include(GoogleTest)
+gtest_discover_tests(liveqx-tests DISCOVERY_MODE PRE_TEST)
+
+# ─── SRT output tests (require libsrt, no FFmpeg) ────────────────────────────
+add_executable(liveqx-srt-tests
+    test_srt_output.cpp
+    ../src/output/SrtOutput.cpp
+    ../src/utils/CpuAffinity.cpp
+    ../src/utils/Log.cpp
+    ../src/utils/PathUtils.cpp
+)
+target_include_directories(liveqx-srt-tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(liveqx-srt-tests PRIVATE
+    GTest::gtest_main
+    spdlog::spdlog
+    srt_static
+)
+gtest_discover_tests(liveqx-srt-tests DISCOVERY_MODE PRE_TEST)
+
+# ─── Integration tests (require FFmpeg) ──────────────────────────────────────
+add_executable(liveqx-itests
+    test_image_clip.cpp
+    test_video_clip.cpp
+    test_preview_encoder.cpp
+    test_preview_manager.cpp
+    test_webrtc_session.cpp
+    test_preview_integration.cpp
+    ../src/preview/PreviewEncoder.cpp
+    ../src/preview/PreviewManager.cpp
+    ../src/preview/WebRtcSession.cpp
+    test_clip_factory.cpp
+    test_live_input_factory_build.cpp
+    test_live_clip_rtmp.cpp
+    test_rtsp_input.cpp
+    test_hls_output_real.cpp
+    test_hls_output_concurrent.cpp
+    test_scaler.cpp
+    test_encoder.cpp
+    test_render_loop.cpp
+    test_watchdog_integration.cpp
+    test_cache_manager.cpp
+    test_contentsync_integration.cpp
+    test_channel_instance.cpp
+    test_channel_manager.cpp
+    test_health_endpoints.cpp
+    test_preview_rest.cpp
+    test_gateway_rest.cpp
+    test_stream_probe_rest.cpp
+    test_auth_rest.cpp
+    test_admin_users_rest.cpp
+    test_audit_rest.cpp
+    test_ldap_config_rest.cpp
+    test_channel_acl_rest.cpp
+    test_smtp_config_rest.cpp
+    test_system_time_rest.cpp
+    test_openapi_contract.cpp
+    test_rbac_rest.cpp
+    test_status_rbac.cpp
+    test_perf_rest.cpp
+    test_stress_runner.cpp
+    test_random_output_fail.cpp
+    test_clip_corrupt.cpp
+    test_network_blackout.cpp
+    test_cron_expr.cpp
+    test_stress_scheduler.cpp
+    test_stress_report_store.cpp
+    test_stress_rest.cpp
+    test_stress_events_metrics.cpp
+    test_plugin_manager.cpp
+    test_ndi_mock.cpp
+    test_control_api_tls.cpp
+    test_control_api_mounts.cpp
+    test_metrics_mounts.cpp
+    ../src/mounts/MountSpec.cpp
+    ../src/mounts/RpcProtocol.cpp
+    ../src/mounts/MountsDb.cpp
+    ../src/mounts/MountdRpcClient.cpp
+    ../src/mounts/MountManager.cpp
+    test_video_transcoder.cpp
+    test_audio_transcoder.cpp
+    test_ffmpeg_transcode_pipeline.cpp
+    ../src/gateway/transcode/VideoTranscoder.cpp
+    ../src/gateway/transcode/AudioTranscoder.cpp
+    ../src/gateway/transcode/FfmpegTranscodePipeline.cpp
+    ../src/stress/StressConfig.cpp
+    ../src/stress/StressReport.cpp
+    ../src/stress/StressRunner.cpp
+    ../src/stress/RandomOutputFail.cpp
+    ../src/stress/ClipCorrupt.cpp
+    ../src/stress/NetworkBlackout.cpp
+    ../src/stress/ScenarioFactory.cpp
+    ../src/stress/CronExpr.cpp
+    ../src/stress/StressScheduler.cpp
+    ../src/stress/StressReportStore.cpp
+    ../src/stress/StressService.cpp
+    ../src/api/ControlApi.cpp
+    ../src/api/SseFilter.cpp
+    ../src/plugins/PluginManager.cpp
+    ../src/events/EventBus.cpp
+    ../src/auth/AuthTypes.cpp
+    ../src/auth/AuthDb.cpp
+    ../src/auth/PasswordHasher.cpp
+    ../src/auth/JwtIssuer.cpp
+    ../src/auth/AuthService.cpp
+    ../src/auth/RbacMiddleware.cpp
+    ../src/auth/MasterKey.cpp
+    ../src/auth/MasterKeyReset.cpp
+    ../src/auth/LdapClient.cpp
+    ../src/auth/LdapConfigRepo.cpp
+    ../src/auth/SmtpClient.cpp
+    ../src/auth/SmtpConfigRepo.cpp
+    ../src/auth/TimeConfig.cpp
+    ../src/auth/TimeConfigRepo.cpp
+    ../src/auth/TimeSource.cpp
+    ../src/auth/SntpClient.cpp
+    ../src/auth/NtpSource.cpp
+    ../src/gateway/Gateway.cpp
+    ../src/gateway/DemuxGateway.cpp
+    ../src/gateway/RemuxGateway.cpp
+    ../src/gateway/TranscodeGateway.cpp
+    ../src/gateway/GatewayFactory.cpp
+    ../src/gateway/GatewayCfg.cpp
+    ../src/gateway/GatewayManager.cpp
+    ../src/gateway/ts/Crc32.cpp
+    ../src/gateway/ts/Descriptors.cpp
+    ../src/gateway/ts/PsiParser.cpp
+    ../src/gateway/ts/PsiBuilder.cpp
+    ../src/gateway/ts/ProgramTable.cpp
+    ../src/gateway/ts/PcrRestamper.cpp
+    ../src/gateway/ts/PesAssembler.cpp
+    ../src/gateway/fec/RtpEncapsulator.cpp
+    ../src/gateway/fec/FecMatrix.cpp
+    ../src/gateway/fec/FecEncoder.cpp
+    ../src/gateway/net/UdpSocket.cpp
+    ../src/gateway/probe/PsiProbe.cpp
+    ../src/api/MetricsCollector.cpp
+    ../src/api/RbacScope.cpp
+    ../src/metrics/ProcessMetrics.cpp
+    ../src/persistence/StatePersistence.cpp
+    ../src/persistence/ChannelStateSaver.cpp
+    ../src/core/ChannelInstance.cpp
+    ../src/core/ScheduleEntry.cpp
+    ../src/core/Scheduler.cpp
+    ../src/core/ScheduleController.cpp
+    ../src/api/ChannelManager.cpp
+    ../src/logging/FilePlaybackSink.cpp
+    ../src/logging/SqlitePlaybackSink.cpp
+    ../src/output/SrtOutput.cpp
+    ../src/output/MulticastOutput.cpp
+    ../src/output/RtmpOutput.cpp
+    ../src/output/HlsOutput.cpp
+    ../src/output/NdiLib.cpp
+    ../src/output/NdiOutput.cpp
+    ../src/output/OutputManager.cpp
+    ../src/content/CacheManager.cpp
+    ../src/content/ShareScanner.cpp
+    ../src/content/ContentSync.cpp
+    ../src/clips/ImageClip.cpp
+    ../src/clips/VideoClip.cpp
+    ../src/clips/ClipFactory.cpp
+    ../src/clips/MulticastInput.cpp
+    ../src/clips/NdiInput.cpp
+    ../src/clips/RtmpInput.cpp
+    ../src/clips/RtspInput.cpp
+    ../src/clips/LiveInputFactory.cpp
+    ../src/clips/LiveClip.cpp
+    ../src/clips/OnLossProvider.cpp
+    ../src/clips/PlaylistEntry.cpp
+    ../src/clips/ClipGraveyard.cpp
+    ../src/clips/MediaValidator.cpp
+    ../src/clips/FallbackClip.cpp
+    ../src/utils/CpuAffinity.cpp
+    ../src/utils/Log.cpp
+    ../src/utils/PathUtils.cpp
+    ../src/utils/Paths.cpp
+    ../src/utils/Tls.cpp
+    ../src/utils/TlsConfig.cpp
+    ../src/utils/NetIfaces.cpp
+    ../src/utils/RuntimeLock.cpp
+    ../src/core/FramePool.cpp
+    ../src/core/Timeline.cpp
+    ../src/core/Preloader.cpp
+    ../src/core/RenderLoop.cpp
+    ../src/core/Watchdog.cpp
+    ../src/metrics/ChannelHealth.cpp
+    ../src/metrics/ChannelProfiler.cpp
+    ../src/metrics/ProfileSampler.cpp
+    ../src/audio/AudioMixer.cpp
+    ../src/audio/AudioMixerAvx2.cpp
+    ../src/render/CpuCompositor.cpp
+    ../src/transitions/CrossFade.cpp
+    ../src/transitions/CrossFadeAvx2.cpp
+    ../src/transitions/Dissolve.cpp
+    ../src/transitions/FadeToBlack.cpp
+    ../src/transitions/Wipe.cpp
+    ../src/transitions/Push.cpp
+    ../src/scaler/Scaler.cpp
+    ../src/encoding/Encoder.cpp
+    ../src/encoding/EncoderFactory.cpp
+    ../src/encoding/X264VideoEncoder.cpp
+    ../src/encoding/NvencVideoEncoder.cpp
+    ../src/encoding/QsvVideoEncoder.cpp
+    ../src/encoding/VaapiVideoEncoder.cpp
+    ../src/utils/SimdRuntime.cpp
+)
+set_source_files_properties(
+    ../src/transitions/CrossFadeAvx2.cpp
+    ../src/audio/AudioMixerAvx2.cpp
+    PROPERTIES COMPILE_OPTIONS "-mavx2")
+target_include_directories(liveqx-itests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(liveqx-itests PRIVATE
+    GTest::gtest_main
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
+    SQLite::SQLite3
+    PkgConfig::FFMPEG
+    httplib::httplib
+    PkgConfig::SODIUM
+    jwt-cpp::jwt-cpp
+    srt_static
+    openldap_client
+    CURL::libcurl
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    date::date-tz
+    ${CMAKE_DL_LIBS}
+)
+if(ENABLE_WEBRTC_PREVIEW)
+    target_link_libraries(liveqx-itests PRIVATE
+        LibDataChannel::LibDataChannel
+    )
+    target_compile_definitions(liveqx-itests PRIVATE
+        LIVEQX_ENABLE_WEBRTC_PREVIEW=1)
+endif()
+gtest_discover_tests(liveqx-itests
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    DISCOVERY_MODE PRE_TEST)
+
+# ─── fix19 c12 — mock libndi.so for NDI surface tests ────────────────────────
+# Built only as a SHARED library; never installed. test_ndi_mock.cpp dlopens
+# the produced .so via the absolute path injected through MOCK_NDI_PATH.
+add_library(mock_ndi SHARED mock_ndi.cpp)
+target_include_directories(mock_ndi PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_target_properties(mock_ndi PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    PREFIX ""
+    OUTPUT_NAME "mock_ndi")
+target_compile_definitions(liveqx-itests PRIVATE
+    MOCK_NDI_PATH="$<TARGET_FILE:mock_ndi>")
+add_dependencies(liveqx-itests mock_ndi)
+
+# ─── SIMD micro-bench (manual run only) ──────────────────────────────────────
+# Standalone target — not added to ctest. Run via ./liveqx-bench
+# from build/tests. Prints scalar vs AVX2 ms/call for CrossFade and
+# AudioMixer. Useful for capturing baseline numbers per host.
+add_executable(liveqx-bench
+    bench/bench_simd.cpp
+    ../src/transitions/CrossFade.cpp
+    ../src/transitions/CrossFadeAvx2.cpp
+    ../src/audio/AudioMixer.cpp
+    ../src/audio/AudioMixerAvx2.cpp
+    ../src/utils/SimdRuntime.cpp
+    ../src/utils/Log.cpp
+    ../src/utils/PathUtils.cpp
+)
+set_source_files_properties(
+    ../src/transitions/CrossFadeAvx2.cpp
+    ../src/audio/AudioMixerAvx2.cpp
+    PROPERTIES COMPILE_OPTIONS "-mavx2")
+target_include_directories(liveqx-bench PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(liveqx-bench PRIVATE
+    spdlog::spdlog
+)
