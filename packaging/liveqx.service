@@ -1,0 +1,103 @@
+[Unit]
+Description=LiveQX Engine
+Documentation=file:/usr/share/doc/liveqx/SYSTEMD.md
+After=network-online.target liveqx-mountd.service
+Wants=network-online.target liveqx-mountd.service
+# fix42: helper-демон управляет AF_UNIX-сокетом /run/liveqx/mountd.sock,
+# а его unit-файл объявляет PartOf=liveqx.service — это даёт
+# двустороннюю связку по stop/restart. Но PartOf не тянет helper при
+# START основного сервиса, поэтому `systemctl restart liveqx`
+# после стопа оставлял mountd мёртвым (см. журнал 2026-05-22 23:51).
+# Wants= закрывает: старт liveqx теперь автоматически поднимает
+# helper. After= гарантирует, что сокет существует к моменту вызова
+# MountManager::reconcile().
+
+[Service]
+Type=notify
+NotifyAccess=main
+# fix41: указываем конфиг ЯВНО. Без --config бинарь ищет относительный
+# `config/default.json` от WorkingDirectory, и при FHS-инсталле этот
+# файл не существует — бинарь молча стартует с пустым конфигом и
+# падает в headless mode (ui_dir пустой, etc.). Прод-конфиг по FHS
+# лежит в /etc/liveqx/config.json.
+ExecStart=/usr/local/bin/liveqx --config /etc/liveqx/config.json
+WorkingDirectory=/var/lib/liveqx
+Restart=on-failure
+RestartSec=5s
+
+# fix41: liveqx ходит к liveqx-mountd за привилегиями.
+# Helper аутентифицирует клиента по членству в группе `liveqx`
+# (см. RpcServer::authorizePeer), поэтому daemon обязан бежать под этим
+# юзером — иначе либо рушится модель разделения привилегий (root↔helper),
+# либо peer не пройдёт авторизацию сокета.
+User=liveqx
+Group=liveqx
+
+# fix21: enable systemd watchdog. The process emits WATCHDOG=1 every
+# WatchdogSec/2 from a background jthread (see SystemdNotifier). If the
+# notifier loop hangs (e.g. ChannelManager deadlock) the unit is killed
+# and restarted by Restart=on-failure.
+WatchdogSec=30s
+
+# Boundary: process needs network for SRT/RTMP/HLS/RTSP and a writable
+# state dir for per-channel state.db + auth.db.
+ReadWritePaths=/var/lib/liveqx
+ProtectSystem=full
+PrivateTmp=true
+NoNewPrivileges=true
+
+# fix44 c4: ReadWritePaths/ProtectSystem/PrivateTmp неявно включают
+# PrivateMounts=true, и дефолтный MountFlags=private изолирует процесс
+# от mount-событий, происходящих в системном namespace ПОСЛЕ его старта.
+# liveqx-mountd (root) монтирует CIFS-шары динамически по запросу
+# из UI — без MountFlags=slave эти mount'ы никогда не появляются в
+# namespace liveqx, и Watcher видит autofs-заглушку без CIFS под
+# ней (UI: «Файлов в кэше: 0»).
+#
+# slave даёт однонаправленную пропагацию извне внутрь (то что нужно), и
+# изменения изнутри не утекают наружу — песочница сохраняется. shared
+# был бы избыточным: liveqx не вызывает mount(2).
+MountFlags=slave
+
+# ── Master-key delivery via systemd-creds (production recommendation) ──────
+# By default the daemon auto-generates /var/lib/liveqx/master.key
+# (mode 0600) on first start. That works, but the key ends up on the same
+# disk as auth.db — anyone who steals a backup or VM snapshot gets both.
+#
+# Better: keep the key encrypted at rest with a TPM2-bound systemd-creds
+# blob, and let systemd hand the plaintext to the service via a tmpfs.
+# Setup once on the target host:
+#
+#     # 1. Generate a 32-byte random key in base64.
+#     KEY=$(openssl rand -base64 32)
+#
+#     # 2. Encrypt it under this host's TPM (or machine-id if no TPM).
+#     #    The output file can sit in /etc — without the TPM it is opaque.
+#     sudo mkdir -p /etc/credstore.encrypted
+#     echo -n "$KEY" | sudo systemd-creds encrypt --name=streaming_master_key \
+#         - /etc/credstore.encrypted/streaming_master_key
+#     unset KEY
+#
+# Then uncomment the two lines below. systemd will decrypt the credential
+# into $CREDENTIALS_DIRECTORY (tmpfs, 0400, only this service can read it)
+# and the daemon will pick it up via LIVEQX_MASTER_KEY_FILE.
+#
+# LoadCredentialEncrypted=streaming_master_key:/etc/credstore.encrypted/streaming_master_key
+# Environment=LIVEQX_MASTER_KEY_FILE=%d/streaming_master_key
+#
+# Migration from auto-generated key: see docs/AUTH.md §10 — you must
+# re-encrypt the existing master.key contents into the credstore (or
+# accept a hard reset of LDAP/SMTP/JWT secrets via auth-cli reset).
+
+# Logging — journald will absorb stdout/stderr. Status set via sd_notify
+# (STATUS=…) is visible in `systemctl status liveqx`.
+StandardOutput=journal
+StandardError=journal
+
+# Resource hints — tune per host. The render pipeline pins worker threads
+# itself (see CpuAffinity + numa_node), so do NOT use CPUAffinity= here:
+# it would override the per-channel pinning.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
