@@ -1,0 +1,14 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libpostproc
+Description: FFmpeg postprocessing library
+Version: 58.3.100
+Requires: libavutil >= 59.39.100
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lpostproc -lm -latomic
+Libs.private: 
+Cflags: -I${includedir}

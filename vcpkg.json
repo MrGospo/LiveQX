@@ -1,0 +1,17 @@
+{
+  "name": "liveqx",
+  "version": "1.0.0",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "features": ["avcodec", "avformat", "avfilter", "swresample", "swscale"]
+    },
+    "libsrt",
+    "cpp-httplib",
+    "spdlog",
+    "nlohmann-json",
+    "sqlite3",
+    "libsodium",
+    "gtest"
+  ]
+}

@@ -1,0 +1,90 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Linker files
+*.ilk
+
+# Debugger Files
+*.pdb
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# debug information files
+*.dwo
+
+# Build / test artifacts
+/build/
+/build_*/
+/build_check/
+/Testing/
+/logs/
+/third_party/ffmpeg-build/
+
+# Runtime per-process state. channels/ holds per-channel config + state.db +
+# logs created at runtime; state/ holds master.key + auth.db (secrets).
+/channels/
+/state/
+
+# Local scratch notes (per-session). dialog.md is a working draft, not a
+# committed artefact.
+/dialog.md
+
+# Per-fix design docs + ROADMAP — local-only history, kept on the dev
+# build server. Not part of the published repo.
+/fix/
+
+# Scratch debug notes
+/fix*.md
+/logi.md
+/step*.md
+/zamechaniya.md
+
+# Allow vendored FFmpeg static install (see CMakeLists.txt FFMPEG_ROOT)
+!/third_party/ffmpeg/
+!/third_party/ffmpeg/**
+
+# UI build/cache — sources are tracked, derivatives are not.
+/ui/node_modules/
+/ui/dist/
+/ui/*.tsbuildinfo
+# Local backups and test media — too large for git
+/backups/
+/test_media/
+/logo/
+/deploy_fix.md
+
+# Internal docs — снапшоты технического ТЗ и fix-документов, не для публичного репо
+/docs/
+
+# Локальные артефакты, не для публичного репо
+/remove.md
+/packaging/migrate-to-liveqx.sh
+/ui/public/favicon.svg
