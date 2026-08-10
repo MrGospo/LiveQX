@@ -1,4 +1,4 @@
-[English](README-EN.md) | **Русский**
+[English](README.md) | **Русский**
 
 # LiveQX
 
