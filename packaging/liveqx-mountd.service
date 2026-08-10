@@ -9,13 +9,14 @@ PartOf=liveqx.service
 [Service]
 Type=simple
 
-# fix44 c6: подготовка shared propagation для /mnt/liveqx вынесена
-# в отдельный oneshot-юнит liveqx-mount-init.service. Причина —
-# в c5 эти команды стояли как ExecStartPre с префиксом '+', но '+' на
-# systemd 255 НЕ снимает PrivateTmp/PrivateMounts (см. список исключений
-# в systemd.exec(5)). mountd имеет PrivateTmp=true → команды выполнялись
-# в его приватном namespace, где bind-mount поверх slave-пропагированного
-# /mnt/liveqx с активными submounts падал с error 5005 на WSL2.
+# fix44 c6: preparing shared propagation for /mnt/liveqx has been split
+# out into a separate oneshot unit liveqx-mount-init.service. Reason —
+# in c5 these commands lived as ExecStartPre with the '+' prefix, but on
+# systemd 255 '+' does NOT drop PrivateTmp/PrivateMounts (see the list of
+# exceptions in systemd.exec(5)). mountd has PrivateTmp=true → the
+# commands ran in its private namespace, where a bind-mount over a
+# slave-propagated /mnt/liveqx with active submounts failed with error 5005
+# on WSL2.
 
 ExecStart=/usr/local/bin/liveqx-mountd
 Restart=on-failure
@@ -30,9 +31,9 @@ RestartSec=2s
 # fix42: Group=liveqx (not root). uid stays 0 → all root caps
 # preserved (mount(2), credstore writes, daemon-reload). But primary
 # gid = liveqx, so RuntimeDirectory below is created as
-# root:liveqx 0750 — без этого основной сервис под liveqx
-# не может даже войти в /run/liveqx/ чтобы открыть сокет (EACCES
-# на connect). Воспроизведено 2026-05-23.
+# root:liveqx 0750 — without this the main service running as liveqx
+# cannot even enter /run/liveqx/ to open the socket (EACCES on connect).
+# Reproduced 2026-05-23.
 User=root
 Group=liveqx
 
@@ -47,12 +48,12 @@ RuntimeDirectoryMode=0750
 # files) and /run/liveqx (control socket + creds tmpfs).
 # Everything else stays read-only.
 #
-# fix43: /etc/credstore.encrypted и /var/lib/systemd удалены — helper
-# больше не использует systemd-creds(1). Cred-файлы пишутся в plaintext
-# на tmpfs /run/liveqx/creds (mkdir + chmod 0700 в mountd при
-# старте; см. MountdMain.cpp). LoadCredentialEncrypted= в [Mount] юнитах
-# не работает на systemd 255 — она молча принимается и не создаёт
-# /run/credentials/<unit>/, ломая mount.cifs с error(2). См. CredsHelper.h.
+# fix43: /etc/credstore.encrypted and /var/lib/systemd removed — the helper
+# no longer uses systemd-creds(1). Cred files are written in plaintext to
+# the tmpfs /run/liveqx/creds (mkdir + chmod 0700 in mountd at startup;
+# see MountdMain.cpp). LoadCredentialEncrypted= in [Mount] units does not
+# work on systemd 255 — it is silently accepted and does not create
+# /run/credentials/<unit>/, breaking mount.cifs with error(2). See CredsHelper.h.
 ProtectSystem=strict
 ReadWritePaths=/etc/systemd/system /run/liveqx /run/systemd
 PrivateTmp=true

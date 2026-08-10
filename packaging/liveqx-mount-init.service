@@ -9,46 +9,46 @@ Before=liveqx-mountd.service liveqx.service
 Type=oneshot
 RemainAfterExit=yes
 
-# fix44 c6: предыдущая попытка (c5) держала эти ExecStartPre в самом
-# liveqx-mountd.service с префиксом '+'. На systemd 255 префикс '+'
-# снимает только привилегиальные ограничения (User=, ProtectSystem=, ...),
-# но НЕ отключает PrivateMounts=/PrivateTmp=. mountd имеет PrivateTmp=true,
-# значит ExecStartPre выполнялись в его приватном mount-namespace, где
-# /mnt/liveqx уже проброшен через slave-пропагацию из системного
-# namespace. Попытка `mount --bind` поверх такой точки на WSL2 возвращает
-# Unknown error 5005 (ядро не любит рекурсивный bind на slave-mountpoint
-# с активными submounts).
+# fix44 c6: the previous attempt (c5) kept these ExecStartPre inside
+# liveqx-mountd.service itself with the '+' prefix. On systemd 255 the '+'
+# prefix drops only privilege-related restrictions (User=, ProtectSystem=, ...),
+# but does NOT disable PrivateMounts=/PrivateTmp=. mountd has PrivateTmp=true,
+# so ExecStartPre ran in its private mount-namespace, where
+# /mnt/liveqx is already propagated via slave from the system namespace.
+# Trying `mount --bind` over such a point on WSL2 returns
+# Unknown error 5005 (the kernel dislikes a recursive bind on a slave-mountpoint
+# with active submounts).
 #
-# Решение: вынести подготовку в отдельный юнит БЕЗ sandbox, чтобы команды
-# гарантированно работали в системном namespace. После того как
-# /mnt/liveqx помечен make-shared в системном namespace, любые
-# дочерние mount-события (CIFS из mountd) попадают и в slave-namespace
-# liveqx (см. MountFlags=slave в liveqx.service).
+# Fix: move the preparation into a separate unit WITHOUT a sandbox, so the
+# commands are guaranteed to run in the system namespace. Once
+# /mnt/liveqx is marked make-shared in the system namespace, any
+# child mount events (CIFS from mountd) also reach the slave-namespace
+# of liveqx (see MountFlags=slave in liveqx.service).
 #
-# DefaultDependencies=no + After=local-fs.target — раннее выполнение,
-# до старта остальных юнитов. RequiredBy=liveqx-mountd.service
-# гарантирует, что без успешного init не поднимется и mountd.
+# DefaultDependencies=no + After=local-fs.target — run early,
+# before the other units start. RequiredBy=liveqx-mountd.service
+# guarantees that without a successful init mountd will not come up either.
 
 ExecStart=/bin/mkdir -p /mnt/liveqx
 ExecStart=/bin/sh -c 'mountpoint -q /mnt/liveqx || mount --bind /mnt/liveqx /mnt/liveqx'
 ExecStart=/bin/mount --make-shared /mnt/liveqx
 
-# fix44 c7: если liveqx уже работает на момент (пере)запуска
-# этого юнита — перезапустить его. Slave-namespace подписывается на peer
-# group родителя в момент клонирования; если liveqx стартовал ДО
-# того, как мы сделали make-shared, его namespace остаётся без подписки,
-# и новые CIFS-маунты не пробрасываются.
+# fix44 c7: if liveqx is already running at the moment this unit is
+# (re)started — restart it. A slave-namespace subscribes to the parent's
+# peer group at clone time; if liveqx started BEFORE we ran make-shared,
+# its namespace stays without a subscription, and new CIFS mounts are not
+# propagated.
 #
-# Случаи:
-#  • boot: liveqx ещё не active → is-active вернёт false, no-op.
-#    Дальше по After= systemd запустит его под уже shared parent. ОК.
-#  • установка fix44 поверх работающего сервиса: is-active=true →
-#    try-restart пересоздаст namespace с правильной подпиской. ОК.
-#  • переустановка/правка mount-init: то же самое, авто-restart.
+# Cases:
+#  • boot: liveqx is not active yet → is-active returns false, no-op.
+#    Afterwards, per After=, systemd starts it under an already-shared parent. OK.
+#  • installing fix44 on top of a running service: is-active=true →
+#    try-restart recreates the namespace with the correct subscription. OK.
+#  • reinstalling / editing mount-init: same thing, auto-restart.
 #
-# '-' подавляет ошибки try-restart (например, если сервис в этот момент
-# в transition state). try-restart (а не restart) безопасен, когда
-# сервис остановлен — он становится no-op вместо принудительного старта.
+# '-' suppresses try-restart errors (for example, if the service is in a
+# transition state at that moment). try-restart (not restart) is safe when
+# the service is stopped — it becomes a no-op instead of forcing a start.
 ExecStartPost=-/bin/sh -c 'systemctl is-active --quiet liveqx.service && systemctl try-restart liveqx.service'
 
 StandardOutput=journal

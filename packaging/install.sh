@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 #
-# LiveQX Engine — установщик для Ubuntu/Debian.
+# LiveQX Engine — installer for Ubuntu/Debian.
 #
-# Режимы:
-#   install    — установить (по умолчанию)
-#   uninstall  — удалить ВСЁ (бинари, юниты, БД, конфиги, пользователь)
-#   check      — проверить текущее состояние установки
+# Modes:
+#   install    — install (default)
+#   uninstall  — remove EVERYTHING (binaries, units, DB, configs, user)
+#   check      — check current installation state
 #
-# Запуск: sudo ./packaging/install.sh [install|uninstall|check] [-y]
+# Usage: sudo ./packaging/install.sh [install|uninstall|check] [-y]
 #
 set -euo pipefail
 IFS=$'\n\t'
 
-# На минимальных Debian /usr/sbin и /sbin отсутствуют в PATH для обычных
-# пользователей — из-за этого падают groupadd/useradd/nologin, даже под sudo.
+# On minimal Debian /usr/sbin and /sbin are missing from PATH for regular
+# users — this causes groupadd/useradd/nologin to fail, even under sudo.
 export PATH="/usr/local/sbin:/usr/sbin:/sbin:${PATH}"
 
-# ── Константы путей ─────────────────────────────────────────────────────────
+# ── Path constants ──────────────────────────────────────────────────────────
 LIVEQX_USER="liveqx"
 LIVEQX_GROUP="liveqx"
 BIN_DIR="/usr/local/bin"
@@ -31,7 +31,7 @@ RUNTIME_DIR="/run/liveqx"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# ── Цветной вывод ───────────────────────────────────────────────────────────
+# ── Colored output ──────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
     C_RED=$'\033[0;31m'; C_GRN=$'\033[0;32m'; C_YEL=$'\033[1;33m'
     C_BLU=$'\033[0;34m'; C_BLD=$'\033[1m';     C_RST=$'\033[0m'
@@ -47,26 +47,26 @@ step(){ echo; echo "${C_BLD}── $* ──${C_RST}"; }
 
 usage() {
     cat <<EOF
-LiveQX Engine — установщик
+LiveQX Engine — installer
 
-Использование:
-    sudo $0 [install|uninstall|check] [опции]
+Usage:
+    sudo $0 [install|uninstall|check] [options]
 
-Команды:
-    install     Установить LiveQX (по умолчанию)
-    uninstall   Удалить LiveQX полностью (БД, конфиги, пользователь liveqx)
-    check       Проверить состояние установки
+Commands:
+    install     Install LiveQX (default)
+    uninstall   Fully remove LiveQX (DB, configs, liveqx user)
+    check       Check installation state
 
-Опции:
-    -y, --yes       Не задавать вопросов
-    -h, --help      Показать справку
+Options:
+    -y, --yes       Assume yes for all prompts
+    -h, --help      Show this help
 
-Перед запуском install убедитесь что собрано:
-    build/liveqx               — основной бинарь
-    build/liveqx-mountd        — helper для монтирования шар
+Before running install, make sure the following are built:
+    build/liveqx               — main binary
+    build/liveqx-mountd        — share-mount helper
     ui/dist/                   — Web UI
 
-Команда сборки:
+Build command:
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \\
         -DENABLE_NVENC=ON -DENABLE_QSV=ON -DENABLE_VAAPI=ON \\
         -DENABLE_WEBRTC_PREVIEW=ON -DENABLE_SYSTEMD=ON
@@ -75,7 +75,7 @@ LiveQX Engine — установщик
 EOF
 }
 
-# ── Парсинг аргументов ──────────────────────────────────────────────────────
+# ── Argument parsing ────────────────────────────────────────────────────────
 MODE="install"
 ASSUME_YES=0
 while [[ $# -gt 0 ]]; do
@@ -83,11 +83,11 @@ while [[ $# -gt 0 ]]; do
         install|uninstall|check) MODE="$1"; shift ;;
         -y|--yes)  ASSUME_YES=1; shift ;;
         -h|--help) usage; exit 0 ;;
-        *) die "Неизвестный аргумент: $1 (см. --help)" ;;
+        *) die "Unknown argument: $1 (see --help)" ;;
     esac
 done
 
-# ── Утилиты ─────────────────────────────────────────────────────────────────
+# ── Utilities ───────────────────────────────────────────────────────────────
 ask_yn() {
     local q="$1" def="${2:-n}" prompt ans
     if [[ "$ASSUME_YES" == "1" ]]; then
@@ -100,26 +100,26 @@ ask_yn() {
         case "$ans" in
             [Yy]|[Yy][Ee][Ss]) return 0 ;;
             [Nn]|[Nn][Oo])     return 1 ;;
-            *) echo "Введите y или n" ;;
+            *) echo "Enter y or n" ;;
         esac
     done
 }
 
 detect_os() {
-    [[ -f /etc/os-release ]] || die "Не найден /etc/os-release"
+    [[ -f /etc/os-release ]] || die "/etc/os-release not found"
     # shellcheck disable=SC1091
     . /etc/os-release
     case "${ID:-}" in
         ubuntu|debian) ;;
-        *) die "Поддерживаются только Ubuntu и Debian (нашёл: ${ID:-unknown})" ;;
+        *) die "Only Ubuntu and Debian are supported (found: ${ID:-unknown})" ;;
     esac
-    info "Дистрибутив: ${PRETTY_NAME:-$ID}"
+    info "Distribution: ${PRETTY_NAME:-$ID}"
 }
 
 is_wsl() { grep -qiE "microsoft|wsl" /proc/version 2>/dev/null; }
 
 require_root() {
-    [[ $EUID -eq 0 ]] || die "Запустите через sudo: sudo $0 $MODE"
+    [[ $EUID -eq 0 ]] || die "Run via sudo: sudo $0 $MODE"
 }
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -127,28 +127,28 @@ require_root() {
 # ════════════════════════════════════════════════════════════════════════════
 cmd_install() {
     detect_os
-    info "Корень репозитория: $REPO_ROOT"
+    info "Repository root: $REPO_ROOT"
 
-    # ── Артефакты ──
-    step "Проверка артефактов"
-    [[ -x "$REPO_ROOT/build/liveqx" ]]        || die "Нет build/liveqx — соберите бинарь (см. --help)"
-    [[ -x "$REPO_ROOT/build/liveqx-mountd" ]] || die "Нет build/liveqx-mountd — соберите helper"
-    [[ -d "$REPO_ROOT/ui/dist" ]]             || die "Нет ui/dist/ — соберите UI: cd ui && npm ci && npm run build"
-    [[ -f "$REPO_ROOT/config/default.json" ]] || die "Нет config/default.json"
-    [[ -f "$REPO_ROOT/packaging/liveqx.service" ]] || die "Нет packaging/liveqx.service"
-    ok "Все артефакты на месте"
+    # ── Artifacts ──
+    step "Checking artifacts"
+    [[ -x "$REPO_ROOT/build/liveqx" ]]        || die "Missing build/liveqx — build the binary (see --help)"
+    [[ -x "$REPO_ROOT/build/liveqx-mountd" ]] || die "Missing build/liveqx-mountd — build the helper"
+    [[ -d "$REPO_ROOT/ui/dist" ]]             || die "Missing ui/dist/ — build the UI: cd ui && npm ci && npm run build"
+    [[ -f "$REPO_ROOT/config/default.json" ]] || die "Missing config/default.json"
+    [[ -f "$REPO_ROOT/packaging/liveqx.service" ]] || die "Missing packaging/liveqx.service"
+    ok "All artifacts present"
 
-    # ── Apt-зависимости ──
-    # Runtime-so, к которым линкуется liveqx + liveqx-mountd.
-    # spdlog/fmt/cpp-httplib собраны статически (у них ABI между LTS нестабильный).
-    step "Системные пакеты"
-    info "Обновляю индекс apt..."
+    # ── Apt dependencies ──
+    # Runtime shared objects that liveqx + liveqx-mountd link against.
+    # spdlog/fmt/cpp-httplib are built statically (their ABI between LTS releases is unstable).
+    step "System packages"
+    info "Refreshing apt index..."
     apt-get update -qq
-    info "Устанавливаю runtime-зависимости..."
-    # libldap имя пакета меняется между дистрибутивами:
+    info "Installing runtime dependencies..."
+    # libldap package name varies between distributions:
     #   Debian 12 / Ubuntu 22.04 → libldap-2.5-0
     #   Debian 13 / Ubuntu 24.04 → libldap-2.6-0
-    # Ищем, что реально доступно в apt-cache — иначе install падает.
+    # Look up which one is actually available in apt-cache — otherwise install fails.
     LIBLDAP_PKG=""
     for cand in libldap-2.5-0 libldap-2.6-0 libldap2; do
         if apt-cache show "$cand" >/dev/null 2>&1; then
@@ -156,8 +156,8 @@ cmd_install() {
             break
         fi
     done
-    [[ -z "$LIBLDAP_PKG" ]] && die "Не найден ни один пакет libldap (пробовал: libldap-2.5-0, libldap-2.6-0, libldap2)"
-    info "Пакет libldap: $LIBLDAP_PKG"
+    [[ -z "$LIBLDAP_PKG" ]] && die "No libldap package found (tried: libldap-2.5-0, libldap-2.6-0, libldap2)"
+    info "libldap package: $LIBLDAP_PKG"
 
     apt-get install -y --no-install-recommends \
         ca-certificates curl python3 cifs-utils \
@@ -165,107 +165,107 @@ cmd_install() {
         "$LIBLDAP_PKG" libcurl4 libnss3 libgnutls30 \
         libx264-164 \
         libva2 libva-drm2 libdrm2 libmfx1 \
-        || die "apt-get install не сработал. Проверьте, что подключены репозитории universe (Ubuntu) или non-free (Debian) — там лежат libmfx1 и libx264-164."
-    ok "Все runtime-пакеты установлены"
+        || die "apt-get install failed. Check that the universe (Ubuntu) or non-free (Debian) repositories are enabled — libmfx1 and libx264-164 live there."
+    ok "All runtime packages installed"
 
-    # ── Вопросы по HW-энкодерам ──
-    step "HW-энкодеры (H.264/H.265 через GPU)"
+    # ── HW encoder prompts ──
+    step "HW encoders (H.264/H.265 via GPU)"
     cat <<EOF
-    LiveQX поддерживает три аппаратных энкодера. Отметьте те,
-    что планируете использовать. Драйверы и SDK устанавливаются
-    отдельно (вручную) — сейчас скрипт только зафиксирует выбор.
+    LiveQX supports three hardware encoders. Mark the ones
+    you plan to use. Drivers and SDKs are installed
+    separately (manually) — for now the script only records the choice.
 
 EOF
 
     USE_NVENC=0; USE_VAAPI=0; USE_QSV=0
-    ask_yn "Будете использовать NVENC (NVIDIA GPU)?" "n" && USE_NVENC=1 || true
-    ask_yn "Будете использовать VAAPI (Intel iGPU или AMD GPU)?" "n" && USE_VAAPI=1 || true
-    ask_yn "Будете использовать QSV (Intel Quick Sync Video)?" "n" && USE_QSV=1 || true
+    ask_yn "Will you use NVENC (NVIDIA GPU)?" "n" && USE_NVENC=1 || true
+    ask_yn "Will you use VAAPI (Intel iGPU or AMD GPU)?" "n" && USE_VAAPI=1 || true
+    ask_yn "Will you use QSV (Intel Quick Sync Video)?" "n" && USE_QSV=1 || true
 
-    # ── Порт Web UI + API ──
-    # Спрашиваем только при первой установке; иначе берём порт из существующего конфига.
+    # ── Web UI + API port ──
+    # Only ask on first install; otherwise pick the port from the existing config.
     API_PORT=8080
     if [[ -f "$CONF_FILE" ]]; then
         API_PORT=$(python3 -c "import json; print(json.load(open('$CONF_FILE')).get('api_port', 8080))" 2>/dev/null || echo 8080)
     elif [[ "$ASSUME_YES" != "1" ]]; then
-        step "Порт Web UI и API"
+        step "Web UI and API port"
         while true; do
-            read -r -p "${C_BLD}?${C_RST} Порт для Web UI и HTTP API [$API_PORT]: " ans || ans=""
+            read -r -p "${C_BLD}?${C_RST} Port for Web UI and HTTP API [$API_PORT]: " ans || ans=""
             ans="${ans:-$API_PORT}"
             if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= 65535 )); then
                 API_PORT="$ans"
-                (( API_PORT < 1024 )) && warn "Порт <1024 требует CAP_NET_BIND_SERVICE в юните — проверьте после старта"
+                (( API_PORT < 1024 )) && warn "Port <1024 requires CAP_NET_BIND_SERVICE in the unit — check after startup"
                 break
             fi
-            warn "Введите число от 1 до 65535"
+            warn "Enter a number between 1 and 65535"
         done
     fi
 
-    # ── Пользователь и группа ──
-    step "Системный пользователь $LIVEQX_USER"
+    # ── User and group ──
+    step "System user $LIVEQX_USER"
     if ! getent group "$LIVEQX_GROUP" >/dev/null; then
         groupadd --system "$LIVEQX_GROUP"
-        ok "Создана группа $LIVEQX_GROUP"
+        ok "Created group $LIVEQX_GROUP"
     else
-        ok "Группа $LIVEQX_GROUP уже есть"
+        ok "Group $LIVEQX_GROUP already exists"
     fi
     if ! getent passwd "$LIVEQX_USER" >/dev/null; then
         useradd --system --gid "$LIVEQX_GROUP" \
                 --home-dir "$STATE_DIR" --no-create-home \
                 --shell /usr/sbin/nologin \
                 "$LIVEQX_USER"
-        ok "Создан пользователь $LIVEQX_USER"
+        ok "Created user $LIVEQX_USER"
     else
-        ok "Пользователь $LIVEQX_USER уже есть"
+        ok "User $LIVEQX_USER already exists"
     fi
 
-    # ── Каталоги ──
-    step "Каталоги и права"
+    # ── Directories ──
+    step "Directories and permissions"
     install -d -o "$LIVEQX_USER" -g "$LIVEQX_GROUP" -m 0750 "$STATE_DIR"
     install -d -o root           -g root           -m 0755 "$CONF_DIR"
     install -d -o root           -g root           -m 0755 "$UI_DIR"
     install -d -o root           -g root           -m 0755 "$DOC_DIR"
     install -d -o root           -g root           -m 0755 "$MOUNT_ROOT"
-    ok "Каталоги созданы"
+    ok "Directories created"
 
-    # ── Бинарники ──
-    step "Бинарники → $BIN_DIR"
-    # Остановить перед копированием: иначе ETXTBSY на работающем бинаре.
+    # ── Binaries ──
+    step "Binaries → $BIN_DIR"
+    # Stop before copying: otherwise ETXTBSY on the running binary.
     if systemctl is-active --quiet liveqx 2>/dev/null; then
-        info "Останавливаю работающий liveqx..."
+        info "Stopping running liveqx..."
         systemctl stop liveqx.service        || true
         systemctl stop liveqx-mountd.service || true
     fi
     install -m 0755 "$REPO_ROOT/build/liveqx"        "$BIN_DIR/liveqx"
     install -m 0755 "$REPO_ROOT/build/liveqx-mountd" "$BIN_DIR/liveqx-mountd"
-    ok "Установлены /usr/local/bin/liveqx и liveqx-mountd"
+    ok "Installed /usr/local/bin/liveqx and liveqx-mountd"
 
-    # Проверка ldd: без неё нехватка shared library даёт бесконечный рестарт
-    # systemd без понятной причины — лучше упасть здесь с явным списком.
+    # ldd check: without it a missing shared library gives an endless systemd
+    # restart loop with no clear cause — better to fail here with an explicit list.
     local missing
     missing=$(ldd "$BIN_DIR/liveqx" 2>/dev/null | awk '/not found/ {print $1}' | sort -u || true)
     missing+=$'\n'$(ldd "$BIN_DIR/liveqx-mountd" 2>/dev/null | awk '/not found/ {print $1}' | sort -u || true)
     missing=$(echo "$missing" | grep -v '^$' | sort -u || true)
     if [[ -n "$missing" ]]; then
-        err "Не найдены shared libraries — бинарь не запустится:"
+        err "Missing shared libraries — the binary will not start:"
         echo "$missing" | sed 's/^/      /'
         echo
-        echo "  Поищите пакеты для них:"
-        echo "    apt-file search <имя_библиотеки>"
-        echo "  и установите через apt-get install."
+        echo "  Look up packages for them:"
+        echo "    apt-file search <library_name>"
+        echo "  and install via apt-get install."
         exit 1
     fi
-    ok "Все shared libraries разрешены (ldd чисто)"
+    ok "All shared libraries resolved (ldd clean)"
 
     # ── UI ──
-    step "Web-интерфейс → $UI_DIR"
+    step "Web interface → $UI_DIR"
     rm -rf "${UI_DIR:?}"/*
     cp -r "$REPO_ROOT/ui/dist/." "$UI_DIR/"
     chown -R root:root "$UI_DIR"
-    ok "UI установлен"
+    ok "UI installed"
 
-    # ── Конфиг ──
-    step "Конфигурация"
+    # ── Config ──
+    step "Configuration"
     if [[ ! -f "$CONF_FILE" ]]; then
         install -m 0644 "$REPO_ROOT/config/default.json" "$CONF_FILE"
         API_PORT="$API_PORT" python3 - "$CONF_FILE" <<'PY'
@@ -281,37 +281,37 @@ with open(p, 'w') as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
     f.write('\n')
 PY
-        ok "Создан $CONF_FILE (порт API $API_PORT)"
+        ok "Created $CONF_FILE (API port $API_PORT)"
     else
-        warn "Конфиг $CONF_FILE уже существует — не трогаю (правьте вручную при необходимости)"
+        warn "Config $CONF_FILE already exists — leaving it alone (edit manually if needed)"
     fi
 
-    # Documentation= в юнитах ссылается на эти файлы.
+    # Documentation= in the units references these files.
     for d in SYSTEMD.md MOUNTS.md AUTH.md; do
         [[ -f "$REPO_ROOT/docs/$d" ]] && install -m 0644 "$REPO_ROOT/docs/$d" "$DOC_DIR/" || true
     done
 
-    # ── Systemd-юниты ──
-    step "Systemd-юниты"
+    # ── Systemd units ──
+    step "Systemd units"
     install -m 0644 "$REPO_ROOT/packaging/liveqx.service"            "$SYSTEMD_DIR/"
     install -m 0644 "$REPO_ROOT/packaging/liveqx-mountd.service"     "$SYSTEMD_DIR/"
     install -m 0644 "$REPO_ROOT/packaging/liveqx-mount-init.service" "$SYSTEMD_DIR/"
     systemctl daemon-reload
-    ok "Юниты установлены"
+    ok "Units installed"
 
     # ── WSL2 ──
     if is_wsl; then
-        warn "Детектирован WSL2 — делаю корневой mount shared (нужно для propagation CIFS из mountd)"
-        mount --make-rshared / || warn "mount --make-rshared / не сработал; возможно ядро WSL не поддерживает — проверьте после старта"
+        warn "WSL2 detected — making the root mount shared (needed for CIFS propagation from mountd)"
+        mount --make-rshared / || warn "mount --make-rshared / failed; the WSL kernel may not support it — check after startup"
     fi
 
-    # ── Запуск ──
-    step "Запуск служб"
+    # ── Start ──
+    step "Starting services"
     systemctl enable --now liveqx-mount-init.service
     systemctl enable --now liveqx-mountd.service
     systemctl enable --now liveqx.service
 
-    info "Жду готовности liveqx (до 15с)..."
+    info "Waiting for liveqx to be ready (up to 15s)..."
     local ready=0
     for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
         sleep 1
@@ -320,77 +320,77 @@ PY
     if [[ "$ready" == "1" ]]; then
         ok "liveqx.service: active"
     else
-        err "liveqx.service не запустился"
-        echo "    Журнал:  sudo journalctl -u liveqx -n 80 --no-pager"
+        err "liveqx.service failed to start"
+        echo "    Log:  sudo journalctl -u liveqx -n 80 --no-pager"
         exit 1
     fi
 
-    # API по умолчанию в HTTPS (auto), но TLS может быть отключён — пробуем оба
-    # и запоминаем, какая схема ответила, чтобы вывести правильный URL пользователю.
+    # The API defaults to HTTPS (auto), but TLS may be disabled — try both
+    # and remember which scheme responded to print the correct URL to the user.
     local api_port api_scheme=""
     api_port=$(python3 -c "import json; print(json.load(open('$CONF_FILE')).get('api_port', 8080))" 2>/dev/null || echo 8080)
     if curl -fsSk --max-time 3 "https://localhost:${api_port}/api/health" >/dev/null 2>&1; then
         api_scheme="https"
-        ok "/api/health: OK (https, порт $api_port)"
+        ok "/api/health: OK (https, port $api_port)"
     elif curl -fsS --max-time 3 "http://localhost:${api_port}/api/health" >/dev/null 2>&1; then
         api_scheme="http"
-        ok "/api/health: OK (http, порт $api_port)"
+        ok "/api/health: OK (http, port $api_port)"
     else
-        # По умолчанию наш конфиг делает self-signed HTTPS — предполагаем https.
+        # Our default config produces self-signed HTTPS — assume https.
         api_scheme="https"
-        warn "/api/health пока не отвечает (может быть нормально для первого старта)"
+        warn "/api/health is not responding yet (may be normal for the first startup)"
     fi
 
-    # ── Финальные подсказки ──
+    # ── Final hints ──
     echo
     echo "${C_GRN}════════════════════════════════════════════════════════════════${C_RST}"
-    echo "${C_GRN}  Установка завершена${C_RST}"
+    echo "${C_GRN}  Installation complete${C_RST}"
     echo "${C_GRN}════════════════════════════════════════════════════════════════${C_RST}"
     local ip
     ip=$(hostname -I 2>/dev/null | awk '{print $1}')
     echo
     echo "  Web UI:        ${api_scheme}://${ip:-localhost}:${api_port}/"
     if [[ "$api_scheme" == "https" ]]; then
-        echo "                 ${C_YEL}(self-signed сертификат — браузер покажет предупреждение при первом входе)${C_RST}"
+        echo "                 ${C_YEL}(self-signed certificate — the browser will show a warning on first visit)${C_RST}"
     fi
-    echo "  Журнал:        sudo journalctl -u liveqx -f"
-    echo "  Статус:        systemctl status liveqx"
-    echo "  Конфиг:        $CONF_FILE"
-    echo "  Данные:        $STATE_DIR"
-    echo "  Шары:          $MOUNT_ROOT/<id>/"
+    echo "  Log:           sudo journalctl -u liveqx -f"
+    echo "  Status:        systemctl status liveqx"
+    echo "  Config:        $CONF_FILE"
+    echo "  Data:          $STATE_DIR"
+    echo "  Shares:        $MOUNT_ROOT/<id>/"
 
-    # ── Bootstrap-пароль первого админа ──
-    # Файл (0600, owner=liveqx) создаёт сервис на первом старте и авто-удаляет
-    # при первой смене пароля.
+    # ── Bootstrap password for the first admin ──
+    # The file (0600, owner=liveqx) is created by the service on first start
+    # and auto-removed on the first password change.
     local pw_file="$STATE_DIR/state/initial_admin_password.txt"
     if [[ -s "$pw_file" ]]; then
         local pw
         pw=$(cat "$pw_file")
         echo
-        echo "${C_BLD}── Логин администратора ──${C_RST}"
-        echo "  Пользователь:  admin"
-        echo "  Пароль:        ${C_GRN}${pw}${C_RST}"
-        echo "  ${C_YEL}Смените при первом входе — файл авто-удалится:${C_RST}"
+        echo "${C_BLD}── Administrator login ──${C_RST}"
+        echo "  User:          admin"
+        echo "  Password:      ${C_GRN}${pw}${C_RST}"
+        echo "  ${C_YEL}Change it on first login — the file will be auto-removed:${C_RST}"
         echo "    $pw_file"
     fi
 
-    # Зафиксированный выбор HW-энкодеров (драйверы пользователь ставит сам)
+    # Recorded HW encoder choice (the user installs the drivers themselves)
     if [[ "$USE_NVENC" == "1" || "$USE_VAAPI" == "1" || "$USE_QSV" == "1" ]]; then
         echo
-        echo "  ${C_BLD}Выбранные HW-энкодеры:${C_RST}"
+        echo "  ${C_BLD}Selected HW encoders:${C_RST}"
         [[ "$USE_NVENC" == "1" ]] && echo "    • NVENC"
         [[ "$USE_VAAPI" == "1" ]] && echo "    • VAAPI"
         [[ "$USE_QSV"   == "1" ]] && echo "    • QSV"
-        echo "    Драйверы и SDK для них установите вручную, затем:"
+        echo "    Install the drivers and SDKs for them manually, then:"
         echo "      sudo systemctl restart liveqx"
     fi
 
     echo
-    echo "${C_BLD}── Дальнейшие шаги ──${C_RST}"
-    echo "  1. Откройте Web UI и завершите начальную настройку"
-    echo "  2. Для продакшена настройте TPM2-credstore для master.key"
-    echo "     (см. комментарии в /etc/systemd/system/liveqx.service)"
-    echo "  3. CIFS-шары добавляются через UI → Настройки → Шары"
+    echo "${C_BLD}── Next steps ──${C_RST}"
+    echo "  1. Open the Web UI and finish the initial setup"
+    echo "  2. For production, configure a TPM2 credstore for master.key"
+    echo "     (see comments in /etc/systemd/system/liveqx.service)"
+    echo "  3. CIFS shares are added via UI → Settings → Shares"
     echo
 }
 
@@ -401,83 +401,83 @@ cmd_uninstall() {
     detect_os
 
     echo
-    warn "Будет удалено ВСЁ кроме apt-пакетов:"
-    echo "    • Службы:   liveqx, liveqx-mountd, liveqx-mount-init"
-    echo "    • Бинарь:   $BIN_DIR/liveqx, $BIN_DIR/liveqx-mountd"
-    echo "    • Конфиг:   $CONF_DIR/  (включая config.json)"
-    echo "    • Данные:   $STATE_DIR/ (БД, master.key, состояние каналов)"
+    warn "EVERYTHING except apt packages will be removed:"
+    echo "    • Services: liveqx, liveqx-mountd, liveqx-mount-init"
+    echo "    • Binary:   $BIN_DIR/liveqx, $BIN_DIR/liveqx-mountd"
+    echo "    • Config:   $CONF_DIR/  (including config.json)"
+    echo "    • Data:     $STATE_DIR/ (DB, master.key, channel state)"
     echo "    • UI:       $UI_DIR/"
-    echo "    • Доки:     $DOC_DIR/"
-    echo "    • Юниты:    $SYSTEMD_DIR/liveqx*.service + динамические mnt-liveqx-*.{mount,automount}"
-    echo "    • Шары:     размонтирование $MOUNT_ROOT/* и удаление каталога"
-    echo "    • Юзер:     $LIVEQX_USER, группа $LIVEQX_GROUP"
+    echo "    • Docs:     $DOC_DIR/"
+    echo "    • Units:    $SYSTEMD_DIR/liveqx*.service + dynamic mnt-liveqx-*.{mount,automount}"
+    echo "    • Shares:   unmount $MOUNT_ROOT/* and remove the directory"
+    echo "    • User:     $LIVEQX_USER, group $LIVEQX_GROUP"
     echo "    • Runtime:  $RUNTIME_DIR/"
     echo
-    echo "    apt-пакеты (cifs-utils, libsrtp2-1, nvidia-driver, ...) НЕ удаляются."
+    echo "    apt packages (cifs-utils, libsrtp2-1, nvidia-driver, ...) are NOT removed."
     echo
 
-    if ! ask_yn "Точно удалить?" "n"; then
-        info "Отмена"; exit 0
+    if ! ask_yn "Really remove?" "n"; then
+        info "Cancelled"; exit 0
     fi
 
-    step "Остановка служб"
+    step "Stopping services"
     for u in liveqx liveqx-mountd liveqx-mount-init; do
         systemctl stop    "$u.service" 2>/dev/null || true
         systemctl disable "$u.service" 2>/dev/null || true
     done
 
-    # Динамические юниты шар (создаются mountd'ом)
-    info "Останавливаю динамические mount-юниты..."
+    # Dynamic share units (created by mountd)
+    info "Stopping dynamic mount units..."
     while IFS= read -r u; do
         [[ -z "$u" ]] && continue
         systemctl stop    "$u" 2>/dev/null || true
         systemctl disable "$u" 2>/dev/null || true
     done < <(systemctl list-unit-files --no-legend 'mnt-liveqx-*' 2>/dev/null | awk '{print $1}')
 
-    step "Размонтирование $MOUNT_ROOT"
+    step "Unmounting $MOUNT_ROOT"
     if mountpoint -q "$MOUNT_ROOT" 2>/dev/null; then
-        # Сначала отмонтировать вложенные точки (если есть CIFS)
+        # Unmount nested mountpoints first (if there are any CIFS mounts)
         awk -v root="$MOUNT_ROOT/" '$2 ~ "^"root {print $2}' /proc/mounts | tac | while read -r mp; do
             umount "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || true
         done
         umount "$MOUNT_ROOT" 2>/dev/null || umount -l "$MOUNT_ROOT" 2>/dev/null || true
     fi
 
-    step "Удаление юнитов"
+    step "Removing units"
     rm -f "$SYSTEMD_DIR/liveqx.service" \
           "$SYSTEMD_DIR/liveqx-mountd.service" \
           "$SYSTEMD_DIR/liveqx-mount-init.service"
-    # Динамические шары
+    # Dynamic shares
     rm -f "$SYSTEMD_DIR"/mnt-liveqx-*.mount     2>/dev/null || true
     rm -f "$SYSTEMD_DIR"/mnt-liveqx-*.automount 2>/dev/null || true
     systemctl daemon-reload
     systemctl reset-failed 2>/dev/null || true
 
-    step "Удаление бинарников"
+    step "Removing binaries"
     rm -f "$BIN_DIR/liveqx" "$BIN_DIR/liveqx-mountd"
 
-    step "Удаление данных, конфигов, UI"
+    step "Removing data, configs, UI"
     rm -rf "$STATE_DIR" "$CONF_DIR" "$UI_DIR" "$DOC_DIR" "$RUNTIME_DIR"
 
-    # Каталог /mnt/liveqx — пустой после umount, удаляем
+    # /mnt/liveqx directory — empty after umount, remove it
     if [[ -d "$MOUNT_ROOT" ]]; then
-        rmdir "$MOUNT_ROOT" 2>/dev/null || warn "$MOUNT_ROOT не пустой — не удалён"
+        rmdir "$MOUNT_ROOT" 2>/dev/null || warn "$MOUNT_ROOT is not empty — not removed"
     fi
-    # Родитель /usr/share/liveqx если пуст
+    # Parent /usr/share/liveqx if empty
     [[ -d /usr/share/liveqx ]] && rmdir /usr/share/liveqx 2>/dev/null || true
 
-    step "Удаление пользователя и группы"
+    step "Removing user and group"
     if getent passwd "$LIVEQX_USER" >/dev/null; then
-        userdel "$LIVEQX_USER" 2>/dev/null || warn "userdel $LIVEQX_USER вернул ошибку (возможно есть открытые процессы)"
+        userdel "$LIVEQX_USER" 2>/dev/null || warn "userdel $LIVEQX_USER returned an error (there may be open processes)"
     fi
     if getent group "$LIVEQX_GROUP" >/dev/null; then
-        groupdel "$LIVEQX_GROUP" 2>/dev/null || warn "groupdel $LIVEQX_GROUP вернул ошибку"
+        groupdel "$LIVEQX_GROUP" 2>/dev/null || warn "groupdel $LIVEQX_GROUP returned an error"
     fi
 
     echo
-    ok "Полное удаление завершено"
+    ok "Full removal complete"
     echo
-    echo "  apt-пакеты оставлены установленными. При желании удалить вручную:"
+    echo "  apt packages left installed. To remove them manually if desired:"
     echo "    sudo apt-get autoremove --purge cifs-utils libsrtp2-1"
     echo
 }
@@ -488,24 +488,24 @@ cmd_uninstall() {
 cmd_check() {
     detect_os
     echo
-    info "Состояние установки LiveQX"
+    info "LiveQX installation state"
 
-    step "Пользователь и группа"
-    getent passwd "$LIVEQX_USER" >/dev/null && ok "user $LIVEQX_USER" || err "user $LIVEQX_USER отсутствует"
-    getent group  "$LIVEQX_GROUP" >/dev/null && ok "group $LIVEQX_GROUP" || err "group $LIVEQX_GROUP отсутствует"
+    step "User and group"
+    getent passwd "$LIVEQX_USER" >/dev/null && ok "user $LIVEQX_USER" || err "user $LIVEQX_USER is missing"
+    getent group  "$LIVEQX_GROUP" >/dev/null && ok "group $LIVEQX_GROUP" || err "group $LIVEQX_GROUP is missing"
 
-    step "Файлы"
-    [[ -x "$BIN_DIR/liveqx" ]]        && ok "$BIN_DIR/liveqx"        || err "нет $BIN_DIR/liveqx"
-    [[ -x "$BIN_DIR/liveqx-mountd" ]] && ok "$BIN_DIR/liveqx-mountd" || err "нет $BIN_DIR/liveqx-mountd"
-    [[ -f "$CONF_FILE" ]]             && ok "$CONF_FILE"             || err "нет $CONF_FILE"
-    [[ -d "$STATE_DIR" ]]             && ok "$STATE_DIR"              || err "нет $STATE_DIR"
+    step "Files"
+    [[ -x "$BIN_DIR/liveqx" ]]        && ok "$BIN_DIR/liveqx"        || err "missing $BIN_DIR/liveqx"
+    [[ -x "$BIN_DIR/liveqx-mountd" ]] && ok "$BIN_DIR/liveqx-mountd" || err "missing $BIN_DIR/liveqx-mountd"
+    [[ -f "$CONF_FILE" ]]             && ok "$CONF_FILE"             || err "missing $CONF_FILE"
+    [[ -d "$STATE_DIR" ]]             && ok "$STATE_DIR"              || err "missing $STATE_DIR"
     if [[ -d "$UI_DIR" ]] && [[ -n "$(ls -A "$UI_DIR" 2>/dev/null)" ]]; then
-        ok "$UI_DIR (есть файлы)"
+        ok "$UI_DIR (has files)"
     else
-        err "UI пустой или отсутствует"
+        err "UI is empty or missing"
     fi
 
-    step "Systemd-юниты"
+    step "Systemd units"
     for u in liveqx-mount-init liveqx-mountd liveqx; do
         if [[ -f "$SYSTEMD_DIR/$u.service" ]]; then
             local state
@@ -516,15 +516,15 @@ cmd_check() {
                 warn "$u.service: $state"
             fi
         else
-            err "$u.service: юнит не установлен"
+            err "$u.service: unit not installed"
         fi
     done
 
     step "Mount propagation"
     if mountpoint -q "$MOUNT_ROOT" 2>/dev/null; then
-        ok "$MOUNT_ROOT: bind-mount активен"
+        ok "$MOUNT_ROOT: bind-mount active"
     else
-        warn "$MOUNT_ROOT: не bind-mount (liveqx-mount-init не отработал?)"
+        warn "$MOUNT_ROOT: not a bind-mount (did liveqx-mount-init run?)"
     fi
 
     step "HTTP health"
@@ -532,18 +532,18 @@ cmd_check() {
     [[ -f "$CONF_FILE" ]] && api_port=$(python3 -c "import json; print(json.load(open('$CONF_FILE')).get('api_port', 8080))" 2>/dev/null || echo 8080)
     if curl -fsSk --max-time 3 "https://localhost:${api_port}/api/health" >/dev/null 2>&1 \
        || curl -fsS  --max-time 3 "http://localhost:${api_port}/api/health"  >/dev/null 2>&1; then
-        ok "/api/health отвечает на порту $api_port"
+        ok "/api/health responds on port $api_port"
     else
-        err "/api/health не отвечает на порту $api_port"
+        err "/api/health does not respond on port $api_port"
     fi
     echo
 }
 
-# ── Диспетчер ───────────────────────────────────────────────────────────────
+# ── Dispatcher ──────────────────────────────────────────────────────────────
 require_root
 case "$MODE" in
     install)   cmd_install ;;
     uninstall) cmd_uninstall ;;
     check)     cmd_check ;;
-    *)         die "Неизвестный режим: $MODE" ;;
+    *)         die "Unknown mode: $MODE" ;;
 esac

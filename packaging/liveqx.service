@@ -3,33 +3,33 @@ Description=LiveQX Engine
 Documentation=file:/usr/share/doc/liveqx/SYSTEMD.md
 After=network-online.target liveqx-mountd.service
 Wants=network-online.target liveqx-mountd.service
-# fix42: helper-демон управляет AF_UNIX-сокетом /run/liveqx/mountd.sock,
-# а его unit-файл объявляет PartOf=liveqx.service — это даёт
-# двустороннюю связку по stop/restart. Но PartOf не тянет helper при
-# START основного сервиса, поэтому `systemctl restart liveqx`
-# после стопа оставлял mountd мёртвым (см. журнал 2026-05-22 23:51).
-# Wants= закрывает: старт liveqx теперь автоматически поднимает
-# helper. After= гарантирует, что сокет существует к моменту вызова
-# MountManager::reconcile().
+# fix42: the helper daemon owns the AF_UNIX socket /run/liveqx/mountd.sock,
+# and its unit file declares PartOf=liveqx.service — this gives a
+# bidirectional stop/restart link. But PartOf= does not pull the helper up
+# when the main service STARTS, so `systemctl restart liveqx`
+# after a stop left mountd dead (see log 2026-05-22 23:51).
+# Wants= closes the gap: starting liveqx now automatically brings the
+# helper up. After= guarantees the socket exists by the time
+# MountManager::reconcile() is called.
 
 [Service]
 Type=notify
 NotifyAccess=main
-# fix41: указываем конфиг ЯВНО. Без --config бинарь ищет относительный
-# `config/default.json` от WorkingDirectory, и при FHS-инсталле этот
-# файл не существует — бинарь молча стартует с пустым конфигом и
-# падает в headless mode (ui_dir пустой, etc.). Прод-конфиг по FHS
-# лежит в /etc/liveqx/config.json.
+# fix41: pass the config EXPLICITLY. Without --config the binary looks up
+# a relative `config/default.json` from WorkingDirectory, and under an
+# FHS install that file does not exist — the binary silently starts with
+# an empty config and falls into headless mode (empty ui_dir, etc.).
+# The production FHS config lives at /etc/liveqx/config.json.
 ExecStart=/usr/local/bin/liveqx --config /etc/liveqx/config.json
 WorkingDirectory=/var/lib/liveqx
 Restart=on-failure
 RestartSec=5s
 
-# fix41: liveqx ходит к liveqx-mountd за привилегиями.
-# Helper аутентифицирует клиента по членству в группе `liveqx`
-# (см. RpcServer::authorizePeer), поэтому daemon обязан бежать под этим
-# юзером — иначе либо рушится модель разделения привилегий (root↔helper),
-# либо peer не пройдёт авторизацию сокета.
+# fix41: liveqx calls into liveqx-mountd for privileged operations.
+# The helper authenticates the client by membership in the `liveqx` group
+# (see RpcServer::authorizePeer), so the daemon must run as this user —
+# otherwise either the privilege-separation model (root↔helper) breaks,
+# or the peer fails socket authorization.
 User=liveqx
 Group=liveqx
 
@@ -46,17 +46,17 @@ ProtectSystem=full
 PrivateTmp=true
 NoNewPrivileges=true
 
-# fix44 c4: ReadWritePaths/ProtectSystem/PrivateTmp неявно включают
-# PrivateMounts=true, и дефолтный MountFlags=private изолирует процесс
-# от mount-событий, происходящих в системном namespace ПОСЛЕ его старта.
-# liveqx-mountd (root) монтирует CIFS-шары динамически по запросу
-# из UI — без MountFlags=slave эти mount'ы никогда не появляются в
-# namespace liveqx, и Watcher видит autofs-заглушку без CIFS под
-# ней (UI: «Файлов в кэше: 0»).
+# fix44 c4: ReadWritePaths/ProtectSystem/PrivateTmp implicitly enable
+# PrivateMounts=true, and the default MountFlags=private isolates the
+# process from mount events that happen in the system namespace AFTER it
+# starts. liveqx-mountd (root) mounts CIFS shares dynamically on request
+# from the UI — without MountFlags=slave those mounts never appear in
+# the liveqx namespace, and the Watcher sees an autofs stub with no CIFS
+# under it (UI: "Files cached: 0").
 #
-# slave даёт однонаправленную пропагацию извне внутрь (то что нужно), и
-# изменения изнутри не утекают наружу — песочница сохраняется. shared
-# был бы избыточным: liveqx не вызывает mount(2).
+# slave gives one-way propagation from outside in (which is what we need),
+# and changes from the inside do not leak outward — the sandbox is kept.
+# shared would be overkill: liveqx does not call mount(2).
 MountFlags=slave
 
 # ── Master-key delivery via systemd-creds (production recommendation) ──────
