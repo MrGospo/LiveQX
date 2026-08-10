@@ -1,0 +1,18 @@
+/* LiveQX — design tokens (dark only, MVP) */
+:root {
+  --bg-canvas:      #1f1f1e;
+  --bg-surface:     #252524;
+  --bg-surface-2:   #2c2c2a;
+  --border-subtle:  #424240;
+  --text-primary:   #d4d6d9;
+  --text-muted:     #8a8c8f;
+  --accent:         #4f9cd9;
+  --accent-hover:   #65aee5;
+  --success:        #4ade80;
+  --warning:        #facc15;
+  --danger:         #f87171;
+  --info:           #60a5fa;
+
+  --sidebar-w:  220px;
+  --topbar-h:   56px;
+}
