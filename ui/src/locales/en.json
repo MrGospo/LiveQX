@@ -109,7 +109,6 @@
       "outputs": "Outputs",
       "recentEvents": "Recent events"
     },
-    "addContentSource": "Add content source",
     "createStep1": "Channel basics",
     "createStep2": "Output destinations",
     "createSubmit": "Create channel",
@@ -190,6 +189,9 @@
       "modeNone": "— off —",
       "modePassthrough": "Passthrough",
       "modeCache": "Cache",
+      "modeNoneHint": "Channel doesn't read files from disk. Plays only the live source — e.g. a transcoded SRT relay.",
+      "modePassthroughHint": "Files are read straight from the given directory. New files appear instantly, but a share outage takes the channel offline.",
+      "modeCacheHint": "Background daemon syncs share → local cache; the channel plays from cache. Resilient to network drops, but consumes disk space.",
       "sinkNone": "None",
       "sinkFile": "File",
       "sinkDb": "SQLite",

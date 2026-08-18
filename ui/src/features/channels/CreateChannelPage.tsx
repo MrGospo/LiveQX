@@ -33,7 +33,13 @@ const createChannelSchema = z.object({
     .default('veryfast'),
   default_photo_duration: z.coerce.number().min(0.1).default(10),
   fallback_image_path: z.string().optional(),
-  share_path: z.string().optional(),
+  // Content source: mode picks payload shape (see buildContentSource). Paths
+  // are per-mode — passthrough uses source_path; cache uses share_path + optional
+  // cache_path (backend auto-resolves cache_path when empty).
+  content_mode: z.enum(['none', 'passthrough', 'cache']).default('none'),
+  content_source_path: z.string().default(''),
+  content_share_path: z.string().default(''),
+  content_cache_path: z.string().default(''),
   scan_interval_ms: z.coerce.number().int().min(100).default(2000),
   // First output
   output_type: z.enum(['srt', 'multicast', 'rtmp', 'hls']).default('srt'),
@@ -79,7 +85,8 @@ export default function CreateChannelPage() {
       resolution: '1920x1080', fps: 25, bitrate_kbps: 4000, preset: 'veryfast',
       default_photo_duration: 10,
       fallback_image_path: '',
-      share_path: '', scan_interval_ms: 2000,
+      content_mode: 'none', content_source_path: '', content_share_path: '', content_cache_path: '',
+      scan_interval_ms: 2000,
       output_type: 'srt', output_id: 'main', output_address: '0.0.0.0',
       output_port: 4000, output_url: '', output_dir: '',
       output_bind_address: '', output_ttl: 16,
@@ -88,12 +95,17 @@ export default function CreateChannelPage() {
   });
 
   const outputType   = watch('output_type');
-  const sharePath    = watch('share_path');
   const outputDir    = watch('output_dir');
   const fallbackPath = watch('fallback_image_path');
   const outputBind   = watch('output_bind_address');
   const logSink      = watch('log_sink');
-  const [pickerFor, setPickerFor] = React.useState<'share_path' | 'output_dir' | null>(null);
+  const contentMode  = watch('content_mode');
+  const contentSrc   = watch('content_source_path');
+  const contentShare = watch('content_share_path');
+  const contentCache = watch('content_cache_path');
+  const [pickerFor, setPickerFor] = React.useState<
+    'content_source_path' | 'content_share_path' | 'content_cache_path' | 'output_dir' | null
+  >(null);
   const [filePickerFor, setFilePickerFor] = React.useState<'fallback_image_path' | null>(null);
 
   // NIC dropdown source for the first output. Mirrors OutputFormModal: skip
@@ -109,6 +121,23 @@ export default function CreateChannelPage() {
     }
     return live;
   }, [nics.data, outputBind]);
+
+  // Build content_source block. Backend infers mode from which fields are
+  // present, so we send the minimal shape per mode. Empty cache_path in
+  // 'cache' mode is intentional — backend auto-resolves to {channel_dir}/cache.
+  const buildContentSource = (v: FormValues): Record<string, unknown> | null => {
+    if (v.content_mode === 'none') return null;
+    if (v.content_mode === 'passthrough') {
+      if (!v.content_source_path) return null;
+      return { source_path: v.content_source_path, scan_interval_ms: v.scan_interval_ms };
+    }
+    if (!v.content_share_path) return null;
+    return {
+      share_path: v.content_share_path,
+      ...(v.content_cache_path ? { cache_path: v.content_cache_path } : {}),
+      scan_interval_ms: v.scan_interval_ms,
+    };
+  };
 
   const buildOutput = (v: FormValues) => {
     const base: Record<string, unknown> = { id: v.output_id, type: v.output_type, enabled: true };
@@ -129,9 +158,10 @@ export default function CreateChannelPage() {
   const onSubmit = handleSubmit(
     async (v) => {
       try {
-        // ChannelConfigRequest — плоский: ChannelInstance::buildLongLived
-        // читает resolution/fps/bitrate/preset/encoder_mode/gpu_index с
-        // верхнего уровня. bitrate в backend — bits/sec, не kbps.
+        // ChannelConfigRequest is flat: ChannelInstance::buildLongLived reads
+        // resolution/fps/bitrate/preset/encoder_mode/gpu_index from the top
+        // level. Backend expects bitrate in bits/sec, not kbps.
+        const contentSource = buildContentSource(v);
         const payload = {
           name: v.name,
           numa_node: v.numa_node,
@@ -143,7 +173,7 @@ export default function CreateChannelPage() {
           bitrate: v.bitrate_kbps * 1000,
           default_photo_duration: v.default_photo_duration,
           ...(v.fallback_image_path ? { fallback: { image_path: v.fallback_image_path } } : {}),
-          ...(v.share_path ? { content_source: { share_path: v.share_path, scan_interval_ms: v.scan_interval_ms } } : {}),
+          ...(contentSource ? { content_source: contentSource } : {}),
           ...(v.log_sink !== 'none'
             ? { playback_log: v.log_sink === 'db'
                 ? { sink: 'db', retention_days: v.log_retention_days }
@@ -264,16 +294,62 @@ export default function CreateChannelPage() {
                 {errors.default_photo_duration && <p className={errCls}>{errors.default_photo_duration.message}</p>}
               </div>
 
-              <div className="col-span-2">
-                <label className={`${labelCls} flex items-center gap-2 mb-2`}>
-                  <input type="checkbox" id="has_share" /> {t('channels.addContentSource')}
-                </label>
-                <div className="flex gap-2">
-                  <input {...register('share_path')} className={inputCls} placeholder="/mnt/share/sport" />
-                  <button type="button" onClick={() => setPickerFor('share_path')}
-                    className="flex items-center gap-1 px-3 py-2 text-sm border border-[var(--border-subtle)] rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors whitespace-nowrap">
-                    <Folder size={14} /> {t('folderPicker.openButton')}
-                  </button>
+              <div className="col-span-2 border-t border-[var(--border-subtle)] pt-4 mt-1">
+                <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
+                  {t('channels.config.secContent')}
+                </h3>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="flex flex-col gap-1">
+                    <label className={labelCls}>{t('channels.config.fieldContentMode')}</label>
+                    <select {...register('content_mode')} className={inputCls}>
+                      <option value="none">{t('channels.config.modeNone')}</option>
+                      <option value="passthrough">{t('channels.config.modePassthrough')}</option>
+                      <option value="cache">{t('channels.config.modeCache')}</option>
+                    </select>
+                    <p className="text-xs text-[var(--text-muted)]">
+                      {contentMode === 'passthrough'
+                        ? t('channels.config.modePassthroughHint')
+                        : contentMode === 'cache'
+                          ? t('channels.config.modeCacheHint')
+                          : t('channels.config.modeNoneHint')}
+                    </p>
+                  </div>
+                  {contentMode === 'passthrough' && (
+                    <div className="col-span-2 flex flex-col gap-1">
+                      <label className={labelCls}>{t('channels.config.fieldContentSource')}</label>
+                      <div className="flex gap-2">
+                        <input {...register('content_source_path')} className={inputCls} placeholder="/mnt/share/sport" />
+                        <button type="button" onClick={() => setPickerFor('content_source_path')}
+                          className="flex items-center gap-1 px-3 py-2 text-sm border border-[var(--border-subtle)] rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors whitespace-nowrap">
+                          <Folder size={14} /> {t('folderPicker.openButton')}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {contentMode === 'cache' && (
+                    <>
+                      <div className="col-span-2 flex flex-col gap-1">
+                        <label className={labelCls}>{t('channels.config.fieldContentSource')}</label>
+                        <div className="flex gap-2">
+                          <input {...register('content_share_path')} className={inputCls} placeholder="/mnt/share/sport" />
+                          <button type="button" onClick={() => setPickerFor('content_share_path')}
+                            className="flex items-center gap-1 px-3 py-2 text-sm border border-[var(--border-subtle)] rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors whitespace-nowrap">
+                            <Folder size={14} /> {t('folderPicker.openButton')}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="col-span-2 flex flex-col gap-1">
+                        <label className={labelCls}>{t('channels.config.fieldContentCache')}</label>
+                        <div className="flex gap-2">
+                          <input {...register('content_cache_path')} className={inputCls} placeholder="/var/lib/liveqx/cache/sport" />
+                          <button type="button" onClick={() => setPickerFor('content_cache_path')}
+                            className="flex items-center gap-1 px-3 py-2 text-sm border border-[var(--border-subtle)] rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors whitespace-nowrap">
+                            <Folder size={14} /> {t('folderPicker.openButton')}
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -422,7 +498,12 @@ export default function CreateChannelPage() {
 
       {pickerFor && (
         <FolderPickerModal
-          initialPath={(pickerFor === 'share_path' ? sharePath : outputDir) || '/'}
+          initialPath={
+            (pickerFor === 'content_source_path' ? contentSrc
+              : pickerFor === 'content_share_path' ? contentShare
+              : pickerFor === 'content_cache_path' ? contentCache
+              : outputDir) || '/'
+          }
           onSelect={(p) => { setValue(pickerFor, p, { shouldValidate: true }); setPickerFor(null); }}
           onCancel={() => setPickerFor(null)}
         />

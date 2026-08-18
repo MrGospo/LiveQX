@@ -1256,7 +1256,7 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
         : '';
   const baseCachePath   =
     ch.content_source && 'cache_path' in ch.content_source ? ch.content_source.cache_path : '';
-  const basePlaybackSink = ch.playback_log?.sink ?? '';
+  const basePlaybackSink = ch.playback_log?.sink ?? 'none';
   const basePlaybackRetention =
     ch.playback_log?.retention_days != null ? String(ch.playback_log.retention_days) : '';
   // default_transition surface (см. fix48): backend всегда отдаёт type/duration/easing.
@@ -1679,6 +1679,13 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
                   <option value="passthrough">{t('channels.config.modePassthrough')}</option>
                   <option value="cache">{t('channels.config.modeCache')}</option>
                 </select>
+                <p className="text-xs text-[var(--text-muted)] mt-1">
+                  {csMode === 'passthrough'
+                    ? t('channels.config.modePassthroughHint')
+                    : csMode === 'cache'
+                      ? t('channels.config.modeCacheHint')
+                      : t('channels.config.modeNoneHint')}
+                </p>
               </Field>
               {csMode !== 'none' && (
                 <Field label={t('channels.config.fieldContentSource')} span={2}>
@@ -1726,13 +1733,19 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
                 <select value={sinkType} onChange={e => setSinkType(e.target.value)}
                   disabled={!isStopped}
                   className={`${selectCls} ${!isStopped ? 'opacity-60 cursor-not-allowed' : ''}`}>
-                  <option value="">{t('common.none')}</option>
                   {SINK_TYPES.map(s => <option key={s} value={s}>
                     {s === 'none' ? t('channels.config.sinkNone')
                      : s === 'file' ? t('channels.config.sinkFile')
                      : t('channels.config.sinkDb')}
                   </option>)}
                 </select>
+                <p className="text-xs text-[var(--text-muted)] mt-1">
+                  {sinkType === 'file'
+                    ? t('channels.config.sinkFileHint')
+                    : sinkType === 'db'
+                      ? t('channels.config.sinkDbHint')
+                      : t('channels.config.sinkNoneHint')}
+                </p>
               </Field>
               {sinkType === 'db' && (
                 <Field label={t('channels.config.fieldRetentionDays')}>
