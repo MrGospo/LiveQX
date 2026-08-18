@@ -69,10 +69,10 @@ else()
     pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
         libavformat libavcodec libavutil libswscale libswresample libavfilter)
 endif()
-# cpp-httplib — header-only HTTP-сервер. Раньше брался из apt
-# (libcpp-httplib0.14t64), но SO-имя меняется между релизами Ubuntu
-# (на 22.04 пакета вообще нет). Тянем sources через FetchContent —
-# заголовочный target, ничего не линкуется.
+# cpp-httplib — header-only HTTP server. Was previously pulled from apt
+# (libcpp-httplib0.14t64), but the SO name changes between Ubuntu releases
+# (22.04 has no such package at all). Fetch sources via FetchContent —
+# header-only target, nothing to link.
 FetchContent_Declare(cpp-httplib
     GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
     GIT_TAG        v0.15.3
@@ -82,18 +82,18 @@ FetchContent_Declare(cpp-httplib
 set(HTTPLIB_COMPILE OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(cpp-httplib)
 
-# spdlog + fmt — статически, чтобы бинарь не зависел от SO-версии
-# libspdlog/libfmt в дистрибутиве. Ubuntu 22.04: libspdlog1.10/libfmt8,
-# 24.04: libspdlog1.12/libfmt9 — несовместимо при кросс-таргет деплое.
-# SPDLOG_FMT_EXTERNAL=OFF (дефолт): встроенный fmt из подмодуля,
-# собирается в составе libspdlog.a, ничего наружу не торчит.
+# spdlog + fmt — static, so the binary is independent of the distro's
+# libspdlog/libfmt SO version. Ubuntu 22.04: libspdlog1.10/libfmt8,
+# 24.04: libspdlog1.12/libfmt9 — incompatible for cross-target deploys.
+# SPDLOG_FMT_EXTERNAL=OFF (default): bundled fmt from a submodule, built
+# into libspdlog.a, nothing exposed externally.
 #
-# ВАЖНО: ПРИКОЛОЧЕНО к v1.13.0. На v1.14.x glibc регрессит на
-# pthread_mutex assertion при логгинге из FFmpeg/x264-потоков
-# (см. PreviewIntegration tests — стабильно падают с
-# "Fatal glibc error: pthread_mutex_lock.c:94"). Похоже, в 1.14
-# поменялось поведение default sink mutex при reentry из callback'ов.
-# Перед апгрейдом проверьте ctest -R PreviewIntegration.
+# IMPORTANT: PINNED to v1.13.0. On v1.14.x glibc regresses with a
+# pthread_mutex assertion when logging from FFmpeg / x264 threads
+# (see PreviewIntegration tests — they consistently fail with
+# "Fatal glibc error: pthread_mutex_lock.c:94"). Looks like 1.14
+# changed the default sink mutex behaviour on reentry from callbacks.
+# Before upgrading, run ctest -R PreviewIntegration.
 set(SPDLOG_BUILD_SHARED  OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
@@ -107,21 +107,21 @@ FetchContent_Declare(spdlog
 )
 FetchContent_MakeAvailable(spdlog)
 
-# nlohmann_json, GTest — системные пакеты (apt). Стабильный ABI между
-# релизами, header-only / стандартный test framework.
+# nlohmann_json, GTest — system packages (apt). Stable ABI across
+# releases; header-only / standard test framework.
 find_package(nlohmann_json REQUIRED)
 find_package(GTest REQUIRED)
 
-# SQLite3 — системный пакет
+# SQLite3 — system package
 find_package(SQLite3 REQUIRED)
 
 # libsodium — fix22: argon2id + crypto_secretbox + randombytes.
-# Поставляется в apt как libsodium-dev, экспортирует .pc-файл.
+# Shipped in apt as libsodium-dev, exports a .pc file.
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
 
-# OpenLDAP client — fix22 c16/24: search+bind для LDAP-аутентификации.
-# Apt-пакет libldap2-dev. Линкуем напрямую -lldap -llber через imported
-# target — pkg-config-файла стабильного у openldap нет на ubuntu 24.04.
+# OpenLDAP client — fix22 c16/24: search+bind for LDAP authentication.
+# Apt package libldap2-dev. We link -lldap -llber directly via an
+# imported target — openldap has no stable pkg-config file on ubuntu 24.04.
 find_library(LDAP_LIB    NAMES ldap   REQUIRED)
 find_library(LBER_LIB    NAMES lber   REQUIRED)
 find_path   (LDAP_INC    NAMES ldap.h REQUIRED)
@@ -129,16 +129,16 @@ add_library(openldap_client INTERFACE)
 target_include_directories(openldap_client INTERFACE ${LDAP_INC})
 target_link_libraries     (openldap_client INTERFACE ${LDAP_LIB} ${LBER_LIB})
 
-# OpenSSL — нужен и libsrt'у (USE_OPENSSL=ON), и jwt-cpp'у (HS256
-# через HMAC-SHA256). Один find_package хватает обоим.
+# OpenSSL — needed by both libsrt (USE_OPENSSL=ON) and jwt-cpp (HS256
+# via HMAC-SHA256). A single find_package covers both.
 find_package(OpenSSL REQUIRED)
 
-# libcurl — fix22 c23/24: SMTP transport для notifications. Apt-пакет
-# libcurl4-openssl-dev. CURL::libcurl — стандартный imported target.
+# libcurl — fix22 c23/24: SMTP transport for notifications. Apt package
+# libcurl4-openssl-dev. CURL::libcurl — the standard imported target.
 find_package(CURL REQUIRED)
 
-# jwt-cpp — header-only HS256 wrapper (fix22 commit 4). Подтягивается
-# через FetchContent, без install + без тестов.
+# jwt-cpp — header-only HS256 wrapper (fix22 commit 4). Pulled in via
+# FetchContent, install and tests disabled.
 set(JWT_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(JWT_DISABLE_BASE64 OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(jwt-cpp
@@ -149,12 +149,13 @@ FetchContent_Declare(jwt-cpp
 )
 FetchContent_MakeAvailable(jwt-cpp)
 
-# Howard Hinnant date/tz — переносимый C++20 tzdb. libstdc++ 12 (Debian 12,
-# Ubuntu 22.04) не имеет std::chrono::time_zone/locate_zone/to_local/to_sys,
-# а Scheduler.cpp и TimeConfig.cpp опираются на IANA tzdata. Вендоримся,
-# чтобы одна сборка ехала на GCC 12/13/14 без плясок с backports/PPA.
-# USE_SYSTEM_TZ_DB=ON — читаем /usr/share/zoneinfo (пакет tzdata стоит по
-# умолчанию на любой Debian/Ubuntu). HAS_REMOTE_API=0 отрубает curl-fallback.
+# Howard Hinnant date/tz — portable C++20 tzdb. libstdc++ 12 (Debian 12,
+# Ubuntu 22.04) lacks std::chrono::time_zone/locate_zone/to_local/to_sys,
+# and Scheduler.cpp / TimeConfig.cpp rely on IANA tzdata. Vendor it so a
+# single build works on GCC 12/13/14 without backports/PPA gymnastics.
+# USE_SYSTEM_TZ_DB=ON — read /usr/share/zoneinfo (the tzdata package is
+# installed by default on any Debian/Ubuntu). HAS_REMOTE_API=0 disables
+# the curl-based fallback.
 set(BUILD_TZ_LIB       ON  CACHE BOOL   "" FORCE)
 set(USE_SYSTEM_TZ_DB   ON  CACHE BOOL   "" FORCE)
 set(HAS_REMOTE_API     0   CACHE STRING "" FORCE)
@@ -166,19 +167,19 @@ FetchContent_Declare(hinnant_date
 )
 FetchContent_MakeAvailable(hinnant_date)
 
-# libdatachannel — fix23 commit 6: WebRTC peer connections для preview.
-# Опциональная зависимость: тяжёлая (libsrtp2/usrsctp/libjuice/plog) и
-# требует libsrtp2-dev из apt + OpenSSL уже подтянут SRT'ом. Прод-сборки
-# без preview-функционала собирают с -DENABLE_WEBRTC_PREVIEW=OFF и не
-# платят за дополнительные ~30s билд-таймы.
+# libdatachannel — fix23 commit 6: WebRTC peer connections for preview.
+# Optional dependency: heavy (libsrtp2/usrsctp/libjuice/plog) and
+# requires libsrtp2-dev from apt; OpenSSL is already pulled in by SRT.
+# Prod builds without the preview feature use -DENABLE_WEBRTC_PREVIEW=OFF
+# and don't pay the extra ~30s of build time.
 option(ENABLE_WEBRTC_PREVIEW
        "Build libdatachannel-based WebRTC preview pipeline (fix23)" OFF)
 if(ENABLE_WEBRTC_PREVIEW)
-    # libdatachannel вендорит usrsctp / libjuice / plog, а libsrtp2 собирает
-    # сам (USE_SYSTEM_SRTP=OFF): его FindlibSRTP.cmake ищет `srtp/srtp.h`,
-    # а Debian/Ubuntu кладут заголовки в `/usr/include/srtp2/`, из-за чего
-    # find_package падает несмотря на установленный libsrtp2-dev.
-    # Вендорная сборка избавляет от завязки на distro-специфичные пути.
+    # libdatachannel vendors usrsctp / libjuice / plog, and also builds
+    # libsrtp2 itself (USE_SYSTEM_SRTP=OFF): its FindlibSRTP.cmake looks
+    # for `srtp/srtp.h`, but Debian/Ubuntu install headers to
+    # `/usr/include/srtp2/`, so find_package fails despite libsrtp2-dev
+    # being installed. Vendoring removes the distro-specific path coupling.
     set(NO_EXAMPLES        ON  CACHE BOOL "" FORCE)
     set(NO_TESTS           ON  CACHE BOOL "" FORCE)
     set(USE_SYSTEM_SRTP    OFF CACHE BOOL "" FORCE)
@@ -189,14 +190,14 @@ if(ENABLE_WEBRTC_PREVIEW)
         GIT_TAG        v0.21.0
         GIT_SHALLOW    TRUE
         GIT_PROGRESS   TRUE
-        # libdatachannel вендорит usrsctp/libjuice/plog/libsrtp2 как submodules,
-        # клон занимает минуты. GIT_PROGRESS выводит "Receiving objects: N%…"
-        # чтобы не выглядело зависшим на 22%.
+        # libdatachannel vendors usrsctp/libjuice/plog/libsrtp2 as submodules,
+        # the clone takes minutes. GIT_PROGRESS prints "Receiving objects: N%…"
+        # so it doesn't look stuck at 22%.
     )
     FetchContent_MakeAvailable(libdatachannel)
 endif()
 
-# libsrt — сборка из исходников
+# libsrt — built from source
 FetchContent_Declare(srt
     GIT_REPOSITORY https://github.com/Haivision/srt.git
     GIT_TAG        v1.5.3
@@ -211,8 +212,8 @@ set(USE_OPENSSL ON CACHE BOOL "" FORCE)
 set(USE_GNUTLS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(srt)
 
-# srt headers живут в srtcore/, но код ожидает <srt/srt.h>
-# version.h генерируется в srt_BINARY_DIR — добавляем оба пути
+# srt headers live in srtcore/, but the code expects <srt/srt.h>.
+# version.h is generated in srt_BINARY_DIR — add both paths.
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/srt-include)
 file(CREATE_LINK ${srt_SOURCE_DIR}/srtcore ${CMAKE_BINARY_DIR}/srt-include/srt SYMBOLIC)
 target_include_directories(srt_static INTERFACE
@@ -220,8 +221,8 @@ target_include_directories(srt_static INTERFACE
     ${srt_BINARY_DIR}
 )
 
-# Тишина для вендорного кода — warnings из SRT/spdlog/libdatachannel/usrsctp
-# затеняют предупреждения из src/.
+# Silence vendored code — warnings from SRT/spdlog/libdatachannel/usrsctp
+# drown out the ones from src/.
 foreach(_vendored_tgt
         srt_static srt_virtual
         spdlog
@@ -459,8 +460,8 @@ if(LIVEQX_GIT_DIRTY)
 endif()
 string(TIMESTAMP LIVEQX_BUILD_TIME "%Y-%m-%dT%H:%M:%SZ" UTC)
 
-# Версия = (commit count + BASE), формат MAJOR.MINOR, каждые 100 коммитов +1 к major.
-# BASE=503 → стартовая версия публичного релиза 5.04.
+# Version = (commit count + BASE), format MAJOR.MINOR; every 100 commits bumps major by 1.
+# BASE=503 → the initial public release version is 5.04.
 set(LIVEQX_VERSION_BASE 503)
 execute_process(
     COMMAND git rev-list --count HEAD
@@ -473,7 +474,7 @@ if(LIVEQX_COMMIT_COUNT MATCHES "^[0-9]+$")
     math(EXPR _liveqx_ver_n "${LIVEQX_COMMIT_COUNT} + ${LIVEQX_VERSION_BASE}")
     math(EXPR LIVEQX_VERSION_MAJOR "${_liveqx_ver_n} / 100")
     math(EXPR LIVEQX_VERSION_MINOR "${_liveqx_ver_n} % 100")
-    # Zero-pad minor до двух цифр: 4.07, 4.94, 5.00 — сортируется лексикографически.
+    # Zero-pad minor to two digits: 4.07, 4.94, 5.00 — sorts lexicographically.
     if(LIVEQX_VERSION_MINOR LESS 10)
         set(LIVEQX_VERSION_STR "${LIVEQX_VERSION_MAJOR}.0${LIVEQX_VERSION_MINOR}")
     else()
@@ -499,7 +500,7 @@ if(LIVEQX_GIT_BRANCH AND EXISTS "${_git_dir}/refs/heads/${LIVEQX_GIT_BRANCH}")
         "${_git_dir}/refs/heads/${LIVEQX_GIT_BRANCH}")
 endif()
 
-message(STATUS "LiveQX version: ${LIVEQX_VERSION_STR} (${LIVEQX_COMMIT_COUNT} коммитов, ${LIVEQX_GIT_COMMIT})")
+message(STATUS "LiveQX version: ${LIVEQX_VERSION_STR} (${LIVEQX_COMMIT_COUNT} commits, ${LIVEQX_GIT_COMMIT})")
 
 target_compile_definitions(liveqx-objs PUBLIC
     LIVEQX_VERSION="${LIVEQX_VERSION_STR}"
