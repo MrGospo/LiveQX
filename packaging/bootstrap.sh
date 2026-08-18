@@ -15,7 +15,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/MrGospo/LiveQX/main/packaging/bootstrap.sh \
 #       | sudo REPO_URL=https://github.com/MrGospo/LiveQX.git CLONE_DIR=/opt/liveqx-src bash
 #
-set -euo pipefail
+# -E (errtrace) — required so the ERR trap fires inside functions,
+# subshells and command substitutions (e.g. run_quiet / cmake / npm).
+set -Eeuo pipefail
 IFS=$'\n\t'
 
 # ── Colored output ──────────────────────────────────────────────────────────
@@ -30,10 +32,33 @@ ok()  { echo "${C_GRN}[✓]${C_RST} $*"; }
 warn(){ echo "${C_YEL}[!]${C_RST} $*"; }
 err() { echo "${C_RED}[✗]${C_RST} $*" >&2; }
 die() { err "$*"; exit 1; }
-step(){ echo; echo "${C_BLD}── $* ──${C_RST}"; }
 
-# Report line + exit code on any premature exit under `set -e` / `pipefail`.
-trap 'err "Aborted at line $LINENO (exit code $?)"' ERR
+# CURRENT_STEP is updated by step() and printed by on_error so a failure
+# report always names the phase (apt / clone / backend / UI / install).
+CURRENT_STEP=""
+step() {
+    CURRENT_STEP="$*"
+    echo
+    echo "${C_BLD}── $* ──${C_RST}"
+}
+
+# Fires on any command that exits non-zero under `set -e` (and inside
+# functions/subshells thanks to `set -E`). Prints phase + line + command
+# + exit code so the user does not have to re-run with bash -x.
+on_error() {
+    local exit_code=$1 line=$2 cmd=$3
+    echo
+    err "════════════════════════════════════════════════════════════════"
+    err "Bootstrap aborted at step: ${CURRENT_STEP:-<startup>}"
+    err "  line:    $line"
+    err "  command: $cmd"
+    err "  exit:    $exit_code"
+    err "════════════════════════════════════════════════════════════════"
+    err "Build logs (if produced): build.log, ui/build.log"
+    err "For a full shell trace: bash -x $0 2>&1 | tee /tmp/bootstrap.trace"
+    exit "$exit_code"
+}
+trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
 
 # ── Parameters ──────────────────────────────────────────────────────────────
 ASSUME_YES=0
@@ -100,7 +125,8 @@ fi
 # ── Apt build-deps ──────────────────────────────────────────────────────────
 step "Build dependencies via apt"
 info "Refreshing apt index..."
-apt-get update -qq
+apt-get update -qq \
+    || die "apt-get update failed (check network, DNS and /etc/apt/sources.list)"
 
 # Base build-tools + dev packages for libraries the project pulls from the system.
 # FFmpeg, cpp-httplib, spdlog/fmt, jwt-cpp are vendored via FetchContent or
@@ -142,8 +168,10 @@ if [[ "$NODE_OK" == "0" ]]; then
         # (exit 141) even though bash itself succeeded. Download first,
         # execute from a file — bash reads a fully-written file, no pipe.
         ns_setup="$(mktemp)"
-        curl -fsSL https://deb.nodesource.com/setup_20.x -o "$ns_setup"
-        bash "$ns_setup"
+        curl -fsSL https://deb.nodesource.com/setup_20.x -o "$ns_setup" \
+            || die "Failed to download NodeSource setup_20.x (network / proxy?)"
+        bash "$ns_setup" \
+            || { rm -f "$ns_setup"; die "NodeSource setup script failed (see output above)"; }
         rm -f "$ns_setup"
         BUILD_DEPS+=(nodejs)
     fi
@@ -161,7 +189,8 @@ if [[ -z "$REPO_ROOT" ]]; then
         die "$CLONE_DIR exists and is not a git repo — remove it manually or set another CLONE_DIR"
     fi
     if [[ ! -d "$CLONE_DIR/.git" ]]; then
-        git clone --depth 50 --branch "$REPO_REF" "$REPO_URL" "$CLONE_DIR"
+        git clone --depth 50 --branch "$REPO_REF" "$REPO_URL" "$CLONE_DIR" \
+            || die "git clone failed (repo: $REPO_URL, ref: $REPO_REF, target: $CLONE_DIR)"
     fi
     REPO_ROOT="$CLONE_DIR"
     ok "Repo at $REPO_ROOT"
@@ -212,10 +241,12 @@ ok "Backend built: build/liveqx, build/liveqx-mountd"
 step "Building Web UI (npm ci → npm run build)"
 cd "$REPO_ROOT/ui"
 if [[ -f package-lock.json ]]; then
-    npm ci --no-audit --no-fund --silent
+    npm ci --no-audit --no-fund --silent \
+        || die "npm ci failed (check network, node/npm version, package-lock.json integrity)"
 else
     warn "package-lock.json missing — falling back to npm install"
-    npm install --no-audit --no-fund --silent
+    npm install --no-audit --no-fund --silent \
+        || die "npm install failed (check network and package.json)"
 fi
 # vite build writes progress to stderr, TS errors as well. Filter minimally:
 # strip the "transforming" and "rendering" noise.
@@ -234,7 +265,9 @@ cd "$REPO_ROOT"
 step "Running install.sh"
 INSTALL_ARGS=(install)
 [[ "$ASSUME_YES" == "1" ]] && INSTALL_ARGS+=(-y)
-bash "$REPO_ROOT/packaging/install.sh" "${INSTALL_ARGS[@]}"
+bash "$REPO_ROOT/packaging/install.sh" "${INSTALL_ARGS[@]}" \
+    || die "install.sh failed (see output above; also: sudo journalctl -u liveqx -n 80 --no-pager)"
 
 echo
+ok "All stages completed successfully."
 ok "Bootstrap finished. The service should be running."
