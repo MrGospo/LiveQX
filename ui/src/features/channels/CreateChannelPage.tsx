@@ -6,7 +6,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { ChevronLeft } from 'lucide-react';
 import { useCreateChannel } from '@/api/queries/channels';
-import { useGpuInfo } from '@/api/queries/system';
+import { useGpuInfo, useNetworkInterfaces } from '@/api/queries/system';
 import { Block } from '@/components/Block';
 import { FormErrorBanner } from '@/components/FormErrorBanner';
 import { FolderPickerModal } from '@/components/FolderPickerModal';
@@ -42,6 +42,10 @@ const createChannelSchema = z.object({
   output_port: z.coerce.number().int().min(1).max(65535).default(4000),
   output_url: z.string().default(''),
   output_dir: z.string().default(''),
+  // Source-NIC bind (srt/multicast/rtmp). Empty = OS default route.
+  output_bind_address: z.string().default(''),
+  // Multicast hop limit (IP_MULTICAST_TTL). Backend range 1..255, default 16.
+  output_ttl: z.coerce.number().int().min(1).max(255).default(16),
 });
 
 type FormValues = z.infer<typeof createChannelSchema>;
@@ -73,6 +77,7 @@ export default function CreateChannelPage() {
       share_path: '', scan_interval_ms: 2000,
       output_type: 'srt', output_id: 'main', output_address: '0.0.0.0',
       output_port: 4000, output_url: '', output_dir: '',
+      output_bind_address: '', output_ttl: 16,
     },
   });
 
@@ -80,15 +85,35 @@ export default function CreateChannelPage() {
   const sharePath    = watch('share_path');
   const outputDir    = watch('output_dir');
   const fallbackPath = watch('fallback_image_path');
+  const outputBind   = watch('output_bind_address');
   const [pickerFor, setPickerFor] = React.useState<'share_path' | 'output_dir' | null>(null);
   const [filePickerFor, setFilePickerFor] = React.useState<'fallback_image_path' | null>(null);
 
+  // NIC dropdown source for the first output. Mirrors OutputFormModal: skip
+  // loopback, keep an unresolved bind as an "(offline)" entry so the picker
+  // never silently reverts to default.
+  const nics = useNetworkInterfaces();
+  const nicOptions = React.useMemo(() => {
+    const live = (nics.data ?? [])
+      .filter(n => n.up && !n.loopback)
+      .flatMap(n => n.addresses.map(a => ({ value: a, label: `${n.name} — ${a}` })));
+    if (outputBind && !live.some(o => o.value === outputBind)) {
+      live.push({ value: outputBind, label: `${outputBind} (offline)` });
+    }
+    return live;
+  }, [nics.data, outputBind]);
+
   const buildOutput = (v: FormValues) => {
-    const base = { id: v.output_id, type: v.output_type, enabled: true };
+    const base: Record<string, unknown> = { id: v.output_id, type: v.output_type, enabled: true };
+    // bind_address only for transports that honour it, and only when non-empty
+    // (empty = kernel default; sending "" would clutter persisted cfg).
+    const withBind = (extra: Record<string, unknown>) =>
+      v.output_bind_address ? { ...base, ...extra, bind_address: v.output_bind_address }
+                            : { ...base, ...extra };
     switch (v.output_type) {
-      case 'srt':       return { ...base, address: v.output_address, port: v.output_port };
-      case 'multicast': return { ...base, address: v.output_address, port: v.output_port };
-      case 'rtmp':      return { ...base, url: v.output_url };
+      case 'srt':       return withBind({ address: v.output_address, port: v.output_port });
+      case 'multicast': return withBind({ address: v.output_address, port: v.output_port, ttl: v.output_ttl });
+      case 'rtmp':      return withBind({ url: v.output_url });
       case 'hls':       return { ...base, dir: v.output_dir };
       default:          return base;
     }
@@ -312,6 +337,29 @@ export default function CreateChannelPage() {
                       <Folder size={14} /> {t('folderPicker.openButton')}
                     </button>
                   </div>
+                </div>
+              )}
+
+              {(outputType === 'srt' || outputType === 'multicast' || outputType === 'rtmp') && (
+                <div className="col-span-2 flex flex-col gap-1">
+                  <label className={labelCls}>{t('outputs.bindAddress')}</label>
+                  <select {...register('output_bind_address')} className={inputCls}
+                          disabled={nics.isLoading}>
+                    <option value="">{t('outputs.bindAddressDefault')}</option>
+                    {nicOptions.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-[var(--text-muted)]">{t('outputs.bindAddressHint')}</p>
+                </div>
+              )}
+
+              {outputType === 'multicast' && (
+                <div className="col-span-2 flex flex-col gap-1">
+                  <label className={labelCls}>{t('outputs.ttl')}</label>
+                  <input {...register('output_ttl')} type="number" min={1} max={255} className={inputCls} />
+                  {errors.output_ttl && <p className={errCls}>{errors.output_ttl.message}</p>}
+                  <p className="text-xs text-[var(--text-muted)]">{t('outputs.ttlHint')}</p>
                 </div>
               )}
             </div>

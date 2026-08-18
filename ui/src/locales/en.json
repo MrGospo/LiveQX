@@ -239,7 +239,9 @@
     "framesDropped": "Frames dropped",
     "bindAddress": "Source network interface",
     "bindAddressDefault": "Default (kernel route)",
-    "bindAddressHint": "Pin outgoing traffic to a specific interface. Applies to SRT, multicast and RTMP. Leave default to let the kernel pick the route."
+    "bindAddressHint": "Pin outgoing traffic to a specific interface. Applies to SRT, multicast and RTMP. Leave default to let the kernel pick the route.",
+    "ttl": "TTL (hop limit)",
+    "ttlHint": "Maximum routers the multicast packet may traverse. 1 — local segment only, 16 (default) — enterprise LAN, 255 — no practical limit."
   },
   "about": {
     "title": "About",

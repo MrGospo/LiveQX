@@ -23,6 +23,8 @@ export const outputFormSchema = z.object({
   // Source-NIC bind. Empty = OS default route. Surfaced only for transports
   // that honour it (srt, multicast, rtmp); ignored on HLS.
   bind_address: z.string().default(''),
+  // Multicast hop limit (IP_MULTICAST_TTL). Backend range 1..255, default 16.
+  ttl: z.coerce.number().int().min(1).max(255).default(16),
 });
 
 export type OutputFormValues = z.infer<typeof outputFormSchema>;
@@ -51,8 +53,9 @@ function toBackend(v: OutputFormValues): Record<string, unknown> {
                    : { ...base, ...extra };
   switch (v.type) {
     case 'srt':
-    case 'multicast':
       return withBind({ address: v.address, port: v.port });
+    case 'multicast':
+      return withBind({ address: v.address, port: v.port, ttl: v.ttl });
     case 'rtmp':
       return withBind({ url: v.url });
     case 'hls':
@@ -62,12 +65,12 @@ function toBackend(v: OutputFormValues): Record<string, unknown> {
 
 function fromStatus(out?: OutputStatus): OutputFormValues {
   if (!out) {
-    return { type: 'srt', id: 'main', enabled: true, address: '0.0.0.0', port: 4000, url: '', dir: '', queue_mb: 4, bind_address: '' };
+    return { type: 'srt', id: 'main', enabled: true, address: '0.0.0.0', port: 4000, url: '', dir: '', queue_mb: 4, bind_address: '', ttl: 16 };
   }
   // Resolve type: running channels expose `transport` from IOutput::statusJson();
   // stopped channels stage raw cfg whose discriminator is `type`. Read both so
   // Edit modal stays correct regardless of channel state.
-  const raw = (out as { transport?: string; type?: string; bind_address?: string; interface?: string });
+  const raw = (out as { transport?: string; type?: string; bind_address?: string; interface?: string; ttl?: number });
   const t = (raw.transport ?? raw.type ?? 'srt') as OutputFormValues['type'];
   return {
     type: ['srt', 'multicast', 'rtmp', 'hls'].includes(t) ? t : 'srt',
@@ -81,6 +84,7 @@ function fromStatus(out?: OutputStatus): OutputFormValues {
     // Prefer canonical `bind_address`; fall back to legacy `interface` so an
     // older multicast cfg still pre-fills the dropdown in Edit mode.
     bind_address: raw.bind_address ?? raw.interface ?? '',
+    ttl: raw.ttl ?? 16,
   };
 }
 
@@ -198,6 +202,17 @@ export function OutputFormModal({ mode, initialValues, onSubmit, onCancel, submi
                 </select>
                 <p className="text-xs text-[var(--text-muted)]">
                   {t('outputs.bindAddressHint')}
+                </p>
+              </div>
+            )}
+
+            {outputType === 'multicast' && (
+              <div className="col-span-2 flex flex-col gap-1">
+                <label className={labelCls}>{t('outputs.ttl')}</label>
+                <input {...register('ttl')} type="number" min={1} max={255} className={inputCls} />
+                {errors.ttl && <p className={errCls}>{errors.ttl.message}</p>}
+                <p className="text-xs text-[var(--text-muted)]">
+                  {t('outputs.ttlHint')}
                 </p>
               </div>
             )}
