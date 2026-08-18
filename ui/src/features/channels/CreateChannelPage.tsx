@@ -46,6 +46,11 @@ const createChannelSchema = z.object({
   output_bind_address: z.string().default(''),
   // Multicast hop limit (IP_MULTICAST_TTL). Backend range 1..255, default 16.
   output_ttl: z.coerce.number().int().min(1).max(255).default(16),
+  // Playback log sink. 'none' → no playback_log block sent (backend defaults
+  // to NullSink). 'file'/'db' emit the block; retention_days only matters
+  // for 'db' (SQLite auto-purge).
+  log_sink: z.enum(['none', 'file', 'db']).default('none'),
+  log_retention_days: z.coerce.number().int().min(0).max(3650).default(90),
 });
 
 type FormValues = z.infer<typeof createChannelSchema>;
@@ -78,6 +83,7 @@ export default function CreateChannelPage() {
       output_type: 'srt', output_id: 'main', output_address: '0.0.0.0',
       output_port: 4000, output_url: '', output_dir: '',
       output_bind_address: '', output_ttl: 16,
+      log_sink: 'none', log_retention_days: 90,
     },
   });
 
@@ -86,6 +92,7 @@ export default function CreateChannelPage() {
   const outputDir    = watch('output_dir');
   const fallbackPath = watch('fallback_image_path');
   const outputBind   = watch('output_bind_address');
+  const logSink      = watch('log_sink');
   const [pickerFor, setPickerFor] = React.useState<'share_path' | 'output_dir' | null>(null);
   const [filePickerFor, setFilePickerFor] = React.useState<'fallback_image_path' | null>(null);
 
@@ -137,6 +144,11 @@ export default function CreateChannelPage() {
           default_photo_duration: v.default_photo_duration,
           ...(v.fallback_image_path ? { fallback: { image_path: v.fallback_image_path } } : {}),
           ...(v.share_path ? { content_source: { share_path: v.share_path, scan_interval_ms: v.scan_interval_ms } } : {}),
+          ...(v.log_sink !== 'none'
+            ? { playback_log: v.log_sink === 'db'
+                ? { sink: 'db', retention_days: v.log_retention_days }
+                : { sink: 'file' } }
+            : {}),
           outputs: [buildOutput(v)],
         };
         const result = await createChannel(payload);
@@ -275,6 +287,36 @@ export default function CreateChannelPage() {
                   </button>
                 </div>
                 <p className="text-xs text-[var(--text-muted)]">{t('channels.fallbackHint')}</p>
+              </div>
+
+              <div className="col-span-2 border-t border-[var(--border-subtle)] pt-4 mt-1">
+                <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
+                  {t('channels.config.secPlaybackLog')}
+                </h3>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="flex flex-col gap-1">
+                    <label className={labelCls}>{t('channels.config.fieldSinkType')}</label>
+                    <select {...register('log_sink')} className={inputCls}>
+                      <option value="none">{t('channels.config.sinkNone')}</option>
+                      <option value="file">{t('channels.config.sinkFile')}</option>
+                      <option value="db">{t('channels.config.sinkDb')}</option>
+                    </select>
+                    <p className="text-xs text-[var(--text-muted)]">
+                      {logSink === 'file'
+                        ? t('channels.config.sinkFileHint')
+                        : logSink === 'db'
+                          ? t('channels.config.sinkDbHint')
+                          : t('channels.config.sinkNoneHint')}
+                    </p>
+                  </div>
+                  {logSink === 'db' && (
+                    <div className="flex flex-col gap-1">
+                      <label className={labelCls}>{t('channels.config.fieldRetentionDays')}</label>
+                      <input {...register('log_retention_days')} type="number" min={0} max={3650} className={inputCls} />
+                      {errors.log_retention_days && <p className={errCls}>{errors.log_retention_days.message}</p>}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
