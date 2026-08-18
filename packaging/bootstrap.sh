@@ -32,6 +32,9 @@ err() { echo "${C_RED}[✗]${C_RST} $*" >&2; }
 die() { err "$*"; exit 1; }
 step(){ echo; echo "${C_BLD}── $* ──${C_RST}"; }
 
+# Report line + exit code on any premature exit under `set -e` / `pipefail`.
+trap 'err "Aborted at line $LINENO (exit code $?)"' ERR
+
 # ── Parameters ──────────────────────────────────────────────────────────────
 ASSUME_YES=0
 for arg in "$@"; do
@@ -133,7 +136,15 @@ if [[ "$NODE_OK" == "0" ]]; then
         BUILD_DEPS+=(nodejs npm)
     else
         info "Adding NodeSource 20.x (stock nodejs is too old)"
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+        # NOTE: do not pipe curl into bash. The NodeSource setup script
+        # exits before consuming all of stdin, curl gets SIGPIPE on its next
+        # write, and `set -o pipefail` then marks the whole pipeline failed
+        # (exit 141) even though bash itself succeeded. Download first,
+        # execute from a file — bash reads a fully-written file, no pipe.
+        ns_setup="$(mktemp)"
+        curl -fsSL https://deb.nodesource.com/setup_20.x -o "$ns_setup"
+        bash "$ns_setup"
+        rm -f "$ns_setup"
         BUILD_DEPS+=(nodejs)
     fi
 fi
