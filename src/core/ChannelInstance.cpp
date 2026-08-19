@@ -1712,6 +1712,11 @@ void ChannelInstance::setSqliteSink(
     sqlite_sink_ = sink;
 }
 
+void ChannelInstance::initPlaybackSink() {
+    std::lock_guard<std::mutex> lk(state_mu_);
+    setupPlaybackSink();
+}
+
 // ─── EventBus wiring (fix23) ─────────────────────────────────────────────────
 
 void ChannelInstance::setEventBus(liveqx::events::EventBus* bus) {

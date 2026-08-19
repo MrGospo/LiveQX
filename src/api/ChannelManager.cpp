@@ -173,6 +173,10 @@ Result ChannelManager::create(const json& cfg, int* out_id) {
         if (event_bus_)   built->setEventBus(event_bus_);
         if (preview_mgr_) built->setPreviewManager(preview_mgr_);
         if (server_tz_getter_) built->setServerTimezoneGetter(server_tz_getter_);
+        // Materialise the playback sink now so /playback-log answers correctly
+        // for a stopped channel — otherwise the UI would only see history after
+        // the operator hits play at least once.
+        built->initPlaybackSink();
         channels_.emplace(chosen_id, std::move(built));
     }
     if (out_id) *out_id = chosen_id;
@@ -556,6 +560,11 @@ std::size_t ChannelManager::loadFromRoot() {
             if (event_bus_)   built->setEventBus(event_bus_);
             if (preview_mgr_) built->setPreviewManager(preview_mgr_);
             if (server_tz_getter_) built->setServerTimezoneGetter(server_tz_getter_);
+            // Materialise the playback sink now so /playback-log answers
+            // correctly for a stopped channel loaded from disk — otherwise the
+            // UI would only see history after the operator hits play at least
+            // once after every LiveQX restart.
+            built->initPlaybackSink();
             channels_.emplace(id, std::move(built));
         }
         ++loaded;

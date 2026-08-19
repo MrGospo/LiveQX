@@ -234,6 +234,13 @@ public:
     // called before play().
     void setSqliteSink(liveqx::logging::SqlitePlaybackSink* sink);
 
+    // Materialise the playback sink from cfg.playback_log without waiting for
+    // play(). Called by ChannelManager after all setXxxSink() injections so
+    // that /playback-log endpoints answer honestly for stopped channels too
+    // (otherwise a restart hides all history until the operator hits play).
+    // Idempotent — reruns are cheap when cfg didn't change.
+    void initPlaybackSink();
+
     // fix23: inject the process-wide EventBus. Forwards to internal
     // publishers (ChannelHealth, onClipBoundary). Setting nullptr
     // disables event publishing for this channel.
