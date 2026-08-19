@@ -1,6 +1,7 @@
 #include "core/ChannelInstance.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <fcntl.h>
@@ -346,6 +347,22 @@ void ChannelInstance::buildLongLived(const json& cfg) {
     if (enc_cfg_.gpu_index < 0) {
         logger_->warn("gpu_index={} negative, clamping to 0", enc_cfg_.gpu_index);
         enc_cfg_.gpu_index = 0;
+    }
+
+    // Video codec selection. "h264" is the default; "mpeg2video" is for
+    // legacy hospitality set-tops that don't decode H.264 cleanly. Any
+    // other value falls back to h264 with a warning — we don't want a
+    // typo to permanently break a channel.
+    {
+        std::string vc = cfg.value("video_codec", std::string("h264"));
+        std::transform(vc.begin(), vc.end(), vc.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (vc == "mpeg2") vc = "mpeg2video";
+        if (vc != "h264" && vc != "mpeg2video") {
+            logger_->warn("video_codec=\"{}\" unknown, using h264", vc);
+            vc = "h264";
+        }
+        enc_cfg_.video_codec = vc;
     }
 
     // Broadcast/IPTV knobs. Optional sub-object cfg.mpegts.{...}. Absent
@@ -878,6 +895,18 @@ bool ChannelInstance::updateConfig(const json& patch) {
     if (patch.contains("preset"))        enc_cfg_.preset        = patch.value("preset",        enc_cfg_.preset);
     if (patch.contains("encoder_mode"))  enc_cfg_.encoder_mode  = patch.value("encoder_mode",  enc_cfg_.encoder_mode);
     if (patch.contains("gpu_index"))     enc_cfg_.gpu_index     = patch.value("gpu_index",     enc_cfg_.gpu_index);
+    if (patch.contains("video_codec")) {
+        std::string vc = patch.value("video_codec", enc_cfg_.video_codec);
+        std::transform(vc.begin(), vc.end(), vc.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (vc == "mpeg2") vc = "mpeg2video";
+        if (vc == "h264" || vc == "mpeg2video") {
+            enc_cfg_.video_codec = vc;
+        } else {
+            logger_->warn("patch video_codec=\"{}\" unknown, keeping {}",
+                          vc, enc_cfg_.video_codec);
+        }
+    }
     if (patch.contains("max_b_frames")) {
         const int mbf = patch.value("max_b_frames", enc_cfg_.max_b_frames);
         if (mbf >= 0 && mbf <= 16)
@@ -1013,6 +1042,7 @@ nlohmann::json ChannelInstance::status() const {
     out["max_b_frames"]  = enc_cfg_.max_b_frames;
     out["encoder_mode"]  = enc_cfg_.encoder_mode;
     out["gpu_index"]     = enc_cfg_.gpu_index;
+    out["video_codec"]   = enc_cfg_.video_codec;
     out["mpegts"]        = {
         {"service_name",        enc_cfg_.service_name},
         {"service_provider",    enc_cfg_.service_provider},

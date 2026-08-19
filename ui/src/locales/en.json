@@ -172,6 +172,8 @@
       "fieldResolutionRO": "Resolution (immutable)",
       "fieldNumaRO": "NUMA node",
       "fieldEncoderMode": "Encoder mode",
+      "fieldVideoCodec": "Video codec",
+      "videoCodecHint": "H.264 is the default for modern receivers. MPEG-2 is only for legacy hospitality set-tops that don't decode H.264 reliably. MPEG-2 is always CPU-encoded — any GPU mode is ignored when this is selected.",
       "fieldGpuIndex": "GPU index",
       "fieldMaxB": "Max B-frames",
       "fieldPreloadSec": "Decoder lookahead (sec)",

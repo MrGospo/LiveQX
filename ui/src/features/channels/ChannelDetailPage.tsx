@@ -1240,6 +1240,7 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const basePreset      = ch.preset ?? 'medium';
   const baseEncoderMode = ch.encoder_mode ?? 'auto';
   const baseGpuIndex    = ch.gpu_index ?? 0;
+  const baseVideoCodec  = ch.video_codec ?? 'h264';
   const baseMaxB        = ch.max_b_frames ?? 2;
   const basePreloadSec  = ch.preload_sec ?? 4.0;
   const baseTimezone        = ch.channel_timezone ?? '';
@@ -1280,6 +1281,7 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const [preset, setPreset]         = React.useState(basePreset);
   const [encoderMode, setEncoderMode] = React.useState<string>(baseEncoderMode);
   const [gpuIndex, setGpuIndex]     = React.useState<string>(String(baseGpuIndex));
+  const [videoCodec, setVideoCodec] = React.useState<string>(baseVideoCodec);
   const [maxB, setMaxB]             = React.useState(String(baseMaxB));
   const [preloadSec, setPreloadSec] = React.useState(String(basePreloadSec));
   const [timezone, setTimezone]         = React.useState(baseTimezone);
@@ -1323,6 +1325,7 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
     if (!isNaN(nBit) && nBit !== baseBitrate) p.bitrate = nBit * 1000;
     if (preset && preset !== basePreset) p.preset = preset;
     if (encoderMode !== baseEncoderMode) p.encoder_mode = encoderMode;
+    if (videoCodec !== baseVideoCodec) p.video_codec = videoCodec;
     const g = parseInt(gpuIndex, 10);
     if (!isNaN(g) && g !== baseGpuIndex) p.gpu_index = g;
     const nMaxB = parseInt(maxB, 10);
@@ -1541,6 +1544,14 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
                 warn={encoderMode !== baseEncoderMode ? t('channels.config.restartRequired') : undefined}>
                 <select value={encoderMode} onChange={e => setEncoderMode(e.target.value)} className={selectCls}>
                   {ENCODER_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </Field>
+              <Field label={t('channels.config.fieldVideoCodec')}
+                hint={t('channels.config.videoCodecHint')}
+                warn={videoCodec !== baseVideoCodec ? t('channels.config.restartRequired') : undefined}>
+                <select value={videoCodec} onChange={e => setVideoCodec(e.target.value)} className={selectCls}>
+                  <option value="h264">H.264 (AVC)</option>
+                  <option value="mpeg2video">MPEG-2 Video</option>
                 </select>
               </Field>
               {(encoderMode === 'nvenc' || encoderMode === 'qsv' || encoderMode === 'vaapi') && (

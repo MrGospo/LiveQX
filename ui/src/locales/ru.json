@@ -172,6 +172,8 @@
       "fieldResolutionRO": "Разрешение (неизменяемо)",
       "fieldNumaRO": "NUMA-узел",
       "fieldEncoderMode": "Режим энкодера",
+      "fieldVideoCodec": "Видео-кодек",
+      "videoCodecHint": "H.264 — стандарт для современных приёмников. MPEG-2 — только для устаревших hospitality-приставок, которые H.264 не декодируют. MPEG-2 всегда собирается на CPU: если выбран GPU-режим, он игнорируется.",
       "fieldGpuIndex": "GPU-индекс",
       "fieldMaxB": "Макс. B-кадров",
       "fieldPreloadSec": "Буфер декодера (сек)",

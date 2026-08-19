@@ -11,6 +11,13 @@
 //   "vaapi"           → VaapiVideoEncoder
 //   "auto" / ""       → first available GPU backend, falling back to x264
 //
+// Codec dispatch (case-insensitive):
+//   "h264" / ""       → H.264 (default). Follows the mode ladder above.
+//   "mpeg2video"      → MPEG-2 Video. CPU-only for now; any GPU mode is
+//                       logged and downgraded to CPU MPEG-2. Used for
+//                       legacy hospitality set-top boxes that don't
+//                       decode H.264 reliably.
+//
 // The factory both creates AND opens the backend. On open() failure it
 // returns nullptr so callers can propagate the error verbatim. In "auto"
 // mode failures are absorbed and the next backend is tried; the final
@@ -30,6 +37,7 @@ namespace liveqx::encoding {
 
 std::unique_ptr<IVideoEncoder> pickVideoEncoder(
     const std::string&              mode,
+    const std::string&              codec,
     const IVideoEncoder::Config&    cfg,
     std::shared_ptr<spdlog::logger> logger);
 

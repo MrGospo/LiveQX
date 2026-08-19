@@ -194,14 +194,14 @@ TEST(EncoderFactoryTest, NormalizeLowercases) {
 
 // "cpu" must always succeed on a stock build — x264 is the always-on baseline.
 TEST(EncoderFactoryTest, CpuModeOpensX264) {
-    auto enc = ec::pickVideoEncoder("cpu", factoryCfg(), nullptr);
+    auto enc = ec::pickVideoEncoder("cpu", "h264", factoryCfg(), nullptr);
     ASSERT_NE(enc, nullptr);
     EXPECT_STREQ(enc->name(), "x264");
 }
 
 // Same for the alias "x264".
 TEST(EncoderFactoryTest, X264AliasOpensX264) {
-    auto enc = ec::pickVideoEncoder("x264", factoryCfg(), nullptr);
+    auto enc = ec::pickVideoEncoder("x264", "h264", factoryCfg(), nullptr);
     ASSERT_NE(enc, nullptr);
     EXPECT_STREQ(enc->name(), "x264");
 }
@@ -211,19 +211,19 @@ TEST(EncoderFactoryTest, X264AliasOpensX264) {
 // fatal — Encoder treats it as a hard error, "auto" mode falls through).
 TEST(EncoderFactoryTest, ExplicitGpuFailsWhenNotBuiltIn) {
     if (!ec::NvencVideoEncoder::isBuiltIn()) {
-        EXPECT_EQ(ec::pickVideoEncoder("nvenc", factoryCfg(), nullptr), nullptr);
+        EXPECT_EQ(ec::pickVideoEncoder("nvenc", "h264", factoryCfg(), nullptr), nullptr);
     }
     if (!ec::QsvVideoEncoder::isBuiltIn()) {
-        EXPECT_EQ(ec::pickVideoEncoder("qsv",   factoryCfg(), nullptr), nullptr);
+        EXPECT_EQ(ec::pickVideoEncoder("qsv",   "h264", factoryCfg(), nullptr), nullptr);
     }
     if (!ec::VaapiVideoEncoder::isBuiltIn()) {
-        EXPECT_EQ(ec::pickVideoEncoder("vaapi", factoryCfg(), nullptr), nullptr);
+        EXPECT_EQ(ec::pickVideoEncoder("vaapi", "h264", factoryCfg(), nullptr), nullptr);
     }
 }
 
 // "auto" must always reach a working backend — at minimum x264.
 TEST(EncoderFactoryTest, AutoModeFallsBackToX264) {
-    auto enc = ec::pickVideoEncoder("auto", factoryCfg(), nullptr);
+    auto enc = ec::pickVideoEncoder("auto", "h264", factoryCfg(), nullptr);
     ASSERT_NE(enc, nullptr);
     // On stock build it lands on x264; on a GPU-enabled build it might
     // be something else, but it must still produce a usable encoder.
@@ -232,15 +232,31 @@ TEST(EncoderFactoryTest, AutoModeFallsBackToX264) {
 
 // Empty string is treated as "auto".
 TEST(EncoderFactoryTest, EmptyModeFallsBackToX264) {
-    auto enc = ec::pickVideoEncoder("", factoryCfg(), nullptr);
+    auto enc = ec::pickVideoEncoder("", "h264", factoryCfg(), nullptr);
     ASSERT_NE(enc, nullptr);
 }
 
 // Unknown mode is treated as "auto" (with a warning logged) — we don't
 // want a typo'd config to permanently kill a channel.
 TEST(EncoderFactoryTest, UnknownModeFallsBackToAuto) {
-    auto enc = ec::pickVideoEncoder("turbo-encoder-9000", factoryCfg(), nullptr);
+    auto enc = ec::pickVideoEncoder("turbo-encoder-9000", "h264", factoryCfg(), nullptr);
     ASSERT_NE(enc, nullptr);
+}
+
+// MPEG-2 codec dispatches to the CPU MPEG-2 backend regardless of mode.
+TEST(EncoderFactoryTest, Mpeg2CodecOpensMpeg2) {
+    auto enc = ec::pickVideoEncoder("cpu", "mpeg2video", factoryCfg(), nullptr);
+    ASSERT_NE(enc, nullptr);
+    EXPECT_STREQ(enc->name(), "mpeg2video");
+}
+
+// GPU mode + MPEG-2 codec must still produce a working CPU MPEG-2 encoder
+// (a warning is logged). Guards against a config that would otherwise
+// silently fall through to h264 or nullptr.
+TEST(EncoderFactoryTest, Mpeg2CodecIgnoresGpuMode) {
+    auto enc = ec::pickVideoEncoder("nvenc", "mpeg2video", factoryCfg(), nullptr);
+    ASSERT_NE(enc, nullptr);
+    EXPECT_STREQ(enc->name(), "mpeg2video");
 }
 
 // Encoder::Config defaults must match the pre-fix29 behavior.

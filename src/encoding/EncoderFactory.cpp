@@ -6,6 +6,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "encoding/Mpeg2VideoEncoder.h"
 #include "encoding/NvencVideoEncoder.h"
 #include "encoding/QsvVideoEncoder.h"
 #include "encoding/VaapiVideoEncoder.h"
@@ -35,10 +36,25 @@ std::string normalizeEncoderMode(const std::string& mode) {
 
 std::unique_ptr<IVideoEncoder> pickVideoEncoder(
     const std::string&              mode,
+    const std::string&              codec,
     const IVideoEncoder::Config&    cfg,
     std::shared_ptr<spdlog::logger> logger) {
 
     const std::string m = normalizeEncoderMode(mode);
+    const std::string c = normalizeEncoderMode(codec);
+
+    // MPEG-2 short-circuits the mode ladder. GPU MPEG-2 encoders
+    // (mpeg2_qsv, mpeg2_vaapi) exist but are rare and mostly untested here,
+    // so any explicit GPU mode is logged and downgraded to CPU MPEG-2.
+    if (c == "mpeg2video" || c == "mpeg2") {
+        if (m == "nvenc" || m == "qsv" || m == "vaapi") {
+            lg(logger).warn(
+                "EncoderFactory: video_codec=mpeg2video requested with "
+                "encoder_mode=\"{}\"; MPEG-2 is CPU-only in this build, "
+                "using CPU MPEG-2", mode);
+        }
+        return tryOpen(std::make_unique<Mpeg2VideoEncoder>(cfg, logger));
+    }
 
     // Explicit user request — instantiate exactly that backend, no
     // fallback. Caller decides whether nullptr is fatal or recoverable.

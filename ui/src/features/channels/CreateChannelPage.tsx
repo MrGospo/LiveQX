@@ -25,6 +25,7 @@ const createChannelSchema = z.object({
   numa_node: z.coerce.number().int().min(0).max(7).default(0),
   encoder_mode: z.enum(['auto', 'cpu', 'nvenc', 'qsv', 'vaapi']).default('auto'),
   gpu_index: z.coerce.number().int().min(0).default(0),
+  video_codec: z.enum(['h264', 'mpeg2video']).default('h264'),
   resolution: z.string().regex(/^\d+x\d+$/, 'e.g. 1920x1080').default('1920x1080'),
   fps: z.coerce.number().int().min(1).max(120).default(25),
   bitrate_kbps: z.coerce.number().int().min(100).max(100_000).default(4000),
@@ -88,7 +89,7 @@ export default function CreateChannelPage() {
   const { register, handleSubmit, watch, setValue, formState: { errors } } = useForm<FormValues>({
     resolver: zodResolver(createChannelSchema),
     defaultValues: {
-      name: '', numa_node: 0, encoder_mode: 'auto', gpu_index: 0,
+      name: '', numa_node: 0, encoder_mode: 'auto', gpu_index: 0, video_codec: 'h264',
       resolution: '1920x1080', fps: 25, bitrate_kbps: 4000, preset: 'veryfast',
       default_photo_duration: 10,
       fallback_image_path: '',
@@ -175,6 +176,7 @@ export default function CreateChannelPage() {
           numa_node: v.numa_node,
           encoder_mode: v.encoder_mode,
           gpu_index: v.gpu_index,
+          ...(v.video_codec !== 'h264' ? { video_codec: v.video_codec } : {}),
           preset: v.preset,
           resolution: v.resolution,
           fps: v.fps,
@@ -286,6 +288,15 @@ export default function CreateChannelPage() {
                     {bestEncoder !== 'x264' && ' ✓'}
                   </p>
                 )}
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className={labelCls}>{t('channels.config.fieldVideoCodec')}</label>
+                <select {...register('video_codec')} className={inputCls}>
+                  <option value="h264">H.264 (AVC)</option>
+                  <option value="mpeg2video">MPEG-2 Video</option>
+                </select>
+                <p className="text-xs text-[var(--text-muted)]">{t('channels.config.videoCodecHint')}</p>
               </div>
 
               <div className="flex flex-col gap-1">

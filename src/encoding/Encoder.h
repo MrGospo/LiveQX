@@ -44,6 +44,15 @@ public:
         // 0 = first GPU on the host, 1 = second, etc.
         int         gpu_index      = 0;
 
+        // Video codec selection. Orthogonal to encoder_mode.
+        //   "h264"       — H.264 (default). Uses encoder_mode to pick
+        //                  x264/nvenc/qsv/vaapi.
+        //   "mpeg2video" — MPEG-2 Video. CPU-only in this build (any GPU
+        //                  encoder_mode gets logged and downgraded). For
+        //                  legacy hospitality set-tops that don't decode
+        //                  H.264 reliably.
+        std::string video_codec    = "h264";
+
         // Broadcast/IPTV middleware knobs. Middleware like Otrum and
         // hospitality set-tops (LG Pro:Centric etc.) identify the service
         // by these fields and are strict about PSI/SI shape. Defaults

@@ -297,6 +297,7 @@ set(SOURCES
     src/encoding/Encoder.cpp
     src/encoding/EncoderFactory.cpp
     src/encoding/X264VideoEncoder.cpp
+    src/encoding/Mpeg2VideoEncoder.cpp
     src/encoding/NvencVideoEncoder.cpp
     src/encoding/QsvVideoEncoder.cpp
     src/encoding/VaapiVideoEncoder.cpp

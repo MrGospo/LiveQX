@@ -149,9 +149,10 @@ bool Encoder::open() {
     vcfg.gpu_index     = cfg_.gpu_index;
 
     impl_->video = liveqx::encoding::pickVideoEncoder(
-        cfg_.encoder_mode, vcfg, logger_);
+        cfg_.encoder_mode, cfg_.video_codec, vcfg, logger_);
     if (!impl_->video) {
-        lg().error("Encoder: pickVideoEncoder(\"{}\") failed", cfg_.encoder_mode);
+        lg().error("Encoder: pickVideoEncoder(mode=\"{}\", codec=\"{}\") failed",
+                   cfg_.encoder_mode, cfg_.video_codec);
         return false;
     }
 

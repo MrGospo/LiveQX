@@ -49,6 +49,10 @@ export interface MpegtsConfig {
 
 export type ChannelStatus  = components['schemas']['ChannelStatus'] & {
   mpegts?: MpegtsConfig;
+  // "h264" (default) or "mpeg2video". Held here (rather than openapi.ts)
+  // until the next gen:api-types run — mirrors the pattern used for
+  // mpegts / MountSpec above.
+  video_codec?: 'h264' | 'mpeg2video';
 };
 export type LiveInputStatus = components['schemas']['LiveInputStatus'];
 export type OutputStatus   = components['schemas']['OutputStatus'];
