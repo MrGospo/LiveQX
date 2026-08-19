@@ -336,6 +336,14 @@ void ChannelInstance::buildLongLived(const json& cfg) {
     if (cfg.contains("audio")) {
         enc_cfg_.audio_bitrate = cfg["audio"].value("bitrate", 128'000);
         enc_cfg_.sample_rate   = cfg["audio"].value("sample_rate", 48000);
+        std::string ac = cfg["audio"].value("codec", std::string("aac"));
+        std::transform(ac.begin(), ac.end(), ac.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (ac != "aac" && ac != "mp2") {
+            logger_->warn("audio.codec=\"{}\" unknown, using aac", ac);
+            ac = "aac";
+        }
+        enc_cfg_.audio_codec = ac;
     }
 
     // fix29 c13: GPU encoder selection. Both keys are optional —
@@ -922,6 +930,17 @@ bool ChannelInstance::updateConfig(const json& patch) {
         const auto& a = patch["audio"];
         if (a.contains("bitrate"))     enc_cfg_.audio_bitrate = a.value("bitrate", enc_cfg_.audio_bitrate);
         if (a.contains("sample_rate")) enc_cfg_.sample_rate   = a.value("sample_rate", enc_cfg_.sample_rate);
+        if (a.contains("codec")) {
+            std::string ac = a.value("codec", enc_cfg_.audio_codec);
+            std::transform(ac.begin(), ac.end(), ac.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            if (ac == "aac" || ac == "mp2") {
+                enc_cfg_.audio_codec = ac;
+            } else {
+                logger_->warn("patch audio.codec=\"{}\" unknown, keeping {}",
+                              ac, enc_cfg_.audio_codec);
+            }
+        }
     }
     if (patch.contains("mpegts") && patch["mpegts"].is_object()) {
         const auto& m = patch["mpegts"];
@@ -1043,6 +1062,7 @@ nlohmann::json ChannelInstance::status() const {
     out["encoder_mode"]  = enc_cfg_.encoder_mode;
     out["gpu_index"]     = enc_cfg_.gpu_index;
     out["video_codec"]   = enc_cfg_.video_codec;
+    out["audio_codec"]   = enc_cfg_.audio_codec;
     out["mpegts"]        = {
         {"service_name",        enc_cfg_.service_name},
         {"service_provider",    enc_cfg_.service_provider},

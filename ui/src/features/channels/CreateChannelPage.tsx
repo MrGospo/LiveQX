@@ -26,6 +26,7 @@ const createChannelSchema = z.object({
   encoder_mode: z.enum(['auto', 'cpu', 'nvenc', 'qsv', 'vaapi']).default('auto'),
   gpu_index: z.coerce.number().int().min(0).default(0),
   video_codec: z.enum(['h264', 'mpeg2video']).default('h264'),
+  audio_codec: z.enum(['aac', 'mp2']).default('aac'),
   resolution: z.string().regex(/^\d+x\d+$/, 'e.g. 1920x1080').default('1920x1080'),
   fps: z.coerce.number().int().min(1).max(120).default(25),
   bitrate_kbps: z.coerce.number().int().min(100).max(100_000).default(4000),
@@ -90,6 +91,7 @@ export default function CreateChannelPage() {
     resolver: zodResolver(createChannelSchema),
     defaultValues: {
       name: '', numa_node: 0, encoder_mode: 'auto', gpu_index: 0, video_codec: 'h264',
+      audio_codec: 'aac',
       resolution: '1920x1080', fps: 25, bitrate_kbps: 4000, preset: 'veryfast',
       default_photo_duration: 10,
       fallback_image_path: '',
@@ -181,6 +183,7 @@ export default function CreateChannelPage() {
           resolution: v.resolution,
           fps: v.fps,
           bitrate: v.bitrate_kbps * 1000,
+          ...(v.audio_codec !== 'aac' ? { audio: { codec: v.audio_codec } } : {}),
           default_photo_duration: v.default_photo_duration,
           ...(v.fallback_image_path ? { fallback: { image_path: v.fallback_image_path } } : {}),
           ...(contentSource ? { content_source: contentSource } : {}),
@@ -297,6 +300,15 @@ export default function CreateChannelPage() {
                   <option value="mpeg2video">MPEG-2 Video</option>
                 </select>
                 <p className="text-xs text-[var(--text-muted)]">{t('channels.config.videoCodecHint')}</p>
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className={labelCls}>{t('channels.config.fieldAudioCodec')}</label>
+                <select {...register('audio_codec')} className={inputCls}>
+                  <option value="aac">AAC-LC</option>
+                  <option value="mp2">MPEG-1 Layer II (MP2)</option>
+                </select>
+                <p className="text-xs text-[var(--text-muted)]">{t('channels.config.audioCodecHint')}</p>
               </div>
 
               <div className="flex flex-col gap-1">

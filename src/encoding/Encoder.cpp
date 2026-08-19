@@ -156,15 +156,27 @@ bool Encoder::open() {
         return false;
     }
 
-    // ── Audio encoder: AAC (best-effort) ─────────────────────────────────
-    const AVCodec* acodec = avcodec_find_encoder(AV_CODEC_ID_AAC);
+    // ── Audio encoder: AAC (default) or MP2 (best-effort) ────────────────
+    // AAC wants planar float (FLTP); the DVB-standard MP2 wants packed
+    // int16 (S16). We commit to one sample layout per lifetime of the
+    // Encoder — the emit loop below dispatches on it.
+    const bool want_mp2 = (cfg_.audio_codec == "mp2");
+    const AVCodec* acodec = avcodec_find_encoder(want_mp2 ? AV_CODEC_ID_MP2
+                                                          : AV_CODEC_ID_AAC);
+    if (!acodec && want_mp2) {
+        lg().warn("Encoder: MP2 encoder not available, falling back to AAC");
+        acodec = avcodec_find_encoder(AV_CODEC_ID_AAC);
+    }
+    const AVSampleFormat asf_actual = (acodec && acodec->id == AV_CODEC_ID_MP2)
+                                          ? AV_SAMPLE_FMT_S16
+                                          : AV_SAMPLE_FMT_FLTP;
     if (acodec) {
         impl_->audio_ctx.reset(avcodec_alloc_context3(acodec));
         if (impl_->audio_ctx) {
             AVCodecContext* ac  = impl_->audio_ctx.get();
             ac->sample_rate     = cfg_.sample_rate;
             av_channel_layout_default(&ac->ch_layout, 2);
-            ac->sample_fmt      = AV_SAMPLE_FMT_FLTP;
+            ac->sample_fmt      = asf_actual;
             ac->bit_rate        = cfg_.audio_bitrate;
             ac->time_base       = { 1, cfg_.sample_rate };
             if (needs_global_header)
@@ -182,7 +194,7 @@ bool Encoder::open() {
         impl_->audio_frame.reset(av_frame_alloc());
         if (impl_->audio_frame) {
             AVFrame* af    = impl_->audio_frame.get();
-            af->format     = AV_SAMPLE_FMT_FLTP;
+            af->format     = impl_->audio_ctx->sample_fmt;
             av_channel_layout_default(&af->ch_layout, 2);
             af->sample_rate= cfg_.sample_rate;
             af->nb_samples = impl_->audio_frame_size;
@@ -292,9 +304,12 @@ bool Encoder::open() {
         av_interleaved_write_frame(impl->fmt_ctx, pkt);
     });
 
-    lg().info("Encoder: opened {}×{} @{}fps, video={}, preset={}",
+    const char* audio_name = impl_->audio_ctx
+        ? avcodec_get_name(impl_->audio_ctx->codec_id)
+        : "none";
+    lg().info("Encoder: opened {}×{} @{}fps, video={}, audio={}, preset={}",
               cfg_.width, cfg_.height, cfg_.fps,
-              impl_->video->name(), cfg_.preset);
+              impl_->video->name(), audio_name, cfg_.preset);
     return true;
 }
 
@@ -374,11 +389,23 @@ void Encoder::pushFrame(const Frame& video, const AudioFrame& audio) {
         while (static_cast<int>(impl_->audio_buf.size() - impl_->audio_buf_pos) >= chunk) {
             av_frame_make_writable(impl_->audio_frame.get());
 
-            float* ch0 = reinterpret_cast<float*>(impl_->audio_frame->data[0]);
-            float* ch1 = reinterpret_cast<float*>(impl_->audio_frame->data[1]);
-            for (int i = 0; i < impl_->audio_frame_size; ++i) {
-                ch0[i] = impl_->audio_buf[impl_->audio_buf_pos + i * 2];
-                ch1[i] = impl_->audio_buf[impl_->audio_buf_pos + i * 2 + 1];
+            // AAC → FLTP (planar float, one buffer per channel).
+            // MP2 → S16  (packed int16, LRLRLR… in data[0]).
+            if (impl_->audio_frame->format == AV_SAMPLE_FMT_S16) {
+                int16_t* out = reinterpret_cast<int16_t*>(impl_->audio_frame->data[0]);
+                for (int i = 0; i < chunk; ++i) {
+                    float s = impl_->audio_buf[impl_->audio_buf_pos + i];
+                    if (s >  1.0f) s =  1.0f;
+                    if (s < -1.0f) s = -1.0f;
+                    out[i] = static_cast<int16_t>(s * 32767.0f);
+                }
+            } else {
+                float* ch0 = reinterpret_cast<float*>(impl_->audio_frame->data[0]);
+                float* ch1 = reinterpret_cast<float*>(impl_->audio_frame->data[1]);
+                for (int i = 0; i < impl_->audio_frame_size; ++i) {
+                    ch0[i] = impl_->audio_buf[impl_->audio_buf_pos + i * 2];
+                    ch1[i] = impl_->audio_buf[impl_->audio_buf_pos + i * 2 + 1];
+                }
             }
             impl_->audio_buf_pos += static_cast<size_t>(chunk);
             if (impl_->audio_buf_pos > 8192) {

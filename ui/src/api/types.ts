@@ -53,6 +53,7 @@ export type ChannelStatus  = components['schemas']['ChannelStatus'] & {
   // until the next gen:api-types run — mirrors the pattern used for
   // mpegts / MountSpec above.
   video_codec?: 'h264' | 'mpeg2video';
+  audio_codec?: 'aac' | 'mp2';
 };
 export type LiveInputStatus = components['schemas']['LiveInputStatus'];
 export type OutputStatus   = components['schemas']['OutputStatus'];

@@ -174,6 +174,8 @@
       "fieldEncoderMode": "Режим энкодера",
       "fieldVideoCodec": "Видео-кодек",
       "videoCodecHint": "H.264 — стандарт для современных приёмников. MPEG-2 — только для устаревших hospitality-приставок, которые H.264 не декодируют. MPEG-2 всегда собирается на CPU: если выбран GPU-режим, он игнорируется.",
+      "fieldAudioCodec": "Аудио-кодек",
+      "audioCodecHint": "AAC-LC — стандарт для современных приёмников и OTT. MP2 (MPEG-1 Layer II) — классический DVB-кодек для приставок и приёмников, у которых нет лицензии AAC или которые жёстко читают stream_type в PMT.",
       "fieldGpuIndex": "GPU-индекс",
       "fieldMaxB": "Макс. B-кадров",
       "fieldPreloadSec": "Буфер декодера (сек)",

@@ -53,6 +53,14 @@ public:
         //                  H.264 reliably.
         std::string video_codec    = "h264";
 
+        // Audio codec selection.
+        //   "aac" — AAC-LC (default). Modern set-tops and OTT decode this.
+        //   "mp2" — MPEG-1 Layer II. The DVB-standard audio codec for
+        //           broadcast/IPTV; some hospitality middleware and older
+        //           set-tops require it because they either lack an AAC
+        //           license or map the PMT stream_type strictly.
+        std::string audio_codec    = "aac";
+
         // Broadcast/IPTV middleware knobs. Middleware like Otrum and
         // hospitality set-tops (LG Pro:Centric etc.) identify the service
         // by these fields and are strict about PSI/SI shape. Defaults

@@ -1241,6 +1241,7 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const baseEncoderMode = ch.encoder_mode ?? 'auto';
   const baseGpuIndex    = ch.gpu_index ?? 0;
   const baseVideoCodec  = ch.video_codec ?? 'h264';
+  const baseAudioCodec  = ch.audio_codec ?? 'aac';
   const baseMaxB        = ch.max_b_frames ?? 2;
   const basePreloadSec  = ch.preload_sec ?? 4.0;
   const baseTimezone        = ch.channel_timezone ?? '';
@@ -1282,6 +1283,7 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const [encoderMode, setEncoderMode] = React.useState<string>(baseEncoderMode);
   const [gpuIndex, setGpuIndex]     = React.useState<string>(String(baseGpuIndex));
   const [videoCodec, setVideoCodec] = React.useState<string>(baseVideoCodec);
+  const [audioCodec, setAudioCodec] = React.useState<string>(baseAudioCodec);
   const [maxB, setMaxB]             = React.useState(String(baseMaxB));
   const [preloadSec, setPreloadSec] = React.useState(String(basePreloadSec));
   const [timezone, setTimezone]         = React.useState(baseTimezone);
@@ -1348,6 +1350,7 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
       const sr = parseInt(sampleRate, 10);
       if (!isNaN(sr)) audio.sample_rate = sr;
     }
+    if (audioCodec !== baseAudioCodec) audio.codec = audioCodec;
     if (Object.keys(audio).length) p.audio = audio;
     const nDur = parseFloat(photoDur);
     if (!isNaN(nDur) && nDur !== basePhotoDur) p.default_photo_duration = nDur;
@@ -1581,6 +1584,14 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
               {t('channels.config.secAudio')}
             </h2>
             <div className="grid grid-cols-2 gap-4">
+              <Field label={t('channels.config.fieldAudioCodec')}
+                hint={t('channels.config.audioCodecHint')}
+                warn={audioCodec !== baseAudioCodec ? t('channels.config.restartRequired') : undefined}>
+                <select value={audioCodec} onChange={e => setAudioCodec(e.target.value)} className={selectCls}>
+                  <option value="aac">AAC-LC</option>
+                  <option value="mp2">MPEG-1 Layer II (MP2)</option>
+                </select>
+              </Field>
               <Field label={t('channels.config.fieldAudioBitrate')}>
                 <input type="number" min={32} max={512} value={audioBitrate}
                   onChange={e => setAudioBitrate(e.target.value)}

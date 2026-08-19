@@ -135,7 +135,7 @@ rm -rf "${INSTALL_DIR}"
     --disable-everything \
     \
     --enable-decoder=h264,hevc,aac,mp3,ac3,pcm_s16le,pcm_s16be,pcm_f32le,pcm_f32be,mjpeg,png,bmp,tiff,gif,rawvideo,ppm,pgm \
-    --enable-encoder=libx264,mpeg2video,aac \
+    --enable-encoder=libx264,mpeg2video,aac,mp2 \
     --enable-muxer=mpegts,mp4,null,flv,hls,rtp,rtp_mpegts \
     --enable-demuxer=mov,mp4,matroska,avi,flv,image2,mjpeg,mpegts,yuv4mpegpipe,hls,rtsp,sdp,live_flv \
     --enable-parser=h264,hevc,aac,mpegaudio,png \
