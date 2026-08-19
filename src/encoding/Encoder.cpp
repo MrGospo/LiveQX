@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -230,7 +231,48 @@ bool Encoder::open() {
         }
     }
 
-    if (avformat_write_header(impl_->fmt_ctx, nullptr) < 0) {
+    // Muxer options for the MPEG-TS output. Historically we passed nullptr
+    // here, which meant the stream had no SDT (Otrum, LG Pro:Centric and
+    // other hospitality/IPTV middleware reject or mis-identify such
+    // streams) and default service_id/name/etc. Now:
+    //   mpegts_flags = system_b | resend_headers
+    //     system_b        — emit SDT (Service Description Table). Without
+    //                       SDT strict middleware can't map the program to
+    //                       a channel entry.
+    //     resend_headers  — repeat PAT/PMT immediately after every keyframe
+    //                       so a decoder that joined mid-GOP resyncs on the
+    //                       next I-frame instead of waiting for the next
+    //                       PAT interval.
+    //   service_id / service_name / service_provider / TSID / ONID are all
+    //   configurable per channel — critical when multiple channels share
+    //   the same multicast subnet: identical service_id causes middleware
+    //   to collide programs together.
+    //   muxrate > 0 turns on FFmpeg's null-packet stuffing so the UDP
+    //   stream is truly CBR. Leave at 0 for VBR (backwards compatible).
+    //   {sdt,pat}_period accept a floating-point value in seconds.
+    AVDictionary* muxopts = nullptr;
+    av_dict_set(&muxopts, "mpegts_flags", "+system_b+resend_headers", 0);
+    av_dict_set(&muxopts, "service_provider", cfg_.service_provider.c_str(), 0);
+    av_dict_set(&muxopts, "service_name", cfg_.service_name.c_str(), 0);
+    av_dict_set_int(&muxopts, "mpegts_service_id", cfg_.service_id, 0);
+    av_dict_set_int(&muxopts, "mpegts_transport_stream_id", cfg_.transport_stream_id, 0);
+    av_dict_set_int(&muxopts, "mpegts_original_network_id", cfg_.original_network_id, 0);
+    if (cfg_.mux_rate > 0)
+        av_dict_set_int(&muxopts, "muxrate", cfg_.mux_rate, 0);
+    if (cfg_.sdt_period_ms > 0) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.3f", cfg_.sdt_period_ms / 1000.0);
+        av_dict_set(&muxopts, "sdt_period", buf, 0);
+    }
+    if (cfg_.pat_period_ms > 0) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.3f", cfg_.pat_period_ms / 1000.0);
+        av_dict_set(&muxopts, "pat_period", buf, 0);
+    }
+
+    const int wh_rc = avformat_write_header(impl_->fmt_ctx, &muxopts);
+    av_dict_free(&muxopts);
+    if (wh_rc < 0) {
         lg().error("Encoder: avformat_write_header failed");
         return false;
     }

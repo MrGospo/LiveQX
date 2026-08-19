@@ -32,7 +32,24 @@ export type ChannelState   = components['schemas']['ChannelState'];
 export type OutputState    = components['schemas']['OutputState'];
 export type LiveInputState = components['schemas']['LiveInputState'];
 export type HealthState    = components['schemas']['HealthState'];
-export type ChannelStatus  = components['schemas']['ChannelStatus'];
+
+// MPEG-TS / IPTV broadcast knobs surfaced by ChannelInstance::status() under
+// the `mpegts` key. Held here (rather than in openapi.ts) until the next
+// gen:api-types run, mirroring the pattern used for MountSpec below.
+export interface MpegtsConfig {
+  service_name?: string;
+  service_provider?: string;
+  service_id?: number;
+  transport_stream_id?: number;
+  original_network_id?: number;
+  mux_rate?: number;
+  sdt_period_ms?: number;
+  pat_period_ms?: number;
+}
+
+export type ChannelStatus  = components['schemas']['ChannelStatus'] & {
+  mpegts?: MpegtsConfig;
+};
 export type LiveInputStatus = components['schemas']['LiveInputStatus'];
 export type OutputStatus   = components['schemas']['OutputStatus'];
 

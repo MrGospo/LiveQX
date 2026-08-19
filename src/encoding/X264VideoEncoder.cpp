@@ -85,6 +85,19 @@ bool X264VideoEncoder::open() {
     vc->framerate    = { cfg.fps, 1 };
     vc->gop_size     = cfg.fps;
     vc->max_b_frames = cfg.max_b_frames;
+    // Broadcast-grade CBR. rc_max_rate == rc_min_rate == rc_buffer_size ==
+    // bit_rate is the textbook single-second CBR VBV: the decoder never
+    // sees a bitrate spike above the declared value, and IPTV middleware
+    // like Otrum / hospitality-TV decoders (LG Pro:Centric etc.) can rely
+    // on the vbv envelope. Without this a scene cut easily peaks 2–3× the
+    // nominal bitrate, blowing the decoder buffer and causing macroblocks
+    // to "melt". VLC on a PC is tolerant thanks to its own client buffer.
+    vc->rc_max_rate    = cfg.bitrate;
+    vc->rc_min_rate    = cfg.bitrate;
+    vc->rc_buffer_size = static_cast<int>(cfg.bitrate);
+    // Closed-GOP so every GOP is independently decodable — required for
+    // clean channel-tune-in on set-tops that latch on the next IDR.
+    vc->flags |= AV_CODEC_FLAG_CLOSED_GOP;
     if (cfg.global_header)
         vc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
@@ -95,6 +108,24 @@ bool X264VideoEncoder::open() {
     // really wants the lowest-latency live profile (max_b == 0).
     if (cfg.max_b_frames == 0)
         av_dict_set(&vopts, "tune", "zerolatency", 0);
+    // x264-params is the only way to reach these libx264 internals — none
+    // of them are surfaced as AVCodecContext fields.
+    //   nal-hrd=cbr     — signal CBR in the HRD parameters so downstream
+    //                     decoders trust the vbv envelope. Mandatory for
+    //                     spec-compliant CBR.
+    //   force-cfr=1     — refuse to drop or duplicate frames; keeps output
+    //                     truly constant-framerate for PCR stability.
+    //   aud=1           — emit Access Unit Delimiter NALs. Many
+    //                     hospitality-TV decoders and IPTV middleware
+    //                     require AUDs to find frame boundaries reliably.
+    //   sc_threshold=0  — disable scene-cut IDR insertion. Scene cuts
+    //                     would sit outside the fixed GOP grid and blow
+    //                     past vbv-maxrate on random frames, defeating
+    //                     the CBR envelope above.
+    av_dict_set(&vopts,
+                "x264-params",
+                "nal-hrd=cbr:force-cfr=1:aud=1:sc_threshold=0",
+                0);
     const int vopen = avcodec_open2(vc, vcodec, &vopts);
     av_dict_free(&vopts);
     if (vopen < 0) {

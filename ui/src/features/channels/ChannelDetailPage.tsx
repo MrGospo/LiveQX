@@ -1259,6 +1259,14 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const basePlaybackSink = ch.playback_log?.sink ?? 'none';
   const basePlaybackRetention =
     ch.playback_log?.retention_days != null ? String(ch.playback_log.retention_days) : '';
+  const baseServiceName        = ch.mpegts?.service_name ?? 'LiveQX Channel';
+  const baseServiceProvider    = ch.mpegts?.service_provider ?? 'LiveQX';
+  const baseServiceId          = ch.mpegts?.service_id ?? 1;
+  const baseTransportStreamId  = ch.mpegts?.transport_stream_id ?? 1;
+  const baseOriginalNetworkId  = ch.mpegts?.original_network_id ?? 1;
+  const baseMuxRate            = ch.mpegts?.mux_rate ?? 0;
+  const baseSdtPeriodMs        = ch.mpegts?.sdt_period_ms ?? 0;
+  const basePatPeriodMs        = ch.mpegts?.pat_period_ms ?? 0;
   // default_transition surface (см. fix48): backend всегда отдаёт type/duration/easing.
   // В UI «hardcut» отображается как «нет» (опция со значением '').
   const baseTrTypeRaw    = ch.default_transition?.type ?? 'hardcut';
@@ -1291,6 +1299,14 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const [pickCache, setPickCache]   = React.useState(false);
   const [sinkType, setSinkType]     = React.useState<string>(basePlaybackSink);
   const [retentionDays, setRetentionDays] = React.useState<string>(basePlaybackRetention);
+  const [serviceName, setServiceName]             = React.useState<string>(baseServiceName);
+  const [serviceProvider, setServiceProvider]     = React.useState<string>(baseServiceProvider);
+  const [serviceId, setServiceId]                 = React.useState<string>(String(baseServiceId));
+  const [transportStreamId, setTransportStreamId] = React.useState<string>(String(baseTransportStreamId));
+  const [originalNetworkId, setOriginalNetworkId] = React.useState<string>(String(baseOriginalNetworkId));
+  const [muxRateKbps, setMuxRateKbps]             = React.useState<string>(String(Math.round(baseMuxRate / 1000)));
+  const [sdtPeriodMs, setSdtPeriodMs]             = React.useState<string>(String(baseSdtPeriodMs));
+  const [patPeriodMs, setPatPeriodMs]             = React.useState<string>(String(basePatPeriodMs));
 
   const [rawJson, setRawJson] = React.useState('');
   const [rawError, setRawError] = React.useState<string | null>(null);
@@ -1364,6 +1380,29 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
           cache_path: csCache.trim(),
         };
       }
+    }
+    // mpegts — IPTV/broadcast knobs. Applied through updateConfig(); most
+    // fields take effect on the next start (or hot-swap where the muxer
+    // supports it). Diff each field independently and only send changed
+    // ones so an unrelated PATCH doesn't rewrite the whole subobject.
+    {
+      const mp: Record<string, unknown> = {};
+      if (serviceName !== baseServiceName)         mp.service_name = serviceName;
+      if (serviceProvider !== baseServiceProvider) mp.service_provider = serviceProvider;
+      const nSid  = parseInt(serviceId, 10);
+      const nTsid = parseInt(transportStreamId, 10);
+      const nOnid = parseInt(originalNetworkId, 10);
+      const nMux  = parseInt(muxRateKbps, 10);
+      const nSdt  = parseInt(sdtPeriodMs, 10);
+      const nPat  = parseInt(patPeriodMs, 10);
+      if (!isNaN(nSid)  && nSid  !== baseServiceId)         mp.service_id = nSid;
+      if (!isNaN(nTsid) && nTsid !== baseTransportStreamId) mp.transport_stream_id = nTsid;
+      if (!isNaN(nOnid) && nOnid !== baseOriginalNetworkId) mp.original_network_id = nOnid;
+      const baseMuxKbps = Math.round(baseMuxRate / 1000);
+      if (!isNaN(nMux)  && nMux !== baseMuxKbps)            mp.mux_rate = nMux * 1000;
+      if (!isNaN(nSdt)  && nSdt !== baseSdtPeriodMs)        mp.sdt_period_ms = nSdt;
+      if (!isNaN(nPat)  && nPat !== basePatPeriodMs)        mp.pat_period_ms = nPat;
+      if (Object.keys(mp).length) p.mpegts = mp;
     }
     // playback_log — patched only when stopped, и только если изменилось.
     if (isStopped) {
@@ -1541,6 +1580,58 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
                   <option value="">{t('common.none')}</option>
                   {SAMPLE_RATES.map(r => <option key={r} value={r}>{r} Hz</option>)}
                 </select>
+              </Field>
+            </div>
+          </Block>
+
+          {/* MPEG-TS / IPTV */}
+          <Block>
+            <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">
+              {t('channels.config.secMpegts')}
+            </h2>
+            <p className="text-xs text-[var(--text-muted)] mb-4">
+              {t('channels.config.mpegtsHint')}
+            </p>
+            <div className="grid grid-cols-2 gap-4">
+              <Field label={t('channels.config.serviceName')} hint={t('channels.config.serviceNameHint')}>
+                <input value={serviceName}
+                  onChange={e => setServiceName(e.target.value)}
+                  className={inputCls} placeholder="LiveQX Channel" />
+              </Field>
+              <Field label={t('channels.config.serviceProvider')} hint={t('channels.config.serviceProviderHint')}>
+                <input value={serviceProvider}
+                  onChange={e => setServiceProvider(e.target.value)}
+                  className={inputCls} placeholder="LiveQX" />
+              </Field>
+              <Field label={t('channels.config.serviceId')} hint={t('channels.config.serviceIdHint')}>
+                <input type="number" min={1} max={65535} value={serviceId}
+                  onChange={e => setServiceId(e.target.value)}
+                  className={inputCls} placeholder="1" />
+              </Field>
+              <Field label={t('channels.config.transportStreamId')} hint={t('channels.config.transportStreamIdHint')}>
+                <input type="number" min={1} max={65535} value={transportStreamId}
+                  onChange={e => setTransportStreamId(e.target.value)}
+                  className={inputCls} placeholder="1" />
+              </Field>
+              <Field label={t('channels.config.originalNetworkId')} hint={t('channels.config.originalNetworkIdHint')}>
+                <input type="number" min={1} max={65535} value={originalNetworkId}
+                  onChange={e => setOriginalNetworkId(e.target.value)}
+                  className={inputCls} placeholder="1" />
+              </Field>
+              <Field label={t('channels.config.muxRateKbps')} hint={t('channels.config.muxRateHint')}>
+                <input type="number" min={0} value={muxRateKbps}
+                  onChange={e => setMuxRateKbps(e.target.value)}
+                  className={inputCls} placeholder="0" />
+              </Field>
+              <Field label={t('channels.config.sdtPeriodMs')} hint={t('channels.config.sdtPeriodHint')}>
+                <input type="number" min={0} value={sdtPeriodMs}
+                  onChange={e => setSdtPeriodMs(e.target.value)}
+                  className={inputCls} placeholder="0" />
+              </Field>
+              <Field label={t('channels.config.patPeriodMs')} hint={t('channels.config.patPeriodHint')}>
+                <input type="number" min={0} value={patPeriodMs}
+                  onChange={e => setPatPeriodMs(e.target.value)}
+                  className={inputCls} placeholder="0" />
               </Field>
             </div>
           </Block>

@@ -43,6 +43,27 @@ public:
         // GPU device index for the selected backend; ignored by CPU.
         // 0 = first GPU on the host, 1 = second, etc.
         int         gpu_index      = 0;
+
+        // Broadcast/IPTV middleware knobs. Middleware like Otrum and
+        // hospitality set-tops (LG Pro:Centric etc.) identify the service
+        // by these fields and are strict about PSI/SI shape. Defaults
+        // match a typical single-service DVB-IP transport stream and are
+        // backwards-compatible: leaving them alone reproduces the pre-fix
+        // behaviour, except SDT is now always emitted (see mpegts_flags
+        // in Encoder.cpp).
+        std::string service_name        = "LiveQX Channel";
+        std::string service_provider    = "LiveQX";
+        int         service_id          = 1;   // program_number in PAT
+        int         transport_stream_id = 1;
+        int         original_network_id = 1;
+        // 0 = VBR (default, pre-fix behaviour). >0 = constant mux rate in
+        // bit/s with null-packet stuffing. For strict middleware set this
+        // to video_bitrate + audio_bitrate + ~15 % headroom.
+        int64_t     mux_rate            = 0;
+        // 0 = FFmpeg defaults (SDT=500 ms, PAT/PMT=100 ms). Some strict
+        // middleware prefers ~2000 / 40 ms.
+        int         sdt_period_ms       = 0;
+        int         pat_period_ms       = 0;
     };
 
     explicit Encoder(const Config& cfg);

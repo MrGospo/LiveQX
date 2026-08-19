@@ -348,6 +348,40 @@ void ChannelInstance::buildLongLived(const json& cfg) {
         enc_cfg_.gpu_index = 0;
     }
 
+    // Broadcast/IPTV knobs. Optional sub-object cfg.mpegts.{...}. Absent
+    // means "use Encoder::Config defaults", which reproduces the pre-fix
+    // shape (service_id=1, TSID=1, VBR muxer) — but SDT is now always
+    // emitted regardless (unconditional in Encoder.cpp).
+    if (cfg.contains("mpegts") && cfg["mpegts"].is_object()) {
+        const auto& m = cfg["mpegts"];
+        enc_cfg_.service_name        = m.value("service_name",        enc_cfg_.service_name);
+        enc_cfg_.service_provider    = m.value("service_provider",    enc_cfg_.service_provider);
+        enc_cfg_.service_id          = m.value("service_id",          enc_cfg_.service_id);
+        enc_cfg_.transport_stream_id = m.value("transport_stream_id", enc_cfg_.transport_stream_id);
+        enc_cfg_.original_network_id = m.value("original_network_id", enc_cfg_.original_network_id);
+        enc_cfg_.mux_rate            = m.value("mux_rate",            enc_cfg_.mux_rate);
+        enc_cfg_.sdt_period_ms       = m.value("sdt_period_ms",       enc_cfg_.sdt_period_ms);
+        enc_cfg_.pat_period_ms       = m.value("pat_period_ms",       enc_cfg_.pat_period_ms);
+        // Clamp service ids to the DVB spec range [1..0xFFFF] — 0 is
+        // reserved and negative values simply don't make sense here.
+        auto clamp16 = [&](int v, const char* n, int fallback) {
+            if (v < 1 || v > 0xFFFF) {
+                logger_->warn("mpegts.{}={} out of range [1..65535], using {}", n, v, fallback);
+                return fallback;
+            }
+            return v;
+        };
+        enc_cfg_.service_id          = clamp16(enc_cfg_.service_id,          "service_id",          1);
+        enc_cfg_.transport_stream_id = clamp16(enc_cfg_.transport_stream_id, "transport_stream_id", 1);
+        enc_cfg_.original_network_id = clamp16(enc_cfg_.original_network_id, "original_network_id", 1);
+        if (enc_cfg_.mux_rate < 0) {
+            logger_->warn("mpegts.mux_rate={} negative, using 0 (VBR)", enc_cfg_.mux_rate);
+            enc_cfg_.mux_rate = 0;
+        }
+        if (enc_cfg_.sdt_period_ms < 0) enc_cfg_.sdt_period_ms = 0;
+        if (enc_cfg_.pat_period_ms < 0) enc_cfg_.pat_period_ms = 0;
+    }
+
     // fix12 c3: migrate legacy "output" → outputs[]. After this block
     // cfg_["outputs"] is the authoritative source (and "output" is gone).
     // Migration is in-memory only — build() must be a disk read-only op
@@ -860,6 +894,41 @@ bool ChannelInstance::updateConfig(const json& patch) {
         if (a.contains("bitrate"))     enc_cfg_.audio_bitrate = a.value("bitrate", enc_cfg_.audio_bitrate);
         if (a.contains("sample_rate")) enc_cfg_.sample_rate   = a.value("sample_rate", enc_cfg_.sample_rate);
     }
+    if (patch.contains("mpegts") && patch["mpegts"].is_object()) {
+        const auto& m = patch["mpegts"];
+        auto clamp16 = [&](int v, const char* n, int fallback) {
+            if (v < 1 || v > 0xFFFF) {
+                logger_->warn("patch mpegts.{}={} out of range [1..65535], keeping {}", n, v, fallback);
+                return fallback;
+            }
+            return v;
+        };
+        if (m.contains("service_name"))
+            enc_cfg_.service_name = m.value("service_name", enc_cfg_.service_name);
+        if (m.contains("service_provider"))
+            enc_cfg_.service_provider = m.value("service_provider", enc_cfg_.service_provider);
+        if (m.contains("service_id"))
+            enc_cfg_.service_id = clamp16(m.value("service_id", enc_cfg_.service_id),
+                                          "service_id", enc_cfg_.service_id);
+        if (m.contains("transport_stream_id"))
+            enc_cfg_.transport_stream_id = clamp16(m.value("transport_stream_id", enc_cfg_.transport_stream_id),
+                                                   "transport_stream_id", enc_cfg_.transport_stream_id);
+        if (m.contains("original_network_id"))
+            enc_cfg_.original_network_id = clamp16(m.value("original_network_id", enc_cfg_.original_network_id),
+                                                   "original_network_id", enc_cfg_.original_network_id);
+        if (m.contains("mux_rate")) {
+            int64_t mr = m.value("mux_rate", enc_cfg_.mux_rate);
+            enc_cfg_.mux_rate = mr < 0 ? 0 : mr;
+        }
+        if (m.contains("sdt_period_ms")) {
+            int v = m.value("sdt_period_ms", enc_cfg_.sdt_period_ms);
+            enc_cfg_.sdt_period_ms = v < 0 ? 0 : v;
+        }
+        if (m.contains("pat_period_ms")) {
+            int v = m.value("pat_period_ms", enc_cfg_.pat_period_ms);
+            enc_cfg_.pat_period_ms = v < 0 ? 0 : v;
+        }
+    }
     // fix33 C — channel_timezone hot-swap:
     //   patch.channel_timezone == null / "" → switch to inherit-server-tz
     //   patch.channel_timezone == "Asia/..." → explicit override
@@ -944,6 +1013,16 @@ nlohmann::json ChannelInstance::status() const {
     out["max_b_frames"]  = enc_cfg_.max_b_frames;
     out["encoder_mode"]  = enc_cfg_.encoder_mode;
     out["gpu_index"]     = enc_cfg_.gpu_index;
+    out["mpegts"]        = {
+        {"service_name",        enc_cfg_.service_name},
+        {"service_provider",    enc_cfg_.service_provider},
+        {"service_id",          enc_cfg_.service_id},
+        {"transport_stream_id", enc_cfg_.transport_stream_id},
+        {"original_network_id", enc_cfg_.original_network_id},
+        {"mux_rate",            enc_cfg_.mux_rate},
+        {"sdt_period_ms",       enc_cfg_.sdt_period_ms},
+        {"pat_period_ms",       enc_cfg_.pat_period_ms},
+    };
     out["preload_sec"]      = cfg_.value("preload_sec", preload_sec_);
     // fix33 C — channel_timezone surface:
     //   channel_timezone   : explicit override string or null (inherit)

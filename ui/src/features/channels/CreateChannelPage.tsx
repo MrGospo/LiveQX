@@ -57,6 +57,13 @@ const createChannelSchema = z.object({
   // for 'db' (SQLite auto-purge).
   log_sink: z.enum(['none', 'file', 'db']).default('none'),
   log_retention_days: z.coerce.number().int().min(0).max(3650).default(90),
+  // MPEG-TS IPTV knobs — only surfaced for multicast output in the wizard.
+  // Multiple channels sharing a multicast subnet MUST have distinct
+  // service_id, or middleware collapses them into one program. Rest of the
+  // mpegts fields (TSID, ONID, mux_rate, periods) stay at backend defaults
+  // and are editable later in Channel Settings.
+  mpegts_service_name: z.string().default(''),
+  mpegts_service_id: z.coerce.number().int().min(1).max(65535).default(1),
 });
 
 type FormValues = z.infer<typeof createChannelSchema>;
@@ -91,6 +98,7 @@ export default function CreateChannelPage() {
       output_port: 4000, output_url: '', output_dir: '',
       output_bind_address: '', output_ttl: 16,
       log_sink: 'none', log_retention_days: 90,
+      mpegts_service_name: '', mpegts_service_id: 1,
     },
   });
 
@@ -178,6 +186,18 @@ export default function CreateChannelPage() {
             ? { playback_log: v.log_sink === 'db'
                 ? { sink: 'db', retention_days: v.log_retention_days }
                 : { sink: 'file' } }
+            : {}),
+          // MPEG-TS overrides — only when output is multicast AND the user
+          // touched a value away from defaults. Sending an empty subobject
+          // would just clutter cfg.json without changing behaviour.
+          ...(v.output_type === 'multicast'
+            && (v.mpegts_service_id !== 1 || v.mpegts_service_name.trim().length > 0)
+            ? { mpegts: {
+                  service_id: v.mpegts_service_id,
+                  ...(v.mpegts_service_name.trim()
+                    ? { service_name: v.mpegts_service_name.trim() }
+                    : {}),
+                } }
             : {}),
           outputs: [buildOutput(v)],
         };
@@ -478,6 +498,28 @@ export default function CreateChannelPage() {
                   <input {...register('output_ttl')} type="number" min={1} max={255} className={inputCls} />
                   {errors.output_ttl && <p className={errCls}>{errors.output_ttl.message}</p>}
                   <p className="text-xs text-[var(--text-muted)]">{t('outputs.ttlHint')}</p>
+                </div>
+              )}
+
+              {outputType === 'multicast' && (
+                <div className="col-span-2 border-t border-[var(--border-subtle)] pt-4 mt-1">
+                  <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1">
+                    {t('channels.config.secMpegts')}
+                  </h3>
+                  <p className="text-xs text-[var(--text-muted)] mb-3">{t('channels.config.mpegtsHint')}</p>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="flex flex-col gap-1">
+                      <label className={labelCls}>{t('channels.config.serviceId')}</label>
+                      <input {...register('mpegts_service_id')} type="number" min={1} max={65535} className={inputCls} />
+                      {errors.mpegts_service_id && <p className={errCls}>{errors.mpegts_service_id.message}</p>}
+                      <p className="text-xs text-[var(--text-muted)]">{t('channels.config.serviceIdHint')}</p>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className={labelCls}>{t('channels.config.serviceName')}</label>
+                      <input {...register('mpegts_service_name')} className={inputCls} placeholder="LiveQX Channel" />
+                      <p className="text-xs text-[var(--text-muted)]">{t('channels.config.serviceNameHint')}</p>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
