@@ -1330,7 +1330,9 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
     const p: Record<string, unknown> = {};
     const nBit = parseInt(bitrate, 10);
     if (!isNaN(nBit) && nBit !== baseBitrate) p.bitrate = nBit * 1000;
-    if (preset && preset !== basePreset) p.preset = preset;
+    // preset is x264-only; suppress for mpeg2video (backend ignores it and
+    // it just clutters cfg.json + confuses future readers).
+    if (videoCodec === 'h264' && preset && preset !== basePreset) p.preset = preset;
     if (encoderMode !== baseEncoderMode) p.encoder_mode = encoderMode;
     if (videoCodec !== baseVideoCodec) p.video_codec = videoCodec;
     const g = parseInt(gpuIndex, 10);
@@ -1543,11 +1545,18 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
                 <input type="number" min={100} value={bitrate}
                   onChange={e => setBitrate(e.target.value)} className={inputCls} />
               </Field>
-              <Field label={t('channels.fieldPreset')}>
-                <select value={preset} onChange={e => setPreset(e.target.value)} className={selectCls}>
-                  {PRESETS.map(p => <option key={p} value={p}>{p}</option>)}
-                </select>
-              </Field>
+              {videoCodec === 'h264' ? (
+                <Field label={t('channels.fieldPreset')}>
+                  <select value={preset} onChange={e => setPreset(e.target.value)} className={selectCls}>
+                    {PRESETS.map(p => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </Field>
+              ) : (
+                <Field label={t('channels.fieldPreset')}
+                  hint={t('channels.config.presetNotApplicableMpeg2')}>
+                  <input value={t('channels.config.presetInactive')} disabled className={roCls} />
+                </Field>
+              )}
               <Field label={t('channels.config.fieldEncoderMode')}
                 warn={encoderMode !== baseEncoderMode ? t('channels.config.restartRequired') : undefined}>
                 <select value={encoderMode} onChange={e => setEncoderMode(e.target.value)} className={selectCls}>

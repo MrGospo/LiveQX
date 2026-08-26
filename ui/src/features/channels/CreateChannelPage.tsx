@@ -110,6 +110,7 @@ export default function CreateChannelPage() {
   const fallbackPath = watch('fallback_image_path');
   const outputBind   = watch('output_bind_address');
   const logSink      = watch('log_sink');
+  const videoCodec   = watch('video_codec');
   const contentMode  = watch('content_mode');
   const contentSrc   = watch('content_source_path');
   const contentShare = watch('content_share_path');
@@ -179,7 +180,9 @@ export default function CreateChannelPage() {
           encoder_mode: v.encoder_mode,
           gpu_index: v.gpu_index,
           ...(v.video_codec !== 'h264' ? { video_codec: v.video_codec } : {}),
-          preset: v.preset,
+          // preset is an x264-only knob (Mpeg2VideoEncoder discards it) —
+          // omit for mpeg2video so cfg.json stays honest about what applies.
+          ...(v.video_codec === 'h264' ? { preset: v.preset } : {}),
           resolution: v.resolution,
           fps: v.fps,
           bitrate: v.bitrate_kbps * 1000,
@@ -323,12 +326,21 @@ export default function CreateChannelPage() {
                 {errors.bitrate_kbps && <p className={errCls}>{errors.bitrate_kbps.message}</p>}
               </div>
 
-              <div className="flex flex-col gap-1">
-                <label className={labelCls}>{t('channels.fieldPreset')}</label>
-                <select {...register('preset')} className={inputCls}>
-                  {['ultrafast','superfast','veryfast','faster','fast','medium','slow','veryslow'].map(v => <option key={v} value={v}>{v}</option>)}
-                </select>
-              </div>
+              {videoCodec === 'h264' ? (
+                <div className="flex flex-col gap-1">
+                  <label className={labelCls}>{t('channels.fieldPreset')}</label>
+                  <select {...register('preset')} className={inputCls}>
+                    {['ultrafast','superfast','veryfast','faster','fast','medium','slow','veryslow'].map(v => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-1">
+                  <label className={labelCls}>{t('channels.fieldPreset')}</label>
+                  <div className={`${inputCls} text-[var(--text-muted)] italic`}>
+                    {t('channels.config.presetNotApplicableMpeg2')}
+                  </div>
+                </div>
+              )}
 
               <div className="flex flex-col gap-1">
                 <label className={labelCls}>{t('channels.fieldPhotoDuration')}</label>
