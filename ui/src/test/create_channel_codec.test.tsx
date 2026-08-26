@@ -10,13 +10,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, it, expect, vi } from 'vitest';
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string) => key,
-    i18n: { language: 'en', changeLanguage: vi.fn() },
-  }),
-  initReactI18next: { type: '3rdParty', init: vi.fn() },
-}));
+// i18next is initialized with real EN resources in src/test/setup.ts.
 
 vi.mock('@/stores/auth', () => ({
   useAuthStore: vi.fn((selector: (s: object) => unknown) => selector({
@@ -63,7 +57,7 @@ describe('CreateChannelPage preset field', () => {
     expect(screen.getByText('ultrafast')).toBeDefined();
     expect(screen.getByText('veryslow')).toBeDefined();
     // The MPEG-2 note must NOT be present.
-    expect(screen.queryByText('channels.config.presetNotApplicableMpeg2')).toBeFalsy();
+    expect(screen.queryByText('MPEG-2 has no x264-style preset; only bitrate applies.')).toBeFalsy();
     // Sanity: the preset select is registered.
     expect(container.querySelector('select[name="preset"]')).toBeTruthy();
   });
@@ -80,6 +74,6 @@ describe('CreateChannelPage preset field', () => {
     expect(screen.queryByText('veryslow')).toBeFalsy();
     expect(container.querySelector('select[name="preset"]')).toBeFalsy();
     // Explanatory note takes their place.
-    expect(screen.queryByText('channels.config.presetNotApplicableMpeg2')).toBeTruthy();
+    expect(screen.queryByText('MPEG-2 has no x264-style preset; only bitrate applies.')).toBeTruthy();
   });
 });

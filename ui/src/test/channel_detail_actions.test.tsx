@@ -14,15 +14,10 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, it, expect, vi } from 'vitest';
 
-// ─── Module mocks (mirrors smoke.test.tsx conventions) ───────────────────────
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string) => key,
-    i18n: { language: 'en', changeLanguage: vi.fn() },
-  }),
-  initReactI18next: { type: '3rdParty', init: vi.fn() },
-}));
+// i18next is initialized with real EN resources in src/test/setup.ts —
+// assertions below use real translated strings.
 
+// ─── Module mocks (mirrors smoke.test.tsx conventions) ───────────────────────
 vi.mock('@/stores/auth', () => ({
   useAuthStore: vi.fn((selector: (s: object) => unknown) => selector({
     user: { id: 1, username: 'admin', role: 'admin' },
@@ -132,16 +127,16 @@ describe('ChannelDetailPage Play/Stop buttons', () => {
     setChannelState('running');
     const { default: ChannelDetailPage } = await import('@/features/channels/ChannelDetailPage');
     render(wrap(<ChannelDetailPage />));
-    expect(screen.queryByText('channels.stop')).toBeTruthy();
-    expect(screen.queryByText('channels.start')).toBeFalsy();
+    expect(screen.queryByText('Stop')).toBeTruthy();
+    expect(screen.queryByText('Start')).toBeFalsy();
   });
 
   it('shows Stop (not Start) when state is degraded', async () => {
     setChannelState('degraded');
     const { default: ChannelDetailPage } = await import('@/features/channels/ChannelDetailPage');
     render(wrap(<ChannelDetailPage />));
-    expect(screen.queryByText('channels.stop')).toBeTruthy();
-    expect(screen.queryByText('channels.start')).toBeFalsy();
+    expect(screen.queryByText('Stop')).toBeTruthy();
+    expect(screen.queryByText('Start')).toBeFalsy();
   });
 
   // The bug being guarded: 'failed' used to hide Stop and expose Start,
@@ -150,15 +145,15 @@ describe('ChannelDetailPage Play/Stop buttons', () => {
     setChannelState('failed');
     const { default: ChannelDetailPage } = await import('@/features/channels/ChannelDetailPage');
     render(wrap(<ChannelDetailPage />));
-    expect(screen.queryByText('channels.stop')).toBeTruthy();
-    expect(screen.queryByText('channels.start')).toBeFalsy();
+    expect(screen.queryByText('Stop')).toBeTruthy();
+    expect(screen.queryByText('Start')).toBeFalsy();
   });
 
   it('shows Start (not Stop) when state is stopped', async () => {
     setChannelState('stopped');
     const { default: ChannelDetailPage } = await import('@/features/channels/ChannelDetailPage');
     render(wrap(<ChannelDetailPage />));
-    expect(screen.queryByText('channels.start')).toBeTruthy();
-    expect(screen.queryByText('channels.stop')).toBeFalsy();
+    expect(screen.queryByText('Start')).toBeTruthy();
+    expect(screen.queryByText('Stop')).toBeFalsy();
   });
 });

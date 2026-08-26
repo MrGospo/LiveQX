@@ -8,14 +8,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, it, expect, vi } from 'vitest';
 
-// ─── Mock i18next ─────────────────────────────────────────────────────────────
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string) => key,
-    i18n: { language: 'en', changeLanguage: vi.fn() },
-  }),
-  initReactI18next: { type: '3rdParty', init: vi.fn() },
-}));
+// i18next is initialized with real EN resources in src/test/setup.ts —
+// tests below match against real translated strings, not i18n keys.
 
 // ─── Mock Zustand stores ──────────────────────────────────────────────────────
 vi.mock('@/stores/auth', () => ({
@@ -72,6 +66,8 @@ vi.mock('@/api/queries/auth', () => ({
   useDeleteUser: () => ({ mutate: vi.fn() }),
   useEnableUser: () => ({ mutate: vi.fn() }),
   useUnlockUser: () => ({ mutate: vi.fn() }),
+  usePurgeUser:  () => ({ mutate: vi.fn(), isPending: false }),
+  useResetPassword: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useChangePassword: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
@@ -150,13 +146,13 @@ describe('DashboardPage', () => {
   it('renders without crashing', async () => {
     const { default: DashboardPage } = await import('@/features/channels/DashboardPage');
     render(wrap(<DashboardPage />));
-    expect(screen.getByText('dashboard.stats.total')).toBeDefined();
+    expect(screen.getByText('Total channels')).toBeDefined();
   });
 
   it('shows stats cards', async () => {
     const { default: DashboardPage } = await import('@/features/channels/DashboardPage');
     render(wrap(<DashboardPage />));
-    expect(screen.getByText('dashboard.stats.total')).toBeDefined();
+    expect(screen.getByText('Total channels')).toBeDefined();
   });
 });
 
@@ -164,7 +160,7 @@ describe('UsersPage', () => {
   it('renders without crashing', async () => {
     const { default: UsersPage } = await import('@/features/settings/UsersPage');
     render(wrap(<UsersPage />));
-    expect(screen.getByText('users.title')).toBeDefined();
+    expect(screen.getByText('Users')).toBeDefined();
   });
 });
 
@@ -172,15 +168,19 @@ describe('LdapPage', () => {
   it('renders without crashing', async () => {
     const { default: LdapPage } = await import('@/features/settings/LdapPage');
     render(wrap(<LdapPage />));
-    expect(screen.getByText('ldap.title')).toBeDefined();
+    // "LDAP" appears in both the SubNav item and the page header, so use
+    // getAllByText and just assert at least one match exists.
+    expect(screen.getAllByText('LDAP').length).toBeGreaterThan(0);
   });
 });
 
 describe('AuditPage', () => {
+  // AuditPage does not render `audit.title` anywhere — the page relies on
+  // SubNav for identification. Assert against a stable action button instead.
   it('renders without crashing', async () => {
     const { default: AuditPage } = await import('@/features/settings/AuditPage');
     render(wrap(<AuditPage />));
-    expect(screen.getByText('audit.title')).toBeDefined();
+    expect(screen.getByText('Export CSV')).toBeDefined();
   });
 });
 
@@ -204,7 +204,8 @@ describe('MetricsPage', () => {
   it('renders without crashing', async () => {
     const { default: MetricsPage } = await import('@/features/observability/MetricsPage');
     render(wrap(<MetricsPage />));
-    expect(screen.getByText('Metrics')).toBeDefined();
+    // "Metrics" appears in both the SubNav item and the page header.
+    expect(screen.getAllByText('Metrics').length).toBeGreaterThan(0);
   });
 });
 
@@ -212,6 +213,7 @@ describe('StressOverviewPage', () => {
   it('renders without crashing', async () => {
     const { default: StressOverviewPage } = await import('@/features/operations/StressOverviewPage');
     render(wrap(<StressOverviewPage />));
-    expect(screen.getByText('stress.title')).toBeDefined();
+    // "Stress test" appears in both the SubNav item and the page header.
+    expect(screen.getAllByText('Stress test').length).toBeGreaterThan(0);
   });
 });

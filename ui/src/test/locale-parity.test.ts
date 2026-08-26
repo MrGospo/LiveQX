@@ -23,15 +23,25 @@ function flatten(obj: AnyObject, prefix = ''): string[] {
   return keys.sort();
 }
 
+// i18next plural suffix set — English uses `_one`/`_other`, Russian uses
+// `_one`/`_few`/`_many`, some locales also carry `_two`/`_zero`. When
+// comparing key parity we strip the trailing suffix so a base key is
+// considered present in both locales even if the plural forms differ per
+// CLDR rules.
+const PLURAL_SUFFIX_RE = /_(zero|one|two|few|many|other)$/;
+function stripPlural(key: string): string {
+  return key.replace(PLURAL_SUFFIX_RE, '');
+}
+
 describe('locale parity', () => {
   const enKeys = flatten(en as AnyObject);
   const ruKeys = flatten(ru as AnyObject);
 
-  it('en.json and ru.json have identical key sets', () => {
-    const enSet = new Set(enKeys);
-    const ruSet = new Set(ruKeys);
-    const onlyEn = enKeys.filter((k) => !ruSet.has(k));
-    const onlyRu = ruKeys.filter((k) => !enSet.has(k));
+  it('en.json and ru.json cover the same base keys (plural forms normalized)', () => {
+    const enBase = new Set(enKeys.map(stripPlural));
+    const ruBase = new Set(ruKeys.map(stripPlural));
+    const onlyEn = [...enBase].filter((k) => !ruBase.has(k)).sort();
+    const onlyRu = [...ruBase].filter((k) => !enBase.has(k)).sort();
     expect({ onlyEn, onlyRu }).toEqual({ onlyEn: [], onlyRu: [] });
   });
 
