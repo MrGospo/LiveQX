@@ -97,8 +97,13 @@ export default function ChannelDetailPage() {
     </div>
   );
 
-  const isRunning = ch.state === 'running' || ch.state === 'degraded';
-  const isStopped = ch.state === 'stopped' || ch.state === 'failed';
+  // Backend contract (ChannelInstance::status): state=='stopped' means the
+  // pipeline is actually torn down (running_==false). 'running'/'degraded'/
+  // 'failed' are all health signals on top of a live pipeline — Stop must
+  // stay reachable, otherwise a Failed-but-still-transmitting channel would
+  // be orphaned in the UI.
+  const isStopped = ch.state === 'stopped';
+  const isRunning = !isStopped;
 
   return (
     <div className="flex flex-col h-full">
