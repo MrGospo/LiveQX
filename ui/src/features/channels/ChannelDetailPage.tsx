@@ -1248,6 +1248,7 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const baseVideoCodec  = ch.video_codec ?? 'h264';
   const baseAudioCodec  = ch.audio_codec ?? 'aac';
   const baseMaxB        = ch.max_b_frames ?? 2;
+  const baseGopSize     = ch.gop_size ?? 0;
   const basePreloadSec  = ch.preload_sec ?? 4.0;
   const baseTimezone        = ch.channel_timezone ?? '';
   const baseInheritsServer  = ch.inherits_server_tz ?? !ch.channel_timezone;
@@ -1290,6 +1291,7 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const [videoCodec, setVideoCodec] = React.useState<string>(baseVideoCodec);
   const [audioCodec, setAudioCodec] = React.useState<string>(baseAudioCodec);
   const [maxB, setMaxB]             = React.useState(String(baseMaxB));
+  const [gopSize, setGopSize]       = React.useState(String(baseGopSize));
   const [preloadSec, setPreloadSec] = React.useState(String(basePreloadSec));
   const [timezone, setTimezone]         = React.useState(baseTimezone);
   const [inheritsServerTz, setInheritsServerTz] = React.useState(baseInheritsServer);
@@ -1339,6 +1341,8 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
     if (!isNaN(g) && g !== baseGpuIndex) p.gpu_index = g;
     const nMaxB = parseInt(maxB, 10);
     if (!isNaN(nMaxB) && nMaxB !== baseMaxB) p.max_b_frames = nMaxB;
+    const nGop = parseInt(gopSize, 10);
+    if (!isNaN(nGop) && nGop !== baseGopSize) p.gop_size = nGop;
     const nPreload = parseFloat(preloadSec);
     if (!isNaN(nPreload) && Math.abs(nPreload - basePreloadSec) > 1e-9)
       p.preload_sec = nPreload;
@@ -1462,6 +1466,7 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
     setEncoderMode('');
     setGpuIndex('');
     setMaxB(String(baseMaxB));
+    setGopSize(String(baseGopSize));
     setPreloadSec(String(basePreloadSec));
     setTimezone(baseTimezone);
     setAudioBitrate('');
@@ -1583,6 +1588,13 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
                   : t('channels.config.maxBHintH264')}>
                 <input type="number" min={0} max={16} value={maxB}
                   onChange={e => setMaxB(e.target.value)} className={inputCls} />
+              </Field>
+              <Field label={t('channels.config.fieldGopSize')}
+                hint={videoCodec === 'mpeg2video'
+                  ? t('channels.config.gopSizeHintMpeg2')
+                  : t('channels.config.gopSizeHintH264')}>
+                <input type="number" min={0} max={600} value={gopSize}
+                  onChange={e => setGopSize(e.target.value)} className={inputCls} placeholder="0" />
               </Field>
               <Field label={t('channels.config.fieldPreloadSec')}
                 hint={t('channels.config.preloadSecHint')}

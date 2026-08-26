@@ -32,6 +32,11 @@ public:
         // latency. When non-zero, Encoder drops tune=zerolatency so libx264
         // doesn't silently override the count back to 0.
         int         max_b_frames   = 0;
+        // GOP length in frames. 0 = per-backend auto default (fps for
+        // x264/NVENC/QSV/VAAPI, max(fps/2, 6) for mpeg2video). Positive
+        // values are honored verbatim — no silent clamp. Broadcast/IPTV
+        // usually picks 25..50, OTT/HLS 2×fps for seek granularity.
+        int         gop_size       = 0;
 
         // fix29: pluggable video backend selection.
         //   "cpu" / "x264"       — libx264 (always available, default).

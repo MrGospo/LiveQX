@@ -40,6 +40,7 @@ public:
     // open(). Exposed for tests that verify the encoder honors caller-side
     // knobs verbatim (no silent clamping). Returns -1 if not opened.
     int effectiveMaxBFrames() const noexcept;
+    int effectiveGopSize()    const noexcept;
 
 private:
     struct Impl;

@@ -82,9 +82,10 @@ bool Mpeg2VideoEncoder::open() {
     vc->time_base    = { 1, cfg.fps };
     vc->framerate    = { cfg.fps, 1 };
     // Broadcast MPEG-2 GOP is traditionally 12–15 frames (~0.5 s @ 25 fps).
-    // Kept fixed here until GOP length becomes user-configurable in a later
-    // roadmap step; DVB set-top decoders expect this cadence.
-    vc->gop_size     = cfg.fps > 0 ? std::max(cfg.fps / 2, 6) : 12;
+    // Caller-picked wins; auto default keeps the DVB set-top cadence.
+    vc->gop_size     = cfg.gop_size > 0
+                         ? cfg.gop_size
+                         : (cfg.fps > 0 ? std::max(cfg.fps / 2, 6) : 12);
     // Honor the caller's B-frame count verbatim (matches X264/VAAPI/QSV/NVENC
     // encoders in this project). The DVB "IBBPBBP" cadence uses 2 B-frames —
     // that hint lives in the UI, not as a silent backend clamp.
@@ -195,6 +196,10 @@ AVRational Mpeg2VideoEncoder::timeBase() const noexcept {
 
 int Mpeg2VideoEncoder::effectiveMaxBFrames() const noexcept {
     return impl_->ctx ? impl_->ctx->max_b_frames : -1;
+}
+
+int Mpeg2VideoEncoder::effectiveGopSize() const noexcept {
+    return impl_->ctx ? impl_->ctx->gop_size : -1;
 }
 
 }  // namespace liveqx::encoding

@@ -147,7 +147,7 @@ bool VaapiVideoEncoder::open() {
     vc->bit_rate     = cfg.bitrate;
     vc->time_base    = { 1, cfg.fps };
     vc->framerate    = { cfg.fps, 1 };
-    vc->gop_size     = cfg.fps;
+    vc->gop_size     = cfg.gop_size > 0 ? cfg.gop_size : cfg.fps;
     vc->max_b_frames = cfg.max_b_frames;
     if (cfg.global_header)
         vc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;

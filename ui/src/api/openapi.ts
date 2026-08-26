@@ -6935,6 +6935,12 @@ export interface components {
             preset: string;
             max_b_frames: number;
             /**
+             * @description GOP length in frames. 0 = per-backend auto default (fps for
+             *     x264/NVENC/QSV/VAAPI, max(fps/2, 6) for mpeg2video). Positive
+             *     values are honored verbatim by every backend.
+             */
+            gop_size?: number;
+            /**
              * @description Активный режим энкодера. Зеркало `enc_cfg_.encoder_mode` —
              *     эмитится status()-ом всегда (default `cpu`), даже если в cfg
              *     не задано. UI использует для подсветки требующих рестарта

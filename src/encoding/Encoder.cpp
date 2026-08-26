@@ -145,6 +145,7 @@ bool Encoder::open() {
     vcfg.bitrate       = cfg_.video_bitrate;
     vcfg.preset        = cfg_.preset;
     vcfg.max_b_frames  = cfg_.max_b_frames;
+    vcfg.gop_size      = cfg_.gop_size;
     vcfg.global_header = needs_global_header;
     vcfg.gpu_index     = cfg_.gpu_index;
 

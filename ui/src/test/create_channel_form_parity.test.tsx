@@ -53,20 +53,23 @@ function wrap(ui: React.ReactElement) {
 }
 
 describe('CreateChannelPage form parity with Detail', () => {
-  it('exposes audio bitrate, sample rate and max_b_frames on step 1', async () => {
+  it('exposes audio bitrate, sample rate, max_b_frames and gop_size on step 1', async () => {
     const { default: CreateChannelPage } = await import('@/features/channels/CreateChannelPage');
     const { container } = render(wrap(<CreateChannelPage />));
     // Step 1 renders by default.
     const audioBitrate = container.querySelector('input[name="audio_bitrate_kbps"]') as HTMLInputElement;
     const audioSr     = container.querySelector('select[name="audio_sample_rate"]') as HTMLSelectElement;
     const maxB        = container.querySelector('input[name="max_b_frames"]') as HTMLInputElement;
+    const gop         = container.querySelector('input[name="gop_size"]') as HTMLInputElement;
     expect(audioBitrate).toBeTruthy();
     expect(audioSr).toBeTruthy();
     expect(maxB).toBeTruthy();
-    // Defaults must match Encoder::Config: 128 kbps, 48 kHz, 0 B-frames.
+    expect(gop).toBeTruthy();
+    // Defaults must match Encoder::Config: 128 kbps, 48 kHz, 0 B-frames, 0 (auto) GOP.
     expect(audioBitrate.value).toBe('128');
     expect(audioSr.value).toBe('48000');
     expect(maxB.value).toBe('0');
+    expect(gop.value).toBe('0');
     // Sample-rate options must include both broadcast rates.
     const srValues = Array.from(audioSr.options).map(o => Number(o.value));
     expect(srValues).toContain(44100);

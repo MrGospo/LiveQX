@@ -83,7 +83,8 @@ bool X264VideoEncoder::open() {
     vc->bit_rate     = cfg.bitrate;
     vc->time_base    = { 1, cfg.fps };
     vc->framerate    = { cfg.fps, 1 };
-    vc->gop_size     = cfg.fps;
+    // GOP length: caller-picked wins, else 1 s @ nominal fps.
+    vc->gop_size     = cfg.gop_size > 0 ? cfg.gop_size : cfg.fps;
     vc->max_b_frames = cfg.max_b_frames;
     // Broadcast-grade CBR. rc_max_rate == rc_min_rate == rc_buffer_size ==
     // bit_rate is the textbook single-second CBR VBV: the decoder never
@@ -211,6 +212,10 @@ bool X264VideoEncoder::fillStreamParameters(AVCodecParameters* dst) const {
 
 AVRational X264VideoEncoder::timeBase() const noexcept {
     return impl_->ctx ? impl_->ctx->time_base : AVRational{1, 1};
+}
+
+int X264VideoEncoder::effectiveGopSize() const noexcept {
+    return impl_->ctx ? impl_->ctx->gop_size : -1;
 }
 
 }  // namespace liveqx::encoding

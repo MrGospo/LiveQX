@@ -345,3 +345,63 @@ TEST(Mpeg2EncoderTest, HonorsHigherBFrameCountVerbatim) {
     // not a backend override.
     EXPECT_EQ(openMpeg2AndReadBFrames(5), 5);
 }
+
+// ─── gop_size wiring: caller value must reach AVCodecContext ────────────────
+// gop_size=0 in the caller Config means "auto per backend": x264 uses fps,
+// mpeg2video uses max(fps/2, 6). Positive caller values are honored verbatim
+// by every backend (mirroring the max_b_frames contract — no silent clamp).
+namespace {
+int openX264AndReadGop(int requestedGop, int fps) {
+    ec::IVideoEncoder::Config c;
+    c.width    = 320;
+    c.height   = 240;
+    c.fps      = fps;
+    c.bitrate  = 500'000;
+    c.preset   = "ultrafast";
+    c.gop_size = requestedGop;
+    ec::X264VideoEncoder enc(c, nullptr);
+    if (!enc.open()) return -1;
+    const int got = enc.effectiveGopSize();
+    enc.close();
+    return got;
+}
+
+int openMpeg2AndReadGop(int requestedGop, int fps) {
+    ec::IVideoEncoder::Config c;
+    c.width    = 320;
+    c.height   = 240;
+    c.fps      = fps;
+    c.bitrate  = 500'000;
+    c.gop_size = requestedGop;
+    ec::Mpeg2VideoEncoder enc(c, nullptr);
+    if (!enc.open()) return -1;
+    const int got = enc.effectiveGopSize();
+    enc.close();
+    return got;
+}
+}  // namespace
+
+TEST(X264EncoderTest, GopSizeAutoFallsBackToFps) {
+    // gop_size=0 must produce the historical x264 default: fps frames (~1 s).
+    EXPECT_EQ(openX264AndReadGop(0, 25), 25);
+    EXPECT_EQ(openX264AndReadGop(0, 50), 50);
+}
+
+TEST(X264EncoderTest, GopSizeHonoredVerbatim) {
+    EXPECT_EQ(openX264AndReadGop(12, 25),  12);   // DVB-style short GOP
+    EXPECT_EQ(openX264AndReadGop(60, 30),  60);   // 2-second GOP for HLS/OTT
+    EXPECT_EQ(openX264AndReadGop(300, 25), 300);  // long-GOP archival
+}
+
+TEST(Mpeg2EncoderTest, GopSizeAutoFallsBackToHalfFps) {
+    // gop_size=0 must reproduce the DVB set-top default: max(fps/2, 6).
+    EXPECT_EQ(openMpeg2AndReadGop(0, 25), 12);   // 25/2 = 12
+    EXPECT_EQ(openMpeg2AndReadGop(0, 50), 25);   // 50/2 = 25
+    EXPECT_EQ(openMpeg2AndReadGop(0, 10), 6);    // clamp floor at 6
+}
+
+TEST(Mpeg2EncoderTest, GopSizeHonoredVerbatim) {
+    EXPECT_EQ(openMpeg2AndReadGop(15, 25),  15);
+    EXPECT_EQ(openMpeg2AndReadGop(48, 24),  48);
+    EXPECT_EQ(openMpeg2AndReadGop(120, 25), 120);
+}

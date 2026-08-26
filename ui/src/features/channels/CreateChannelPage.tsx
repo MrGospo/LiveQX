@@ -36,6 +36,9 @@ const createChannelSchema = z.object({
   bitrate_kbps: z.coerce.number().int().min(100).max(100_000).default(4000),
   // 0..16 — verbatim to backend (no silent clamp). See Encoder::Config::max_b_frames.
   max_b_frames: z.coerce.number().int().min(0).max(16).default(0),
+  // 0 = per-backend auto (fps for H.264, ~fps/2 for MPEG-2). Positive
+  // values are honored verbatim. Upper bound of 600 matches ChannelInstance.
+  gop_size: z.coerce.number().int().min(0).max(600).default(0),
   preset: z
     .enum(['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'veryslow'])
     .default('veryfast'),
@@ -108,7 +111,7 @@ export default function CreateChannelPage() {
       name: '', numa_node: 0, encoder_mode: 'auto', gpu_index: 0, video_codec: 'h264',
       audio_codec: 'aac',
       audio_bitrate_kbps: 128, audio_sample_rate: 48000,
-      resolution: '1920x1080', fps: 25, bitrate_kbps: 4000, max_b_frames: 0, preset: 'veryfast',
+      resolution: '1920x1080', fps: 25, bitrate_kbps: 4000, max_b_frames: 0, gop_size: 0, preset: 'veryfast',
       default_photo_duration: 10,
       fallback_image_path: '',
       content_mode: 'none', content_source_path: '', content_share_path: '', content_cache_path: '',
@@ -243,6 +246,7 @@ export default function CreateChannelPage() {
           fps: v.fps,
           bitrate: v.bitrate_kbps * 1000,
           ...(v.max_b_frames !== 0 ? { max_b_frames: v.max_b_frames } : {}),
+          ...(v.gop_size !== 0 ? { gop_size: v.gop_size } : {}),
           ...audioBlock,
           default_photo_duration: v.default_photo_duration,
           ...(v.fallback_image_path ? { fallback: { image_path: v.fallback_image_path } } : {}),
@@ -269,7 +273,8 @@ export default function CreateChannelPage() {
       const fieldMsg  = (first?.[1] as { message?: string } | undefined)?.message ?? 'invalid';
       toast(`${fieldName}: ${fieldMsg}`, 'danger');
       if (errs.name || errs.numa_node || errs.bitrate_kbps
-          || errs.audio_bitrate_kbps || errs.audio_sample_rate || errs.max_b_frames) setStep(1);
+          || errs.audio_bitrate_kbps || errs.audio_sample_rate
+          || errs.max_b_frames || errs.gop_size) setStep(1);
     },
   );
 
@@ -395,6 +400,17 @@ export default function CreateChannelPage() {
                     : t('channels.config.maxBHintH264')}
                 </p>
                 {errors.max_b_frames && <p className={errCls}>{errors.max_b_frames.message}</p>}
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className={labelCls}>{t('channels.config.fieldGopSize')}</label>
+                <input {...register('gop_size')} type="number" min={0} max={600} className={inputCls} />
+                <p className="text-xs text-[var(--text-muted)]">
+                  {videoCodec === 'mpeg2video'
+                    ? t('channels.config.gopSizeHintMpeg2')
+                    : t('channels.config.gopSizeHintH264')}
+                </p>
+                {errors.gop_size && <p className={errCls}>{errors.gop_size.message}</p>}
               </div>
 
               {videoCodec === 'h264' ? (

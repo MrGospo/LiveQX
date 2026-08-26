@@ -40,6 +40,14 @@ public:
         int64_t     bitrate       = 4'000'000;
         std::string preset        = "medium";
         int         max_b_frames  = 0;
+        // Distance between key-frames (I-frames), in frames. Zero means
+        // "auto" — each backend picks its own historical default:
+        //   x264/NVENC/QSV/VAAPI: fps (≈ 1 s at nominal rate),
+        //   mpeg2video: max(fps/2, 6) (~ 0.5 s, DVB set-top expectation).
+        // Positive values are honored verbatim (matching the max_b_frames
+        // contract — no silent clamp). Typical broadcast/IPTV picks
+        // 25..50 frames; OTT/HLS often uses 2×fps for seek-friendliness.
+        int         gop_size      = 0;
         // Whether the muxer requested AVFMT_GLOBALHEADER. Encoder must set
         // AV_CODEC_FLAG_GLOBAL_HEADER on the codec context before open()
         // when this is true (or extradata will be written inline and

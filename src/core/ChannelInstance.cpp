@@ -333,6 +333,20 @@ void ChannelInstance::buildLongLived(const json& cfg) {
             enc_cfg_.max_b_frames = mbf;
         }
     }
+    {
+        // gop_size 0 == "auto per backend" — keep it as-is so backends can
+        // pick their own default (fps for H.264, ~fps/2 for MPEG-2).
+        // Upper bound picked to bracket any reasonable IPTV/OTT cadence
+        // without allowing pathological values that would defer key-frames
+        // for many seconds and break seeking.
+        const int gop = cfg.value("gop_size", 0);
+        if (gop < 0 || gop > 600) {
+            logger_->warn("gop_size={} out of range [0..600], using 0 (auto)", gop);
+            enc_cfg_.gop_size = 0;
+        } else {
+            enc_cfg_.gop_size = gop;
+        }
+    }
     if (cfg.contains("audio")) {
         enc_cfg_.audio_bitrate = cfg["audio"].value("bitrate", 128'000);
         enc_cfg_.sample_rate   = cfg["audio"].value("sample_rate", 48000);
@@ -922,6 +936,13 @@ bool ChannelInstance::updateConfig(const json& patch) {
         else
             logger_->warn("patch max_b_frames={} out of range, ignored", mbf);
     }
+    if (patch.contains("gop_size")) {
+        const int gop = patch.value("gop_size", enc_cfg_.gop_size);
+        if (gop >= 0 && gop <= 600)
+            enc_cfg_.gop_size = gop;
+        else
+            logger_->warn("patch gop_size={} out of range, ignored", gop);
+    }
     if (patch.contains("default_photo_duration"))
         cfg_["default_photo_duration"] = patch["default_photo_duration"];
     if (patch.contains("default_transition"))
@@ -1059,6 +1080,7 @@ nlohmann::json ChannelInstance::status() const {
     out["bitrate"]       = enc_cfg_.video_bitrate;
     out["preset"]        = enc_cfg_.preset;
     out["max_b_frames"]  = enc_cfg_.max_b_frames;
+    out["gop_size"]      = enc_cfg_.gop_size;
     out["encoder_mode"]  = enc_cfg_.encoder_mode;
     out["gpu_index"]     = enc_cfg_.gpu_index;
     out["video_codec"]   = enc_cfg_.video_codec;

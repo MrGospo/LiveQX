@@ -31,6 +31,11 @@ public:
 
     const char* name() const noexcept override { return "x264"; }
 
+    // Diagnostic: value actually programmed into the AVCodecContext after
+    // open(). Exposed for tests that verify caller-side gop_size flows
+    // through verbatim. Returns -1 if not opened.
+    int effectiveGopSize() const noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
