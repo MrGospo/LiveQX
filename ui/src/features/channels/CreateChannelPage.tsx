@@ -27,9 +27,15 @@ const createChannelSchema = z.object({
   gpu_index: z.coerce.number().int().min(0).default(0),
   video_codec: z.enum(['h264', 'mpeg2video']).default('h264'),
   audio_codec: z.enum(['aac', 'mp2']).default('aac'),
+  // Audio bitrate and sample rate — Encoder::Config defaults are 128 kbps / 48 kHz.
+  // Backend caps applied elsewhere; UI just surfaces knobs the Detail page has.
+  audio_bitrate_kbps: z.coerce.number().int().min(32).max(512).default(128),
+  audio_sample_rate: z.coerce.number().int().refine(v => [44100, 48000].includes(v)).default(48000),
   resolution: z.string().regex(/^\d+x\d+$/, 'e.g. 1920x1080').default('1920x1080'),
   fps: z.coerce.number().int().min(1).max(120).default(25),
   bitrate_kbps: z.coerce.number().int().min(100).max(100_000).default(4000),
+  // 0..16 — verbatim to backend (no silent clamp). See Encoder::Config::max_b_frames.
+  max_b_frames: z.coerce.number().int().min(0).max(16).default(0),
   preset: z
     .enum(['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'veryslow'])
     .default('veryfast'),
@@ -61,11 +67,20 @@ const createChannelSchema = z.object({
   log_retention_days: z.coerce.number().int().min(0).max(3650).default(90),
   // MPEG-TS IPTV knobs — only surfaced for multicast output in the wizard.
   // Multiple channels sharing a multicast subnet MUST have distinct
-  // service_id, or middleware collapses them into one program. Rest of the
-  // mpegts fields (TSID, ONID, mux_rate, periods) stay at backend defaults
-  // and are editable later in Channel Settings.
+  // service_id, or middleware collapses them into one program. Defaults for
+  // TSID/ONID/mux_rate/periods mirror Encoder::Config so cfg.json matches
+  // the values user actually saw in the wizard (no hidden magic).
   mpegts_service_name: z.string().default(''),
+  mpegts_service_provider: z.string().default('LiveQX'),
   mpegts_service_id: z.coerce.number().int().min(1).max(65535).default(1),
+  mpegts_transport_stream_id: z.coerce.number().int().min(1).max(65535).default(1),
+  mpegts_original_network_id: z.coerce.number().int().min(1).max(65535).default(1),
+  // 0 = VBR (backend default). >0 = constant mux rate in kbps → sent as
+  // bit/s to backend. Recommended: sum(video+audio) * 1.15.
+  mpegts_mux_rate_kbps: z.coerce.number().int().min(0).max(200_000).default(0),
+  // 0 = FFmpeg defaults (SDT=500 ms, PAT/PMT=100 ms).
+  mpegts_sdt_period_ms: z.coerce.number().int().min(0).max(10_000).default(0),
+  mpegts_pat_period_ms: z.coerce.number().int().min(0).max(10_000).default(0),
 });
 
 type FormValues = z.infer<typeof createChannelSchema>;
@@ -92,7 +107,8 @@ export default function CreateChannelPage() {
     defaultValues: {
       name: '', numa_node: 0, encoder_mode: 'auto', gpu_index: 0, video_codec: 'h264',
       audio_codec: 'aac',
-      resolution: '1920x1080', fps: 25, bitrate_kbps: 4000, preset: 'veryfast',
+      audio_bitrate_kbps: 128, audio_sample_rate: 48000,
+      resolution: '1920x1080', fps: 25, bitrate_kbps: 4000, max_b_frames: 0, preset: 'veryfast',
       default_photo_duration: 10,
       fallback_image_path: '',
       content_mode: 'none', content_source_path: '', content_share_path: '', content_cache_path: '',
@@ -101,7 +117,9 @@ export default function CreateChannelPage() {
       output_port: 4000, output_url: '', output_dir: '',
       output_bind_address: '', output_ttl: 16,
       log_sink: 'none', log_retention_days: 90,
-      mpegts_service_name: '', mpegts_service_id: 1,
+      mpegts_service_name: '', mpegts_service_provider: 'LiveQX',
+      mpegts_service_id: 1, mpegts_transport_stream_id: 1, mpegts_original_network_id: 1,
+      mpegts_mux_rate_kbps: 0, mpegts_sdt_period_ms: 0, mpegts_pat_period_ms: 0,
     },
   });
 
@@ -174,6 +192,44 @@ export default function CreateChannelPage() {
         // resolution/fps/bitrate/preset/encoder_mode/gpu_index from the top
         // level. Backend expects bitrate in bits/sec, not kbps.
         const contentSource = buildContentSource(v);
+        // Audio subobject — send codec + bitrate/sample_rate whenever any
+        // audio knob is non-default. Sending the full block matches Detail
+        // page semantics and makes cfg.json self-documenting.
+        const audioTouched = v.audio_codec !== 'aac'
+          || v.audio_bitrate_kbps !== 128
+          || v.audio_sample_rate !== 48000;
+        const audioBlock = audioTouched
+          ? { audio: {
+                codec: v.audio_codec,
+                bitrate: v.audio_bitrate_kbps * 1000,
+                sample_rate: v.audio_sample_rate,
+              } }
+          : {};
+        // MPEG-TS subobject — only when output is multicast AND user touched
+        // any field. Send the full block (all knobs user saw) to keep
+        // cfg.json honest about the picked identity/mux profile.
+        const mpegtsTouched = v.mpegts_service_id !== 1
+          || v.mpegts_service_name.trim().length > 0
+          || v.mpegts_service_provider !== 'LiveQX'
+          || v.mpegts_transport_stream_id !== 1
+          || v.mpegts_original_network_id !== 1
+          || v.mpegts_mux_rate_kbps !== 0
+          || v.mpegts_sdt_period_ms !== 0
+          || v.mpegts_pat_period_ms !== 0;
+        const mpegtsBlock = (v.output_type === 'multicast' && mpegtsTouched)
+          ? { mpegts: {
+                service_id: v.mpegts_service_id,
+                service_provider: v.mpegts_service_provider,
+                transport_stream_id: v.mpegts_transport_stream_id,
+                original_network_id: v.mpegts_original_network_id,
+                mux_rate: v.mpegts_mux_rate_kbps * 1000,
+                sdt_period_ms: v.mpegts_sdt_period_ms,
+                pat_period_ms: v.mpegts_pat_period_ms,
+                ...(v.mpegts_service_name.trim()
+                  ? { service_name: v.mpegts_service_name.trim() }
+                  : {}),
+              } }
+          : {};
         const payload = {
           name: v.name,
           numa_node: v.numa_node,
@@ -186,7 +242,8 @@ export default function CreateChannelPage() {
           resolution: v.resolution,
           fps: v.fps,
           bitrate: v.bitrate_kbps * 1000,
-          ...(v.audio_codec !== 'aac' ? { audio: { codec: v.audio_codec } } : {}),
+          ...(v.max_b_frames !== 0 ? { max_b_frames: v.max_b_frames } : {}),
+          ...audioBlock,
           default_photo_duration: v.default_photo_duration,
           ...(v.fallback_image_path ? { fallback: { image_path: v.fallback_image_path } } : {}),
           ...(contentSource ? { content_source: contentSource } : {}),
@@ -195,18 +252,7 @@ export default function CreateChannelPage() {
                 ? { sink: 'db', retention_days: v.log_retention_days }
                 : { sink: 'file' } }
             : {}),
-          // MPEG-TS overrides — only when output is multicast AND the user
-          // touched a value away from defaults. Sending an empty subobject
-          // would just clutter cfg.json without changing behaviour.
-          ...(v.output_type === 'multicast'
-            && (v.mpegts_service_id !== 1 || v.mpegts_service_name.trim().length > 0)
-            ? { mpegts: {
-                  service_id: v.mpegts_service_id,
-                  ...(v.mpegts_service_name.trim()
-                    ? { service_name: v.mpegts_service_name.trim() }
-                    : {}),
-                } }
-            : {}),
+          ...mpegtsBlock,
           outputs: [buildOutput(v)],
         };
         const result = await createChannel(payload);
@@ -222,7 +268,8 @@ export default function CreateChannelPage() {
       const fieldName = first?.[0] ?? 'form';
       const fieldMsg  = (first?.[1] as { message?: string } | undefined)?.message ?? 'invalid';
       toast(`${fieldName}: ${fieldMsg}`, 'danger');
-      if (errs.name || errs.numa_node || errs.bitrate_kbps) setStep(1);
+      if (errs.name || errs.numa_node || errs.bitrate_kbps
+          || errs.audio_bitrate_kbps || errs.audio_sample_rate || errs.max_b_frames) setStep(1);
     },
   );
 
@@ -315,6 +362,19 @@ export default function CreateChannelPage() {
               </div>
 
               <div className="flex flex-col gap-1">
+                <label className={labelCls}>{t('channels.config.fieldAudioBitrate')} (kbps)</label>
+                <input {...register('audio_bitrate_kbps')} type="number" min={32} max={512} className={inputCls} />
+                {errors.audio_bitrate_kbps && <p className={errCls}>{errors.audio_bitrate_kbps.message}</p>}
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className={labelCls}>{t('channels.config.fieldAudioSampleRate')}</label>
+                <select {...register('audio_sample_rate')} className={inputCls}>
+                  {[44100, 48000].map(r => <option key={r} value={r}>{r} Hz</option>)}
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-1">
                 <label className={labelCls}>{t('channels.fieldNuma')}</label>
                 <input {...register('numa_node')} type="number" min={0} max={7} className={inputCls} />
                 {errors.numa_node && <p className={errCls}>{errors.numa_node.message}</p>}
@@ -324,6 +384,17 @@ export default function CreateChannelPage() {
                 <label className={labelCls}>{t('channels.fieldBitrate')} (kbps)</label>
                 <input {...register('bitrate_kbps')} type="number" className={inputCls} />
                 {errors.bitrate_kbps && <p className={errCls}>{errors.bitrate_kbps.message}</p>}
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className={labelCls}>{t('channels.config.fieldMaxB')}</label>
+                <input {...register('max_b_frames')} type="number" min={0} max={16} className={inputCls} />
+                <p className="text-xs text-[var(--text-muted)]">
+                  {videoCodec === 'mpeg2video'
+                    ? t('channels.config.maxBHintMpeg2')
+                    : t('channels.config.maxBHintH264')}
+                </p>
+                {errors.max_b_frames && <p className={errCls}>{errors.max_b_frames.message}</p>}
               </div>
 
               {videoCodec === 'h264' ? (
@@ -553,6 +624,41 @@ export default function CreateChannelPage() {
                       <label className={labelCls}>{t('channels.config.serviceName')}</label>
                       <input {...register('mpegts_service_name')} className={inputCls} placeholder="LiveQX Channel" />
                       <p className="text-xs text-[var(--text-muted)]">{t('channels.config.serviceNameHint')}</p>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className={labelCls}>{t('channels.config.serviceProvider')}</label>
+                      <input {...register('mpegts_service_provider')} className={inputCls} placeholder="LiveQX" />
+                      <p className="text-xs text-[var(--text-muted)]">{t('channels.config.serviceProviderHint')}</p>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className={labelCls}>{t('channels.config.transportStreamId')}</label>
+                      <input {...register('mpegts_transport_stream_id')} type="number" min={1} max={65535} className={inputCls} />
+                      {errors.mpegts_transport_stream_id && <p className={errCls}>{errors.mpegts_transport_stream_id.message}</p>}
+                      <p className="text-xs text-[var(--text-muted)]">{t('channels.config.transportStreamIdHint')}</p>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className={labelCls}>{t('channels.config.originalNetworkId')}</label>
+                      <input {...register('mpegts_original_network_id')} type="number" min={1} max={65535} className={inputCls} />
+                      {errors.mpegts_original_network_id && <p className={errCls}>{errors.mpegts_original_network_id.message}</p>}
+                      <p className="text-xs text-[var(--text-muted)]">{t('channels.config.originalNetworkIdHint')}</p>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className={labelCls}>{t('channels.config.muxRateKbps')}</label>
+                      <input {...register('mpegts_mux_rate_kbps')} type="number" min={0} className={inputCls} />
+                      {errors.mpegts_mux_rate_kbps && <p className={errCls}>{errors.mpegts_mux_rate_kbps.message}</p>}
+                      <p className="text-xs text-[var(--text-muted)]">{t('channels.config.muxRateHint')}</p>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className={labelCls}>{t('channels.config.sdtPeriodMs')}</label>
+                      <input {...register('mpegts_sdt_period_ms')} type="number" min={0} className={inputCls} />
+                      {errors.mpegts_sdt_period_ms && <p className={errCls}>{errors.mpegts_sdt_period_ms.message}</p>}
+                      <p className="text-xs text-[var(--text-muted)]">{t('channels.config.sdtPeriodHint')}</p>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className={labelCls}>{t('channels.config.patPeriodMs')}</label>
+                      <input {...register('mpegts_pat_period_ms')} type="number" min={0} className={inputCls} />
+                      {errors.mpegts_pat_period_ms && <p className={errCls}>{errors.mpegts_pat_period_ms.message}</p>}
+                      <p className="text-xs text-[var(--text-muted)]">{t('channels.config.patPeriodHint')}</p>
                     </div>
                   </div>
                 </div>
