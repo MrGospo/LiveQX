@@ -36,6 +36,11 @@ public:
 
     const char* name() const noexcept override { return "mpeg2video"; }
 
+    // Diagnostic: value actually programmed into the AVCodecContext after
+    // open(). Exposed for tests that verify the encoder honors caller-side
+    // knobs verbatim (no silent clamping). Returns -1 if not opened.
+    int effectiveMaxBFrames() const noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

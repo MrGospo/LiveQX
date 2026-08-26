@@ -1577,7 +1577,10 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
                     onChange={e => setGpuIndex(e.target.value)} className={inputCls} placeholder="0" />
                 </Field>
               )}
-              <Field label={t('channels.config.fieldMaxB')}>
+              <Field label={t('channels.config.fieldMaxB')}
+                hint={videoCodec === 'mpeg2video'
+                  ? t('channels.config.maxBHintMpeg2')
+                  : t('channels.config.maxBHintH264')}>
                 <input type="number" min={0} max={16} value={maxB}
                   onChange={e => setMaxB(e.target.value)} className={inputCls} />
               </Field>

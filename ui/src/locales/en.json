@@ -180,6 +180,8 @@
       "audioCodecHint": "AAC-LC is the default for modern receivers and OTT. MP2 (MPEG-1 Layer II) is the classic DVB audio codec for hospitality set-tops that lack AAC licensing or read the PMT stream_type strictly.",
       "fieldGpuIndex": "GPU index",
       "fieldMaxB": "Max B-frames",
+      "maxBHintH264": "0 disables B-frames (lowest latency). 2–3 is a good default for OTT/live. Higher values improve compression at the cost of decode delay.",
+      "maxBHintMpeg2": "DVB and set-top boxes traditionally expect the IBBP cadence (2 B-frames). Values above 2 are technically valid but may confuse legacy hardware decoders. 0 disables B-frames entirely.",
       "fieldPreloadSec": "Decoder lookahead (sec)",
       "preloadSecHint": "How many seconds to prefetch from the source. Applied on next channel start.",
       "fieldTimezone": "Timezone",

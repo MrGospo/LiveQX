@@ -81,12 +81,14 @@ bool Mpeg2VideoEncoder::open() {
     vc->bit_rate     = cfg.bitrate;
     vc->time_base    = { 1, cfg.fps };
     vc->framerate    = { cfg.fps, 1 };
-    // Broadcast MPEG-2 GOP is traditionally 12–15 frames (~0.5 s @ 25 fps)
-    // with 2 B-frames — the "IBBPBBPBBPBB" cadence set-top decoders expect.
-    // We keep 2 B-frames unless the caller explicitly asked for 0, matching
-    // the low-latency-live case where B-frames add decode delay.
+    // Broadcast MPEG-2 GOP is traditionally 12–15 frames (~0.5 s @ 25 fps).
+    // Kept fixed here until GOP length becomes user-configurable in a later
+    // roadmap step; DVB set-top decoders expect this cadence.
     vc->gop_size     = cfg.fps > 0 ? std::max(cfg.fps / 2, 6) : 12;
-    vc->max_b_frames = cfg.max_b_frames == 0 ? 0 : 2;
+    // Honor the caller's B-frame count verbatim (matches X264/VAAPI/QSV/NVENC
+    // encoders in this project). The DVB "IBBPBBP" cadence uses 2 B-frames —
+    // that hint lives in the UI, not as a silent backend clamp.
+    vc->max_b_frames = cfg.max_b_frames;
     // CBR envelope for broadcast set-tops: rc_max == rc_min == bit_rate,
     // with a VBV buffer of ~half a second (the DVB reference figure).
     vc->rc_max_rate    = cfg.bitrate;
@@ -189,6 +191,10 @@ bool Mpeg2VideoEncoder::fillStreamParameters(AVCodecParameters* dst) const {
 
 AVRational Mpeg2VideoEncoder::timeBase() const noexcept {
     return impl_->ctx ? impl_->ctx->time_base : AVRational{1, 1};
+}
+
+int Mpeg2VideoEncoder::effectiveMaxBFrames() const noexcept {
+    return impl_->ctx ? impl_->ctx->max_b_frames : -1;
 }
 
 }  // namespace liveqx::encoding

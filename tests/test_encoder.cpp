@@ -8,6 +8,7 @@
 #include "encoding/Encoder.h"
 #include "encoding/EncoderFactory.h"
 #include "encoding/IVideoEncoder.h"
+#include "encoding/Mpeg2VideoEncoder.h"
 #include "encoding/NvencVideoEncoder.h"
 #include "encoding/QsvVideoEncoder.h"
 #include "encoding/VaapiVideoEncoder.h"
@@ -306,4 +307,41 @@ TEST(EncoderTest, ExplicitGpuModeFailsCleanly) {
     cfg.encoder_mode = "nvenc";
     Encoder enc(cfg);
     EXPECT_FALSE(enc.open());
+}
+
+// ─── MPEG-2 max_b_frames: caller value must reach AVCodecContext ─────────────
+// Regression guard: earlier the Mpeg2VideoEncoder clamped max_b_frames to
+// 0-or-2, silently overwriting anything the caller passed. Non-enterprise:
+// the UI showed 0-16 while the backend picked its own number. The fix
+// (Mpeg2VideoEncoder.cpp) now propagates cfg.max_b_frames verbatim, matching
+// X264/VAAPI/QSV/NVENC. This test locks that in for 0, 2, and 5.
+namespace {
+int openMpeg2AndReadBFrames(int requested) {
+    ec::IVideoEncoder::Config c;
+    c.width         = 320;
+    c.height        = 240;
+    c.fps           = 25;
+    c.bitrate       = 500'000;
+    c.max_b_frames  = requested;
+    ec::Mpeg2VideoEncoder enc(c, nullptr);
+    if (!enc.open()) return -1;
+    const int got = enc.effectiveMaxBFrames();
+    enc.close();
+    return got;
+}
+}  // namespace
+
+TEST(Mpeg2EncoderTest, HonorsZeroBFramesRequest) {
+    EXPECT_EQ(openMpeg2AndReadBFrames(0), 0);
+}
+
+TEST(Mpeg2EncoderTest, HonorsDvbTraditionalTwoBFrames) {
+    EXPECT_EQ(openMpeg2AndReadBFrames(2), 2);
+}
+
+TEST(Mpeg2EncoderTest, HonorsHigherBFrameCountVerbatim) {
+    // Value above the DVB-traditional 2 must reach the encoder unchanged.
+    // Legacy set-top boxes may not like this, but that's a UI-level hint,
+    // not a backend override.
+    EXPECT_EQ(openMpeg2AndReadBFrames(5), 5);
 }
