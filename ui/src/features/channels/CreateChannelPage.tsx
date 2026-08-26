@@ -276,7 +276,7 @@ export default function CreateChannelPage() {
               <div className="flex flex-col gap-1">
                 <label className={labelCls}>{t('channels.fieldFps')}</label>
                 <select {...register('fps')} className={inputCls}>
-                  {[25,30,50,60].map(v => <option key={v} value={v}>{v}</option>)}
+                  {[1,2,5,10,15,24,25,30,50,60].map(v => <option key={v} value={v}>{v}</option>)}
                 </select>
               </div>
 
