@@ -1251,6 +1251,8 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const baseGopSize     = ch.gop_size ?? 0;
   const baseH264Profile = ch.h264_profile ?? '';
   const baseH264Level   = ch.h264_level ?? 0;
+  const baseMpeg2Profile = ch.mpeg2_profile ?? '';
+  const baseMpeg2Level   = ch.mpeg2_level ?? 0;
   const basePreloadSec  = ch.preload_sec ?? 4.0;
   const baseTimezone        = ch.channel_timezone ?? '';
   const baseInheritsServer  = ch.inherits_server_tz ?? !ch.channel_timezone;
@@ -1296,6 +1298,8 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const [gopSize, setGopSize]       = React.useState(String(baseGopSize));
   const [h264Profile, setH264Profile] = React.useState<string>(baseH264Profile);
   const [h264Level, setH264Level]     = React.useState(String(baseH264Level));
+  const [mpeg2Profile, setMpeg2Profile] = React.useState<string>(baseMpeg2Profile);
+  const [mpeg2Level, setMpeg2Level]     = React.useState(String(baseMpeg2Level));
   const [preloadSec, setPreloadSec] = React.useState(String(basePreloadSec));
   const [timezone, setTimezone]         = React.useState(baseTimezone);
   const [inheritsServerTz, setInheritsServerTz] = React.useState(baseInheritsServer);
@@ -1354,6 +1358,13 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
     if (videoCodec === 'h264') {
       const nLvl = parseInt(h264Level, 10);
       if (!isNaN(nLvl) && nLvl !== baseH264Level) p.h264_level = nLvl;
+    }
+    // Symmetric guard for MPEG-2: H.264 backends ignore mpeg2_*.
+    if (videoCodec === 'mpeg2video' && mpeg2Profile !== baseMpeg2Profile)
+      p.mpeg2_profile = mpeg2Profile;
+    if (videoCodec === 'mpeg2video') {
+      const nMLvl = parseInt(mpeg2Level, 10);
+      if (!isNaN(nMLvl) && nMLvl !== baseMpeg2Level) p.mpeg2_level = nMLvl;
     }
     const nPreload = parseFloat(preloadSec);
     if (!isNaN(nPreload) && Math.abs(nPreload - basePreloadSec) > 1e-9)
@@ -1481,6 +1492,8 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
     setGopSize(String(baseGopSize));
     setH264Profile(baseH264Profile);
     setH264Level(String(baseH264Level));
+    setMpeg2Profile(baseMpeg2Profile);
+    setMpeg2Level(String(baseMpeg2Level));
     setPreloadSec(String(basePreloadSec));
     setTimezone(baseTimezone);
     setAudioBitrate('');
@@ -1639,6 +1652,32 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
                       <option value="50">5.0 (2K)</option>
                       <option value="51">5.1 (4K 30)</option>
                       <option value="52">5.2 (4K 60)</option>
+                    </select>
+                  </Field>
+                </>
+              )}
+              {videoCodec === 'mpeg2video' && (
+                <>
+                  <Field label={t('channels.config.fieldMpeg2Profile')}
+                    hint={t('channels.config.mpeg2ProfileHint')}>
+                    <select value={mpeg2Profile}
+                      onChange={e => setMpeg2Profile(e.target.value)} className={selectCls}>
+                      <option value="">{t('channels.config.mpeg2ProfileAuto')}</option>
+                      <option value="simple">Simple (SP)</option>
+                      <option value="main">Main (MP)</option>
+                      <option value="high">High (HP)</option>
+                      <option value="422">4:2:2 (studio)</option>
+                    </select>
+                  </Field>
+                  <Field label={t('channels.config.fieldMpeg2Level')}
+                    hint={t('channels.config.mpeg2LevelHint')}>
+                    <select value={mpeg2Level}
+                      onChange={e => setMpeg2Level(e.target.value)} className={selectCls}>
+                      <option value="0">{t('channels.config.mpeg2LevelAuto')}</option>
+                      <option value="10">Low (352×288)</option>
+                      <option value="8">Main (720×576, ≤15 Mbps)</option>
+                      <option value="6">High-1440 (1440×1152, ≤60 Mbps)</option>
+                      <option value="4">High (1920×1152, ≤80 Mbps)</option>
                     </select>
                   </Field>
                 </>

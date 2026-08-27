@@ -467,3 +467,57 @@ TEST(X264EncoderTest, EmptyProfileLeavesLibx264Default) {
     EXPECT_GT(pl.profile, 0) << "SPS profile_idc should be non-negative";
     EXPECT_GT(pl.level,   0) << "SPS level_idc auto-derived";
 }
+
+// ─── mpeg2 profile/level wiring ─────────────────────────────────────────────
+// The mpeg2video encoder honestly reports its profile/level on the
+// AVCodecContext (no SPS parsing needed, unlike libx264). We still verify the
+// values reach the codec so DVB set-tops locked to MP@ML get a compliant
+// stream.
+namespace {
+ProfileLevel openMpeg2AndReadProfile(const std::string& profile, int level) {
+    ec::IVideoEncoder::Config c;
+    c.width         = 320;
+    c.height        = 240;
+    c.fps           = 25;
+    c.bitrate       = 2'000'000;
+    c.mpeg2_profile = profile;
+    c.mpeg2_level   = level;
+    ec::Mpeg2VideoEncoder enc(c, nullptr);
+    if (!enc.open()) return {-1, -1};
+    ProfileLevel r{enc.effectiveProfileIdc(), enc.effectiveLevel()};
+    enc.close();
+    return r;
+}
+}  // namespace
+
+TEST(Mpeg2EncoderTest, MainProfileMainLevelReachesContext) {
+    // MP@ML — the SD IPTV / DVB-C/S broadcast norm.
+    auto pl = openMpeg2AndReadProfile("main", 8);
+    EXPECT_EQ(pl.profile, AV_PROFILE_MPEG2_MAIN);
+    EXPECT_EQ(pl.level,   8);
+}
+
+TEST(Mpeg2EncoderTest, HighProfileHighLevelReachesContext) {
+    // HP@HL — reserved for higher-bitrate 1080i broadcast contribution.
+    auto pl = openMpeg2AndReadProfile("high", 4);
+    EXPECT_EQ(pl.profile, AV_PROFILE_MPEG2_HIGH);
+    EXPECT_EQ(pl.level,   4);
+}
+
+TEST(Mpeg2EncoderTest, SimpleProfileReachesContext) {
+    // SP@ML — no B-frames, used by some low-power decoders. Verifies that
+    // the mapping table doesn't fall through to auto for known profiles.
+    auto pl = openMpeg2AndReadProfile("simple", 8);
+    EXPECT_EQ(pl.profile, AV_PROFILE_MPEG2_SIMPLE);
+    EXPECT_EQ(pl.level,   8);
+}
+
+TEST(Mpeg2EncoderTest, EmptyProfileFallsBackToMpAtMl) {
+    // Empty/zero means "don't touch" — the mpeg2video encoder then picks
+    // MP@ML on its own (profile_idc=4, level_idc=8). This is the SD DVB
+    // norm and exactly what we want as an out-of-the-box default. If FFmpeg
+    // ever changes that internal default, this test will flag it.
+    auto pl = openMpeg2AndReadProfile("", 0);
+    EXPECT_EQ(pl.profile, AV_PROFILE_MPEG2_MAIN);
+    EXPECT_EQ(pl.level,   8);
+}

@@ -50,6 +50,17 @@ public:
         std::string h264_profile   = "";
         int         h264_level     = 0;
 
+        // MPEG-2 stream constraint hints. Only the mpeg2video backend reads
+        // these — H.264 backends ignore them.
+        //   mpeg2_profile: "" (auto), "simple", "main", "high", "422".
+        //     Consumer DVB/IPTV boxes accept Main; "422" is a studio-only
+        //     profile and will not decode on set-tops.
+        //   mpeg2_level:   0 (auto) or MPEG-2 ordinal (LOW=10, MAIN=8,
+        //     HIGH_1440=6, HIGH=4). Counter-intuitively, lower ordinal =
+        //     higher capability. MP@ML (main/8) is the SD broadcast norm.
+        std::string mpeg2_profile  = "";
+        int         mpeg2_level    = 0;
+
         // fix29: pluggable video backend selection.
         //   "cpu" / "x264"       — libx264 (always available, default).
         //   "nvenc" / "qsv" /    — explicit GPU backend; channel fails to

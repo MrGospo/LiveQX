@@ -6952,6 +6952,17 @@ export interface components {
              */
             h264_level?: number;
             /**
+             * @description MPEG-2 profile hint. "" means "encoder default (MP)"; otherwise
+             *     "simple", "main", "high", or "422". Ignored by H.264 backends.
+             * @enum {string}
+             */
+            mpeg2_profile?: "" | "simple" | "main" | "high" | "422";
+            /**
+             * @description MPEG-2 level ordinal (LOW=10, MAIN=8, HIGH_1440=6, HIGH=4).
+             *     0 = auto (encoder picks MP@ML). Ignored by H.264 backends.
+             */
+            mpeg2_level?: number;
+            /**
              * @description Активный режим энкодера. Зеркало `enc_cfg_.encoder_mode` —
              *     эмитится status()-ом всегда (default `cpu`), даже если в cfg
              *     не задано. UI использует для подсветки требующих рестарта

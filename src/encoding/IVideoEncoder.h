@@ -63,6 +63,18 @@ public:
         //     and some hardware decoders will refuse it.
         std::string h264_profile  = "";
         int         h264_level    = 0;
+        // MPEG-2 stream constraint hints. Ignored by H.264 backends. Empty /
+        // zero mean "let the encoder pick" (which for our facade defaults to
+        // MP@ML — the broadcast norm).
+        //   mpeg2_profile — "simple", "main", "high", "422". DVB-SD boxes
+        //     universally expect Main Profile (MP); "422" is a studio /
+        //     contribution codec profile that consumer decoders reject.
+        //   mpeg2_level   — canonical MPEG-2 level ordinal: LOW=10, MAIN=8,
+        //     HIGH_1440=6, HIGH=4. Counter-intuitively, lower ordinal means
+        //     higher capability (spec quirk). Main@Main (level 8) covers
+        //     720x576i/480i @ ≤15 Mbps — the SD IPTV / DVB-C/S baseline.
+        std::string mpeg2_profile = "";
+        int         mpeg2_level   = 0;
         // Whether the muxer requested AVFMT_GLOBALHEADER. Encoder must set
         // AV_CODEC_FLAG_GLOBAL_HEADER on the codec context before open()
         // when this is true (or extradata will be written inline and

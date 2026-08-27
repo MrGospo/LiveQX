@@ -96,6 +96,31 @@ describe('CreateChannelPage form parity with Detail', () => {
     expect(lvlVals).toEqual(expect.arrayContaining([0, 30, 31, 40, 41, 42, 51]));
   });
 
+  it('exposes MPEG-2 profile/level dropdowns after switching codec to mpeg2video', async () => {
+    const { default: CreateChannelPage } = await import('@/features/channels/CreateChannelPage');
+    const { container } = render(wrap(<CreateChannelPage />));
+    // Codec defaults to H.264 — MPEG-2 fields must not render yet.
+    expect(container.querySelector('select[name="mpeg2_profile"]')).toBeNull();
+    // Switch to mpeg2video.
+    const codec = container.querySelector('select[name="video_codec"]') as HTMLSelectElement;
+    expect(codec).toBeTruthy();
+    fireEvent.change(codec, { target: { value: 'mpeg2video' } });
+
+    const profile = container.querySelector('select[name="mpeg2_profile"]') as HTMLSelectElement;
+    const level   = container.querySelector('select[name="mpeg2_level"]') as HTMLSelectElement;
+    expect(profile).toBeTruthy();
+    expect(level).toBeTruthy();
+    // Defaults must be "auto" — cfg.json stays clean when unchanged.
+    expect(profile.value).toBe('');
+    expect(level.value).toBe('0');
+    // Profile must cover the DVB-relevant set + studio (422).
+    const profVals = Array.from(profile.options).map(o => o.value);
+    expect(profVals).toEqual(expect.arrayContaining(['', 'simple', 'main', 'high', '422']));
+    // Level dropdown must expose the four canonical MPEG-2 levels (LOW/MAIN/HIGH-1440/HIGH).
+    const lvlVals = Array.from(level.options).map(o => Number(o.value));
+    expect(lvlVals).toEqual(expect.arrayContaining([0, 4, 6, 8, 10]));
+  });
+
   it('exposes MPEG-TS identity and mux fields on step 2 when output is multicast', async () => {
     const { default: CreateChannelPage } = await import('@/features/channels/CreateChannelPage');
     const { container, getByText } = render(wrap(<CreateChannelPage />));

@@ -41,6 +41,12 @@ public:
     // knobs verbatim (no silent clamping). Returns -1 if not opened.
     int effectiveMaxBFrames() const noexcept;
     int effectiveGopSize()    const noexcept;
+    // MPEG-2 profile_idc / level_idc actually programmed into the
+    // AVCodecContext. Unlike libx264 (which lies through its context and
+    // requires SPS parsing), the mpeg2video encoder honestly reports what
+    // was set. Returns AV_PROFILE_UNKNOWN / FF_LEVEL_UNKNOWN if not opened.
+    int effectiveProfileIdc() const noexcept;
+    int effectiveLevel()      const noexcept;
 
 private:
     struct Impl;

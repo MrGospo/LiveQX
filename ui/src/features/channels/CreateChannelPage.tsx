@@ -47,6 +47,16 @@ const createChannelSchema = z.object({
   // AVCC level integer. 0 = auto; 30/31/40/41/50/51/52/etc. Bounds match
   // ChannelInstance's [10..62] validation.
   h264_level: z.coerce.number().int().min(0).max(62).default(0),
+  // MPEG-2 profile hint. "" = encoder default (MP@ML for the mpeg2video
+  // backend). Ignored by H.264 backends.
+  mpeg2_profile: z
+    .enum(['', 'simple', 'main', 'high', '422'])
+    .default(''),
+  // MPEG-2 level ordinal. 0 = auto; LOW=10, MAIN=8, HIGH_1440=6, HIGH=4.
+  // Counter-intuitively, lower ordinal = higher capability.
+  mpeg2_level: z.coerce.number().int().refine(v => v === 0 || v === 4 || v === 6 || v === 8 || v === 10, {
+    message: 'mpeg2_level must be 0, 4, 6, 8, or 10',
+  }).default(0),
   preset: z
     .enum(['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'veryslow'])
     .default('veryfast'),
@@ -120,7 +130,9 @@ export default function CreateChannelPage() {
       audio_codec: 'aac',
       audio_bitrate_kbps: 128, audio_sample_rate: 48000,
       resolution: '1920x1080', fps: 25, bitrate_kbps: 4000, max_b_frames: 0, gop_size: 0,
-      h264_profile: '', h264_level: 0, preset: 'veryfast',
+      h264_profile: '', h264_level: 0,
+      mpeg2_profile: '', mpeg2_level: 0,
+      preset: 'veryfast',
       default_photo_duration: 10,
       fallback_image_path: '',
       content_mode: 'none', content_source_path: '', content_share_path: '', content_cache_path: '',
@@ -263,6 +275,11 @@ export default function CreateChannelPage() {
               ? { h264_profile: v.h264_profile } : {}),
           ...(v.video_codec === 'h264' && v.h264_level !== 0
               ? { h264_level: v.h264_level } : {}),
+          // Same principle for MPEG-2 — omit when at defaults.
+          ...(v.video_codec === 'mpeg2video' && v.mpeg2_profile !== ''
+              ? { mpeg2_profile: v.mpeg2_profile } : {}),
+          ...(v.video_codec === 'mpeg2video' && v.mpeg2_level !== 0
+              ? { mpeg2_level: v.mpeg2_level } : {}),
           ...audioBlock,
           default_photo_duration: v.default_photo_duration,
           ...(v.fallback_image_path ? { fallback: { image_path: v.fallback_image_path } } : {}),
@@ -291,7 +308,8 @@ export default function CreateChannelPage() {
       if (errs.name || errs.numa_node || errs.bitrate_kbps
           || errs.audio_bitrate_kbps || errs.audio_sample_rate
           || errs.max_b_frames || errs.gop_size
-          || errs.h264_profile || errs.h264_level) setStep(1);
+          || errs.h264_profile || errs.h264_level
+          || errs.mpeg2_profile || errs.mpeg2_level) setStep(1);
     },
   );
 
@@ -463,6 +481,37 @@ export default function CreateChannelPage() {
                     </select>
                     <p className="text-xs text-[var(--text-muted)]">
                       {t('channels.config.h264LevelHint')}
+                    </p>
+                  </div>
+                </>
+              )}
+
+              {videoCodec === 'mpeg2video' && (
+                <>
+                  <div className="flex flex-col gap-1">
+                    <label className={labelCls}>{t('channels.config.fieldMpeg2Profile')}</label>
+                    <select {...register('mpeg2_profile')} className={inputCls}>
+                      <option value="">{t('channels.config.mpeg2ProfileAuto')}</option>
+                      <option value="simple">Simple (SP)</option>
+                      <option value="main">Main (MP)</option>
+                      <option value="high">High (HP)</option>
+                      <option value="422">4:2:2 (studio)</option>
+                    </select>
+                    <p className="text-xs text-[var(--text-muted)]">
+                      {t('channels.config.mpeg2ProfileHint')}
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className={labelCls}>{t('channels.config.fieldMpeg2Level')}</label>
+                    <select {...register('mpeg2_level')} className={inputCls}>
+                      <option value="0">{t('channels.config.mpeg2LevelAuto')}</option>
+                      <option value="10">Low (352×288)</option>
+                      <option value="8">Main (720×576, ≤15 Mbps)</option>
+                      <option value="6">High-1440 (1440×1152, ≤60 Mbps)</option>
+                      <option value="4">High (1920×1152, ≤80 Mbps)</option>
+                    </select>
+                    <p className="text-xs text-[var(--text-muted)]">
+                      {t('channels.config.mpeg2LevelHint')}
                     </p>
                   </div>
                 </>

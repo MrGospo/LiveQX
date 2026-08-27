@@ -148,6 +148,8 @@ bool Encoder::open() {
     vcfg.gop_size      = cfg_.gop_size;
     vcfg.h264_profile  = cfg_.h264_profile;
     vcfg.h264_level    = cfg_.h264_level;
+    vcfg.mpeg2_profile = cfg_.mpeg2_profile;
+    vcfg.mpeg2_level   = cfg_.mpeg2_level;
     vcfg.global_header = needs_global_header;
     vcfg.gpu_index     = cfg_.gpu_index;
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <string>
 #include <utility>
 
 #include <spdlog/spdlog.h>
@@ -16,6 +17,19 @@ extern "C" {
 namespace liveqx::encoding {
 
 namespace {
+
+// MPEG-2 profile string → libavcodec profile_idc mapping.
+// Returns -1 (AV_PROFILE_UNKNOWN … but that value is -99, so we use a
+// distinct sentinel: -1 == "empty or unrecognized, leave the encoder to
+// its default"). Case-insensitive comparison against the canonical
+// lowercased spellings that ChannelInstance normalizes to.
+int mpeg2ProfileFromString(const std::string& s) noexcept {
+    if (s == "simple") return AV_PROFILE_MPEG2_SIMPLE;
+    if (s == "main")   return AV_PROFILE_MPEG2_MAIN;
+    if (s == "high")   return AV_PROFILE_MPEG2_HIGH;
+    if (s == "422")    return AV_PROFILE_MPEG2_422;
+    return -1;
+}
 
 struct CodecCtxDeleter { void operator()(AVCodecContext* p) const noexcept { if (p) avcodec_free_context(&p); } };
 struct FrameDeleter    { void operator()(AVFrame*         p) const noexcept { if (p) av_frame_free(&p); } };
@@ -100,6 +114,22 @@ bool Mpeg2VideoEncoder::open() {
     // cadence is achieved by holding gop_size constant and disabling
     // scene-change I-frame insertion below.
     av_opt_set(vc->priv_data, "sc_threshold", "1000000000", 0);
+
+    // MPEG-2 profile/level. libavcodec's mpeg2video encoder reads these
+    // straight off the AVCodecContext (unlike libx264, which needs an
+    // AVDictionary). Caller-provided empty/zero means "leave the encoder
+    // to its historical default" — which for FFmpeg 7.1 is MP@ML, the
+    // broadcast norm we want anyway.
+    const int prof_idc = mpeg2ProfileFromString(cfg.mpeg2_profile);
+    if (prof_idc >= 0) {
+        vc->profile = prof_idc;
+        av_opt_set_int(vc, "profile", prof_idc, AV_OPT_SEARCH_CHILDREN);
+    }
+    if (cfg.mpeg2_level > 0) {
+        vc->level = cfg.mpeg2_level;
+        av_opt_set_int(vc, "level", cfg.mpeg2_level, AV_OPT_SEARCH_CHILDREN);
+    }
+
     if (cfg.global_header)
         vc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
@@ -200,6 +230,14 @@ int Mpeg2VideoEncoder::effectiveMaxBFrames() const noexcept {
 
 int Mpeg2VideoEncoder::effectiveGopSize() const noexcept {
     return impl_->ctx ? impl_->ctx->gop_size : -1;
+}
+
+int Mpeg2VideoEncoder::effectiveProfileIdc() const noexcept {
+    return impl_->ctx ? impl_->ctx->profile : AV_PROFILE_UNKNOWN;
+}
+
+int Mpeg2VideoEncoder::effectiveLevel() const noexcept {
+    return impl_->ctx ? impl_->ctx->level : FF_LEVEL_UNKNOWN;
 }
 
 }  // namespace liveqx::encoding

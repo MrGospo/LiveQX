@@ -374,6 +374,31 @@ void ChannelInstance::buildLongLived(const json& cfg) {
             enc_cfg_.h264_level = lvl;
         }
     }
+    {
+        // MPEG-2 profile — only Simple / Main / High / 422 are meaningful
+        // to consumer decoders. The scalable ones (SNR, SS) exist in the
+        // spec but no shipping set-top / IPTV middleware handles them, so
+        // they're intentionally omitted from the accepted set.
+        std::string mp = cfg.value("mpeg2_profile", std::string(""));
+        std::transform(mp.begin(), mp.end(), mp.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (!mp.empty() && mp != "simple" && mp != "main" && mp != "high" && mp != "422") {
+            logger_->warn("mpeg2_profile=\"{}\" unknown, using auto", mp);
+            mp.clear();
+        }
+        enc_cfg_.mpeg2_profile = mp;
+    }
+    {
+        // MPEG-2 level: LOW=10, MAIN=8, HIGH_1440=6, HIGH=4. Values outside
+        // this set are treated as auto — MPEG-2 defines no other levels.
+        const int ml = cfg.value("mpeg2_level", 0);
+        if (ml != 0 && ml != 4 && ml != 6 && ml != 8 && ml != 10) {
+            logger_->warn("mpeg2_level={} not one of 4/6/8/10, using 0 (auto)", ml);
+            enc_cfg_.mpeg2_level = 0;
+        } else {
+            enc_cfg_.mpeg2_level = ml;
+        }
+    }
     if (cfg.contains("audio")) {
         enc_cfg_.audio_bitrate = cfg["audio"].value("bitrate", 128'000);
         enc_cfg_.sample_rate   = cfg["audio"].value("sample_rate", 48000);
@@ -990,6 +1015,24 @@ bool ChannelInstance::updateConfig(const json& patch) {
         else
             logger_->warn("patch h264_level={} out of range, ignored", lvl);
     }
+    if (patch.contains("mpeg2_profile")) {
+        std::string mp = patch.value("mpeg2_profile", enc_cfg_.mpeg2_profile);
+        std::transform(mp.begin(), mp.end(), mp.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (mp.empty() || mp == "simple" || mp == "main" || mp == "high" || mp == "422") {
+            enc_cfg_.mpeg2_profile = mp;
+        } else {
+            logger_->warn("patch mpeg2_profile=\"{}\" unknown, keeping {}",
+                          mp, enc_cfg_.mpeg2_profile);
+        }
+    }
+    if (patch.contains("mpeg2_level")) {
+        const int ml = patch.value("mpeg2_level", enc_cfg_.mpeg2_level);
+        if (ml == 0 || ml == 4 || ml == 6 || ml == 8 || ml == 10)
+            enc_cfg_.mpeg2_level = ml;
+        else
+            logger_->warn("patch mpeg2_level={} not one of 4/6/8/10, ignored", ml);
+    }
     if (patch.contains("default_photo_duration"))
         cfg_["default_photo_duration"] = patch["default_photo_duration"];
     if (patch.contains("default_transition"))
@@ -1130,6 +1173,8 @@ nlohmann::json ChannelInstance::status() const {
     out["gop_size"]      = enc_cfg_.gop_size;
     out["h264_profile"]  = enc_cfg_.h264_profile;
     out["h264_level"]    = enc_cfg_.h264_level;
+    out["mpeg2_profile"] = enc_cfg_.mpeg2_profile;
+    out["mpeg2_level"]   = enc_cfg_.mpeg2_level;
     out["encoder_mode"]  = enc_cfg_.encoder_mode;
     out["gpu_index"]     = enc_cfg_.gpu_index;
     out["video_codec"]   = enc_cfg_.video_codec;
