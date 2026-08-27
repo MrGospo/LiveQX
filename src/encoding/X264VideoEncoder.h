@@ -36,6 +36,17 @@ public:
     // through verbatim. Returns -1 if not opened.
     int effectiveGopSize() const noexcept;
 
+    // Diagnostic: profile/level actually programmed into the H.264 SPS
+    // after open(). libx264 does NOT populate AVCodecContext::profile/level —
+    // those stay at AV_PROFILE_UNKNOWN/FF_LEVEL_UNKNOWN. To verify the
+    // AVDictionary options really reached libx264, parse them out of the
+    // SPS NAL in extradata (open() enables global_header for this).
+    // Match AV_PROFILE_H264_* constants (BASELINE=66, MAIN=77, HIGH=100,
+    // High Predictive 4:4:4=244). Level is byte value (3.1 → 31, 4.0 → 40).
+    // Returns -1 if not opened or extradata missing/malformed.
+    int effectiveProfileIdc() const noexcept;
+    int effectiveLevelIdc()   const noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

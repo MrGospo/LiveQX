@@ -347,6 +347,33 @@ void ChannelInstance::buildLongLived(const json& cfg) {
             enc_cfg_.gop_size = gop;
         }
     }
+    {
+        // H.264 profile — validated against libavcodec's known names so a
+        // typo can't reach the encoder (avcodec_open2 would fail cryptically).
+        // Empty means "let the encoder pick".
+        std::string prof = cfg.value("h264_profile", std::string(""));
+        std::transform(prof.begin(), prof.end(), prof.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (!prof.empty()
+            && prof != "baseline" && prof != "main"    && prof != "high"
+            && prof != "high10"   && prof != "high422" && prof != "high444") {
+            logger_->warn("h264_profile=\"{}\" unknown, using auto", prof);
+            prof.clear();
+        }
+        enc_cfg_.h264_profile = prof;
+    }
+    {
+        // H.264 level in AVCC form (major*10 + minor). 0 = auto. Bounds
+        // cover the spec's 1.0..6.2 range; anything outside is almost
+        // certainly a UI bug and would be rejected by libavcodec anyway.
+        const int lvl = cfg.value("h264_level", 0);
+        if (lvl != 0 && (lvl < 10 || lvl > 62)) {
+            logger_->warn("h264_level={} out of range [10..62], using 0 (auto)", lvl);
+            enc_cfg_.h264_level = 0;
+        } else {
+            enc_cfg_.h264_level = lvl;
+        }
+    }
     if (cfg.contains("audio")) {
         enc_cfg_.audio_bitrate = cfg["audio"].value("bitrate", 128'000);
         enc_cfg_.sample_rate   = cfg["audio"].value("sample_rate", 48000);
@@ -943,6 +970,26 @@ bool ChannelInstance::updateConfig(const json& patch) {
         else
             logger_->warn("patch gop_size={} out of range, ignored", gop);
     }
+    if (patch.contains("h264_profile")) {
+        std::string prof = patch.value("h264_profile", enc_cfg_.h264_profile);
+        std::transform(prof.begin(), prof.end(), prof.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (prof.empty()
+            || prof == "baseline" || prof == "main"    || prof == "high"
+            || prof == "high10"   || prof == "high422" || prof == "high444") {
+            enc_cfg_.h264_profile = prof;
+        } else {
+            logger_->warn("patch h264_profile=\"{}\" unknown, keeping {}",
+                          prof, enc_cfg_.h264_profile);
+        }
+    }
+    if (patch.contains("h264_level")) {
+        const int lvl = patch.value("h264_level", enc_cfg_.h264_level);
+        if (lvl == 0 || (lvl >= 10 && lvl <= 62))
+            enc_cfg_.h264_level = lvl;
+        else
+            logger_->warn("patch h264_level={} out of range, ignored", lvl);
+    }
     if (patch.contains("default_photo_duration"))
         cfg_["default_photo_duration"] = patch["default_photo_duration"];
     if (patch.contains("default_transition"))
@@ -1081,6 +1128,8 @@ nlohmann::json ChannelInstance::status() const {
     out["preset"]        = enc_cfg_.preset;
     out["max_b_frames"]  = enc_cfg_.max_b_frames;
     out["gop_size"]      = enc_cfg_.gop_size;
+    out["h264_profile"]  = enc_cfg_.h264_profile;
+    out["h264_level"]    = enc_cfg_.h264_level;
     out["encoder_mode"]  = enc_cfg_.encoder_mode;
     out["gpu_index"]     = enc_cfg_.gpu_index;
     out["video_codec"]   = enc_cfg_.video_codec;

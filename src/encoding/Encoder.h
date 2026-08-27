@@ -38,6 +38,18 @@ public:
         // usually picks 25..50, OTT/HLS 2×fps for seek granularity.
         int         gop_size       = 0;
 
+        // H.264 stream constraint hints. Only H.264 backends
+        // (x264/NVENC/QSV/VAAPI) read these — mpeg2video ignores them.
+        //   h264_profile: "" (auto), "baseline", "main", "high",
+        //     "high10", "high422", "high444".
+        //   h264_level:   0 (auto) or integer 10..62 encoding X.Y as
+        //     major*10+minor (3.1 → 31, 4.0 → 40, 5.1 → 51).
+        // Setting these is critical for interop with strict hardware
+        // decoders — hospitality set-tops often require Main@3.1 or
+        // High@4.0 and will refuse anything else.
+        std::string h264_profile   = "";
+        int         h264_level     = 0;
+
         // fix29: pluggable video backend selection.
         //   "cpu" / "x264"       — libx264 (always available, default).
         //   "nvenc" / "qsv" /    — explicit GPU backend; channel fails to

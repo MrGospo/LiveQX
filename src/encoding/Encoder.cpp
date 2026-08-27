@@ -146,6 +146,8 @@ bool Encoder::open() {
     vcfg.preset        = cfg_.preset;
     vcfg.max_b_frames  = cfg_.max_b_frames;
     vcfg.gop_size      = cfg_.gop_size;
+    vcfg.h264_profile  = cfg_.h264_profile;
+    vcfg.h264_level    = cfg_.h264_level;
     vcfg.global_header = needs_global_header;
     vcfg.gpu_index     = cfg_.gpu_index;
 

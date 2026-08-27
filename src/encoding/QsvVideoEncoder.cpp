@@ -1,6 +1,7 @@
 #include "encoding/QsvVideoEncoder.h"
 
 #include <atomic>
+#include <cstdio>
 #include <utility>
 
 #include <spdlog/spdlog.h>
@@ -145,6 +146,19 @@ bool QsvVideoEncoder::open() {
     // QSV preset names match x264's vocabulary (veryslow..veryfast),
     // so cfg.preset can pass through unchanged.
     av_dict_set(&vopts, "preset", cfg.preset.c_str(), 0);
+    // QSV profile names: baseline, main, high, high10. Level strings as
+    // "3.1" / "4" / "5.1". "" = QSV driver default (usually high).
+    if (!cfg.h264_profile.empty())
+        av_dict_set(&vopts, "profile", cfg.h264_profile.c_str(), 0);
+    if (cfg.h264_level > 0) {
+        char lvl[16];
+        if (cfg.h264_level % 10 == 0)
+            std::snprintf(lvl, sizeof(lvl), "%d", cfg.h264_level / 10);
+        else
+            std::snprintf(lvl, sizeof(lvl), "%d.%d",
+                          cfg.h264_level / 10, cfg.h264_level % 10);
+        av_dict_set(&vopts, "level", lvl, 0);
+    }
     if (cfg.max_b_frames == 0) {
         av_dict_set(&vopts, "look_ahead",   "0", 0);
         av_dict_set(&vopts, "low_delay_brc", "1", 0);

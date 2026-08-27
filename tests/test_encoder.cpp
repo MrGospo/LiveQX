@@ -405,3 +405,65 @@ TEST(Mpeg2EncoderTest, GopSizeHonoredVerbatim) {
     EXPECT_EQ(openMpeg2AndReadGop(48, 24),  48);
     EXPECT_EQ(openMpeg2AndReadGop(120, 25), 120);
 }
+
+// ─── h264 profile/level wiring ──────────────────────────────────────────────
+// Empty profile / zero level = "let libx264 pick"; positive values must reach
+// AVCodecContext so downstream muxers (HLS, MPEG-TS, RTMP) and strict decoders
+// (hospitality set-tops locked to Main@3.1 etc.) see the correct constraint.
+namespace {
+struct ProfileLevel { int profile; int level; };
+
+ProfileLevel openX264AndReadProfile(const std::string& profile, int level) {
+    ec::IVideoEncoder::Config c;
+    c.width         = 320;
+    c.height        = 240;
+    c.fps           = 25;
+    c.bitrate       = 500'000;
+    // preset "ultrafast" disables CABAC, which forces libx264 to downgrade
+    // any main/high request back to baseline (main/high require CABAC).
+    // "veryfast" keeps encode cheap for tests while allowing all profiles.
+    c.preset        = "veryfast";
+    c.h264_profile  = profile;
+    c.h264_level    = level;
+    // global_header populates ctx->extradata with the SPS/PPS annex-B blob;
+    // that's how we verify the profile/level bytes libx264 actually wrote
+    // into the H.264 stream (AVCodecContext::profile stays UNKNOWN).
+    c.global_header = true;
+    ec::X264VideoEncoder enc(c, nullptr);
+    if (!enc.open()) return {-1, -1};
+    ProfileLevel r{enc.effectiveProfileIdc(), enc.effectiveLevelIdc()};
+    enc.close();
+    return r;
+}
+}  // namespace
+
+TEST(X264EncoderTest, ProfileMainLevel31ReachesSps) {
+    // Middleware-critical combo: Main@3.1 for legacy hospitality STBs.
+    auto pl = openX264AndReadProfile("main", 31);
+    EXPECT_EQ(pl.profile, AV_PROFILE_H264_MAIN);
+    EXPECT_EQ(pl.level,   31);
+}
+
+TEST(X264EncoderTest, ProfileHighLevel40ReachesSps) {
+    // HD IPTV baseline.
+    auto pl = openX264AndReadProfile("high", 40);
+    EXPECT_EQ(pl.profile, AV_PROFILE_H264_HIGH);
+    EXPECT_EQ(pl.level,   40);
+}
+
+TEST(X264EncoderTest, BaselineProfileReachesSps) {
+    // libx264 emits Constrained Baseline when asked for "baseline" (no
+    // B-frames, no CABAC). Both variants share profile_idc=66 in the SPS
+    // — the difference is only in constraint_set1_flag.
+    auto pl = openX264AndReadProfile("baseline", 30);
+    EXPECT_EQ(pl.profile, AV_PROFILE_H264_BASELINE);
+    EXPECT_EQ(pl.level, 30);
+}
+
+TEST(X264EncoderTest, EmptyProfileLeavesLibx264Default) {
+    // Not forcing means libx264 picks the tightest profile that fits the
+    // options — usually High for a modern build with our ultrafast preset.
+    auto pl = openX264AndReadProfile("", 0);
+    EXPECT_GT(pl.profile, 0) << "SPS profile_idc should be non-negative";
+    EXPECT_GT(pl.level,   0) << "SPS level_idc auto-derived";
+}

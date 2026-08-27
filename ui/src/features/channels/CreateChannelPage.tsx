@@ -39,6 +39,14 @@ const createChannelSchema = z.object({
   // 0 = per-backend auto (fps for H.264, ~fps/2 for MPEG-2). Positive
   // values are honored verbatim. Upper bound of 600 matches ChannelInstance.
   gop_size: z.coerce.number().int().min(0).max(600).default(0),
+  // H.264 profile hint. "" = let the encoder pick. Ignored by mpeg2video
+  // in the backend but harmless to send.
+  h264_profile: z
+    .enum(['', 'baseline', 'main', 'high', 'high10', 'high422', 'high444'])
+    .default(''),
+  // AVCC level integer. 0 = auto; 30/31/40/41/50/51/52/etc. Bounds match
+  // ChannelInstance's [10..62] validation.
+  h264_level: z.coerce.number().int().min(0).max(62).default(0),
   preset: z
     .enum(['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'veryslow'])
     .default('veryfast'),
@@ -111,7 +119,8 @@ export default function CreateChannelPage() {
       name: '', numa_node: 0, encoder_mode: 'auto', gpu_index: 0, video_codec: 'h264',
       audio_codec: 'aac',
       audio_bitrate_kbps: 128, audio_sample_rate: 48000,
-      resolution: '1920x1080', fps: 25, bitrate_kbps: 4000, max_b_frames: 0, gop_size: 0, preset: 'veryfast',
+      resolution: '1920x1080', fps: 25, bitrate_kbps: 4000, max_b_frames: 0, gop_size: 0,
+      h264_profile: '', h264_level: 0, preset: 'veryfast',
       default_photo_duration: 10,
       fallback_image_path: '',
       content_mode: 'none', content_source_path: '', content_share_path: '', content_cache_path: '',
@@ -247,6 +256,13 @@ export default function CreateChannelPage() {
           bitrate: v.bitrate_kbps * 1000,
           ...(v.max_b_frames !== 0 ? { max_b_frames: v.max_b_frames } : {}),
           ...(v.gop_size !== 0 ? { gop_size: v.gop_size } : {}),
+          // profile/level only meaningful for H.264; skip verbatim defaults
+          // ("" / 0) so cfg.json omits them and downstream tooling doesn't
+          // show phantom overrides.
+          ...(v.video_codec === 'h264' && v.h264_profile !== ''
+              ? { h264_profile: v.h264_profile } : {}),
+          ...(v.video_codec === 'h264' && v.h264_level !== 0
+              ? { h264_level: v.h264_level } : {}),
           ...audioBlock,
           default_photo_duration: v.default_photo_duration,
           ...(v.fallback_image_path ? { fallback: { image_path: v.fallback_image_path } } : {}),
@@ -274,7 +290,8 @@ export default function CreateChannelPage() {
       toast(`${fieldName}: ${fieldMsg}`, 'danger');
       if (errs.name || errs.numa_node || errs.bitrate_kbps
           || errs.audio_bitrate_kbps || errs.audio_sample_rate
-          || errs.max_b_frames || errs.gop_size) setStep(1);
+          || errs.max_b_frames || errs.gop_size
+          || errs.h264_profile || errs.h264_level) setStep(1);
     },
   );
 
@@ -412,6 +429,44 @@ export default function CreateChannelPage() {
                 </p>
                 {errors.gop_size && <p className={errCls}>{errors.gop_size.message}</p>}
               </div>
+
+              {videoCodec === 'h264' && (
+                <>
+                  <div className="flex flex-col gap-1">
+                    <label className={labelCls}>{t('channels.config.fieldH264Profile')}</label>
+                    <select {...register('h264_profile')} className={inputCls}>
+                      <option value="">{t('channels.config.h264ProfileAuto')}</option>
+                      <option value="baseline">Baseline</option>
+                      <option value="main">Main</option>
+                      <option value="high">High</option>
+                      <option value="high10">High 10</option>
+                      <option value="high422">High 4:2:2</option>
+                      <option value="high444">High 4:4:4 Predictive</option>
+                    </select>
+                    <p className="text-xs text-[var(--text-muted)]">
+                      {t('channels.config.h264ProfileHint')}
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className={labelCls}>{t('channels.config.fieldH264Level')}</label>
+                    <select {...register('h264_level')} className={inputCls}>
+                      <option value="0">{t('channels.config.h264LevelAuto')}</option>
+                      <option value="30">3.0 (SD 30 fps)</option>
+                      <option value="31">3.1 (SD 50/60, 720p 30)</option>
+                      <option value="32">3.2 (720p 60)</option>
+                      <option value="40">4.0 (1080p 30)</option>
+                      <option value="41">4.1 (1080p 30 hi-bitrate)</option>
+                      <option value="42">4.2 (1080p 60)</option>
+                      <option value="50">5.0 (2K)</option>
+                      <option value="51">5.1 (4K 30)</option>
+                      <option value="52">5.2 (4K 60)</option>
+                    </select>
+                    <p className="text-xs text-[var(--text-muted)]">
+                      {t('channels.config.h264LevelHint')}
+                    </p>
+                  </div>
+                </>
+              )}
 
               {videoCodec === 'h264' ? (
                 <div className="flex flex-col gap-1">

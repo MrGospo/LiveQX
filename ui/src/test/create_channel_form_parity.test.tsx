@@ -76,6 +76,26 @@ describe('CreateChannelPage form parity with Detail', () => {
     expect(srValues).toContain(48000);
   });
 
+  it('exposes H.264 profile/level dropdowns when codec is H.264 (default)', async () => {
+    const { default: CreateChannelPage } = await import('@/features/channels/CreateChannelPage');
+    const { container } = render(wrap(<CreateChannelPage />));
+    const profile = container.querySelector('select[name="h264_profile"]') as HTMLSelectElement;
+    const level   = container.querySelector('select[name="h264_level"]') as HTMLSelectElement;
+    expect(profile).toBeTruthy();
+    expect(level).toBeTruthy();
+    // Default: "auto" — empty profile, level 0. Matches Encoder::Config.
+    expect(profile.value).toBe('');
+    expect(level.value).toBe('0');
+    // Profile must include the middleware-critical set (baseline, main, high).
+    const profVals = Array.from(profile.options).map(o => o.value);
+    expect(profVals).toEqual(
+      expect.arrayContaining(['', 'baseline', 'main', 'high', 'high10', 'high422', 'high444']),
+    );
+    // Level must cover the SD..4K range decoders typically care about.
+    const lvlVals = Array.from(level.options).map(o => Number(o.value));
+    expect(lvlVals).toEqual(expect.arrayContaining([0, 30, 31, 40, 41, 42, 51]));
+  });
+
   it('exposes MPEG-TS identity and mux fields on step 2 when output is multicast', async () => {
     const { default: CreateChannelPage } = await import('@/features/channels/CreateChannelPage');
     const { container, getByText } = render(wrap(<CreateChannelPage />));

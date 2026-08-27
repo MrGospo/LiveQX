@@ -1,6 +1,7 @@
 #include "encoding/X264VideoEncoder.h"
 
 #include <atomic>
+#include <cstdio>
 #include <utility>
 
 #include <spdlog/spdlog.h>
@@ -104,6 +105,20 @@ bool X264VideoEncoder::open() {
 
     AVDictionary* vopts = nullptr;
     av_dict_set(&vopts, "preset", cfg.preset.c_str(), 0);
+    // profile/level — leave unset for "auto" (libx264 picks the tightest
+    // profile the params allow). When forced, decoder interop matters more
+    // than compression; e.g. hospitality set-tops that lock to Main@3.1.
+    if (!cfg.h264_profile.empty())
+        av_dict_set(&vopts, "profile", cfg.h264_profile.c_str(), 0);
+    if (cfg.h264_level > 0) {
+        char lvl[16];
+        if (cfg.h264_level % 10 == 0)
+            std::snprintf(lvl, sizeof(lvl), "%d", cfg.h264_level / 10);
+        else
+            std::snprintf(lvl, sizeof(lvl), "%d.%d",
+                          cfg.h264_level / 10, cfg.h264_level % 10);
+        av_dict_set(&vopts, "level", lvl, 0);
+    }
     // tune=zerolatency forces B-frames to 0 inside libx264 regardless of
     // what we set on the AVCodecContext. Only apply it when the caller
     // really wants the lowest-latency live profile (max_b == 0).
@@ -216,6 +231,43 @@ AVRational X264VideoEncoder::timeBase() const noexcept {
 
 int X264VideoEncoder::effectiveGopSize() const noexcept {
     return impl_->ctx ? impl_->ctx->gop_size : -1;
+}
+
+namespace {
+// Locate the SPS NAL (0x67, nal_ref_idc=3, nal_unit_type=7) in an annex-B
+// byte stream and return a pointer to the first payload byte (profile_idc).
+// Returns nullptr if not found. libx264 emits extradata as annex-B: one or
+// more start-code + NAL runs.
+const uint8_t* findSpsPayload(const uint8_t* buf, int size) noexcept {
+    if (!buf || size < 5) return nullptr;
+    for (int i = 0; i + 4 < size; ++i) {
+        const bool start3 = (buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 1);
+        const bool start4 = (i + 4 < size && buf[i] == 0 && buf[i + 1] == 0
+                             && buf[i + 2] == 0 && buf[i + 3] == 1);
+        int hdr_off = start4 ? i + 4 : (start3 ? i + 3 : -1);
+        if (hdr_off < 0) continue;
+        if (hdr_off + 4 >= size) return nullptr;
+        const uint8_t nal_header = buf[hdr_off];
+        if ((nal_header & 0x1F) == 7)   // SPS
+            return &buf[hdr_off + 1];
+    }
+    return nullptr;
+}
+}  // namespace
+
+int X264VideoEncoder::effectiveProfileIdc() const noexcept {
+    if (!impl_->ctx || !impl_->ctx->extradata) return -1;
+    const uint8_t* sps = findSpsPayload(impl_->ctx->extradata,
+                                        impl_->ctx->extradata_size);
+    return sps ? sps[0] : -1;
+}
+
+int X264VideoEncoder::effectiveLevelIdc() const noexcept {
+    if (!impl_->ctx || !impl_->ctx->extradata) return -1;
+    const uint8_t* sps = findSpsPayload(impl_->ctx->extradata,
+                                        impl_->ctx->extradata_size);
+    // SPS byte layout: profile_idc, constraint_set_flags, level_idc, ...
+    return sps ? sps[2] : -1;
 }
 
 }  // namespace liveqx::encoding

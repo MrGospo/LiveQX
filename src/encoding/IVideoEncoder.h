@@ -48,6 +48,21 @@ public:
         // contract — no silent clamp). Typical broadcast/IPTV picks
         // 25..50 frames; OTT/HLS often uses 2×fps for seek-friendliness.
         int         gop_size      = 0;
+        // H.264 stream constraint hints. Ignored by non-H.264 backends
+        // (mpeg2video). Empty / zero mean "let the encoder pick".
+        //   h264_profile — libavcodec profile name: "baseline", "main",
+        //     "high", "high10", "high422", "high444". Middleware and
+        //     set-top decoders often demand specific profiles: cheap
+        //     hospitality decoders may only handle Main@3.1, while modern
+        //     boxes can chew High@4.x. Wrong profile = decode failure.
+        //   h264_level   — AVCC level integer (major*10 + minor, so
+        //     3.1 → 31, 4.0 → 40, 4.1 → 41, 5.0 → 50). Level caps the
+        //     max bitrate, buffer size, and frame dimensions that the
+        //     decoder is required to support. Setting it too low for the
+        //     chosen bitrate/resolution makes the stream non-compliant
+        //     and some hardware decoders will refuse it.
+        std::string h264_profile  = "";
+        int         h264_level    = 0;
         // Whether the muxer requested AVFMT_GLOBALHEADER. Encoder must set
         // AV_CODEC_FLAG_GLOBAL_HEADER on the codec context before open()
         // when this is true (or extradata will be written inline and

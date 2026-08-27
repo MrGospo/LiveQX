@@ -1249,6 +1249,8 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const baseAudioCodec  = ch.audio_codec ?? 'aac';
   const baseMaxB        = ch.max_b_frames ?? 2;
   const baseGopSize     = ch.gop_size ?? 0;
+  const baseH264Profile = ch.h264_profile ?? '';
+  const baseH264Level   = ch.h264_level ?? 0;
   const basePreloadSec  = ch.preload_sec ?? 4.0;
   const baseTimezone        = ch.channel_timezone ?? '';
   const baseInheritsServer  = ch.inherits_server_tz ?? !ch.channel_timezone;
@@ -1292,6 +1294,8 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const [audioCodec, setAudioCodec] = React.useState<string>(baseAudioCodec);
   const [maxB, setMaxB]             = React.useState(String(baseMaxB));
   const [gopSize, setGopSize]       = React.useState(String(baseGopSize));
+  const [h264Profile, setH264Profile] = React.useState<string>(baseH264Profile);
+  const [h264Level, setH264Level]     = React.useState(String(baseH264Level));
   const [preloadSec, setPreloadSec] = React.useState(String(basePreloadSec));
   const [timezone, setTimezone]         = React.useState(baseTimezone);
   const [inheritsServerTz, setInheritsServerTz] = React.useState(baseInheritsServer);
@@ -1343,6 +1347,14 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
     if (!isNaN(nMaxB) && nMaxB !== baseMaxB) p.max_b_frames = nMaxB;
     const nGop = parseInt(gopSize, 10);
     if (!isNaN(nGop) && nGop !== baseGopSize) p.gop_size = nGop;
+    // profile/level only make sense for H.264 — mpeg2video ignores them
+    // in the backend, so don't waste patch bytes for those channels.
+    if (videoCodec === 'h264' && h264Profile !== baseH264Profile)
+      p.h264_profile = h264Profile;
+    if (videoCodec === 'h264') {
+      const nLvl = parseInt(h264Level, 10);
+      if (!isNaN(nLvl) && nLvl !== baseH264Level) p.h264_level = nLvl;
+    }
     const nPreload = parseFloat(preloadSec);
     if (!isNaN(nPreload) && Math.abs(nPreload - basePreloadSec) > 1e-9)
       p.preload_sec = nPreload;
@@ -1467,6 +1479,8 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
     setGpuIndex('');
     setMaxB(String(baseMaxB));
     setGopSize(String(baseGopSize));
+    setH264Profile(baseH264Profile);
+    setH264Level(String(baseH264Level));
     setPreloadSec(String(basePreloadSec));
     setTimezone(baseTimezone);
     setAudioBitrate('');
@@ -1596,6 +1610,39 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
                 <input type="number" min={0} max={600} value={gopSize}
                   onChange={e => setGopSize(e.target.value)} className={inputCls} placeholder="0" />
               </Field>
+              {videoCodec === 'h264' && (
+                <>
+                  <Field label={t('channels.config.fieldH264Profile')}
+                    hint={t('channels.config.h264ProfileHint')}>
+                    <select value={h264Profile}
+                      onChange={e => setH264Profile(e.target.value)} className={selectCls}>
+                      <option value="">{t('channels.config.h264ProfileAuto')}</option>
+                      <option value="baseline">Baseline</option>
+                      <option value="main">Main</option>
+                      <option value="high">High</option>
+                      <option value="high10">High 10</option>
+                      <option value="high422">High 4:2:2</option>
+                      <option value="high444">High 4:4:4 Predictive</option>
+                    </select>
+                  </Field>
+                  <Field label={t('channels.config.fieldH264Level')}
+                    hint={t('channels.config.h264LevelHint')}>
+                    <select value={h264Level}
+                      onChange={e => setH264Level(e.target.value)} className={selectCls}>
+                      <option value="0">{t('channels.config.h264LevelAuto')}</option>
+                      <option value="30">3.0 (SD 30 fps)</option>
+                      <option value="31">3.1 (SD 50/60, 720p 30)</option>
+                      <option value="32">3.2 (720p 60)</option>
+                      <option value="40">4.0 (1080p 30)</option>
+                      <option value="41">4.1 (1080p 30 hi-bitrate)</option>
+                      <option value="42">4.2 (1080p 60)</option>
+                      <option value="50">5.0 (2K)</option>
+                      <option value="51">5.1 (4K 30)</option>
+                      <option value="52">5.2 (4K 60)</option>
+                    </select>
+                  </Field>
+                </>
+              )}
               <Field label={t('channels.config.fieldPreloadSec')}
                 hint={t('channels.config.preloadSecHint')}
                 warn={parseFloat(preloadSec) !== basePreloadSec

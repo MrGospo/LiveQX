@@ -6941,6 +6941,17 @@ export interface components {
              */
             gop_size?: number;
             /**
+             * @description H.264 profile hint. "" means "encoder picks"; otherwise one of
+             *     libavcodec's known profile names. Ignored by mpeg2video.
+             * @enum {string}
+             */
+            h264_profile?: "" | "baseline" | "main" | "high" | "high10" | "high422" | "high444";
+            /**
+             * @description H.264 level as AVCC integer (major*10 + minor). 0 = auto,
+             *     31 = 3.1, 40 = 4.0, 41 = 4.1, 51 = 5.1. Ignored by mpeg2video.
+             */
+            h264_level?: number;
+            /**
              * @description Активный режим энкодера. Зеркало `enc_cfg_.encoder_mode` —
              *     эмитится status()-ом всегда (default `cpu`), даже если в cfg
              *     не задано. UI использует для подсветки требующих рестарта

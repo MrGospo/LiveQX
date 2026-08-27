@@ -1,6 +1,7 @@
 #include "encoding/NvencVideoEncoder.h"
 
 #include <atomic>
+#include <cstdio>
 #include <utility>
 
 #include <spdlog/spdlog.h>
@@ -150,6 +151,20 @@ bool NvencVideoEncoder::open() {
     else if (cfg.preset == "slow")      preset_str = "p6";
     else if (cfg.preset == "slower")    preset_str = "p7";
     av_dict_set(&vopts, "preset", preset_str, 0);
+    // NVENC profile names: baseline, main, high, high444p. "" = leave
+    // NVENC's default (high). Level names match libx264: "3.1", "4",
+    // "5.1". NVENC also accepts "auto".
+    if (!cfg.h264_profile.empty())
+        av_dict_set(&vopts, "profile", cfg.h264_profile.c_str(), 0);
+    if (cfg.h264_level > 0) {
+        char lvl[16];
+        if (cfg.h264_level % 10 == 0)
+            std::snprintf(lvl, sizeof(lvl), "%d", cfg.h264_level / 10);
+        else
+            std::snprintf(lvl, sizeof(lvl), "%d.%d",
+                          cfg.h264_level / 10, cfg.h264_level % 10);
+        av_dict_set(&vopts, "level", lvl, 0);
+    }
     if (cfg.max_b_frames == 0)
         av_dict_set(&vopts, "tune", "ll", 0);   // low-latency, NVENC equivalent of zerolatency
     av_dict_set(&vopts, "rc", "cbr", 0);

@@ -1,6 +1,7 @@
 #include "encoding/VaapiVideoEncoder.h"
 
 #include <atomic>
+#include <cstdio>
 #include <utility>
 
 #include <spdlog/spdlog.h>
@@ -155,6 +156,20 @@ bool VaapiVideoEncoder::open() {
 
     AVDictionary* vopts = nullptr;
     av_dict_set(&vopts, "quality", mapPresetToQuality(cfg.preset), 0);
+    // VAAPI accepts the same profile/level vocabulary as libx264 via
+    // AVDictionary; empty/zero fall back to the driver default. Setting
+    // these lets middleware pin the stream to Main@3.1 for legacy STBs.
+    if (!cfg.h264_profile.empty())
+        av_dict_set(&vopts, "profile", cfg.h264_profile.c_str(), 0);
+    if (cfg.h264_level > 0) {
+        char lvl[16];
+        if (cfg.h264_level % 10 == 0)
+            std::snprintf(lvl, sizeof(lvl), "%d", cfg.h264_level / 10);
+        else
+            std::snprintf(lvl, sizeof(lvl), "%d.%d",
+                          cfg.h264_level / 10, cfg.h264_level % 10);
+        av_dict_set(&vopts, "level", lvl, 0);
+    }
     av_dict_set(&vopts, "rc_mode", "CBR", 0);
     // Same forced-IDR caveat as NVENC/QSV — without this h264_vaapi may
     // ignore pict_type=I and emit a normal P-frame.
