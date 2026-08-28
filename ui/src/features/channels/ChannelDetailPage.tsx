@@ -1253,6 +1253,9 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const baseH264Level   = ch.h264_level ?? 0;
   const baseMpeg2Profile = ch.mpeg2_profile ?? '';
   const baseMpeg2Level   = ch.mpeg2_level ?? 0;
+  const baseBitrateMode  = ch.bitrate_mode ?? 'cbr';
+  const baseBitrateMax   = ch.bitrate_max ?? 0;
+  const baseCrf          = ch.crf ?? 0;
   const basePreloadSec  = ch.preload_sec ?? 4.0;
   const baseTimezone        = ch.channel_timezone ?? '';
   const baseInheritsServer  = ch.inherits_server_tz ?? !ch.channel_timezone;
@@ -1300,6 +1303,9 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
   const [h264Level, setH264Level]     = React.useState(String(baseH264Level));
   const [mpeg2Profile, setMpeg2Profile] = React.useState<string>(baseMpeg2Profile);
   const [mpeg2Level, setMpeg2Level]     = React.useState(String(baseMpeg2Level));
+  const [bitrateMode, setBitrateMode]   = React.useState<string>(baseBitrateMode);
+  const [bitrateMaxKbps, setBitrateMaxKbps] = React.useState(String(Math.round(baseBitrateMax / 1000)));
+  const [crf, setCrf]                   = React.useState(String(baseCrf));
   const [preloadSec, setPreloadSec] = React.useState(String(basePreloadSec));
   const [timezone, setTimezone]         = React.useState(baseTimezone);
   const [inheritsServerTz, setInheritsServerTz] = React.useState(baseInheritsServer);
@@ -1365,6 +1371,18 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
     if (videoCodec === 'mpeg2video') {
       const nMLvl = parseInt(mpeg2Level, 10);
       if (!isNaN(nMLvl) && nMLvl !== baseMpeg2Level) p.mpeg2_level = nMLvl;
+    }
+    // Rate control: CBR is broadcast default (HRD-constrained MPEG-TS).
+    // VBR requires bitrate_max as HRD peak; CRF is x264-only quality target.
+    if (bitrateMode !== baseBitrateMode) p.bitrate_mode = bitrateMode;
+    if (bitrateMode === 'vbr') {
+      const nMax = parseInt(bitrateMaxKbps, 10);
+      const baseMaxKbps = Math.round(baseBitrateMax / 1000);
+      if (!isNaN(nMax) && nMax !== baseMaxKbps) p.bitrate_max = nMax * 1000;
+    }
+    if (bitrateMode === 'crf' && videoCodec === 'h264') {
+      const nCrf = parseInt(crf, 10);
+      if (!isNaN(nCrf) && nCrf !== baseCrf) p.crf = nCrf;
     }
     const nPreload = parseFloat(preloadSec);
     if (!isNaN(nPreload) && Math.abs(nPreload - basePreloadSec) > 1e-9)
@@ -1494,6 +1512,9 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
     setH264Level(String(baseH264Level));
     setMpeg2Profile(baseMpeg2Profile);
     setMpeg2Level(String(baseMpeg2Level));
+    setBitrateMode(baseBitrateMode);
+    setBitrateMaxKbps(String(Math.round(baseBitrateMax / 1000)));
+    setCrf(String(baseCrf));
     setPreloadSec(String(basePreloadSec));
     setTimezone(baseTimezone);
     setAudioBitrate('');
@@ -1577,6 +1598,31 @@ function ConfigTab({ ch }: { ch: ChannelStatus }) {
                 <input type="number" min={100} value={bitrate}
                   onChange={e => setBitrate(e.target.value)} className={inputCls} />
               </Field>
+              <Field label={t('channels.config.fieldBitrateMode')}
+                hint={t('channels.config.bitrateModeHint')}>
+                <select value={bitrateMode}
+                  onChange={e => setBitrateMode(e.target.value)} className={selectCls}>
+                  <option value="cbr">CBR — {t('channels.config.bitrateModeCbr')}</option>
+                  <option value="vbr">VBR — {t('channels.config.bitrateModeVbr')}</option>
+                  {videoCodec === 'h264' && (
+                    <option value="crf">CRF — {t('channels.config.bitrateModeCrf')}</option>
+                  )}
+                </select>
+              </Field>
+              {bitrateMode === 'vbr' && (
+                <Field label={t('channels.config.fieldBitrateMax')}
+                  hint={t('channels.config.bitrateMaxHint')}>
+                  <input type="number" min={0} max={200000} value={bitrateMaxKbps}
+                    onChange={e => setBitrateMaxKbps(e.target.value)} className={inputCls} placeholder="0" />
+                </Field>
+              )}
+              {bitrateMode === 'crf' && videoCodec === 'h264' && (
+                <Field label={t('channels.config.fieldCrf')}
+                  hint={t('channels.config.crfHint')}>
+                  <input type="number" min={0} max={51} value={crf}
+                    onChange={e => setCrf(e.target.value)} className={inputCls} placeholder="23" />
+                </Field>
+              )}
               {videoCodec === 'h264' ? (
                 <Field label={t('channels.fieldPreset')}>
                   <select value={preset} onChange={e => setPreset(e.target.value)} className={selectCls}>

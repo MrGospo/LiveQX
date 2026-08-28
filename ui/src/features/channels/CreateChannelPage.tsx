@@ -34,6 +34,17 @@ const createChannelSchema = z.object({
   resolution: z.string().regex(/^\d+x\d+$/, 'e.g. 1920x1080').default('1920x1080'),
   fps: z.coerce.number().int().min(1).max(120).default(25),
   bitrate_kbps: z.coerce.number().int().min(100).max(100_000).default(4000),
+  // Rate-control mode. cbr — DVB / MPEG-TS multicast requirement (HRD-compliant).
+  // vbr — average with a peak ceiling; only meaningful for unicast (HLS/RTMP).
+  // crf — quality target (x264 only). GPU / mpeg2video backends downgrade CRF
+  // to VBR and log a warning; see IVideoEncoder::Config comments.
+  bitrate_mode: z.enum(['cbr', 'vbr', 'crf']).default('cbr'),
+  // VBR peak in kbps (bps on the wire). 0 = auto (encoder picks 1.5×bitrate).
+  // Only meaningful when bitrate_mode == "vbr".
+  bitrate_max_kbps: z.coerce.number().int().min(0).max(200_000).default(0),
+  // Constant-rate-factor quality target. 0 = libx264 default (23). Sensible
+  // 18..28. Only meaningful when bitrate_mode == "crf" (x264).
+  crf: z.coerce.number().int().min(0).max(51).default(0),
   // 0..16 — verbatim to backend (no silent clamp). See Encoder::Config::max_b_frames.
   max_b_frames: z.coerce.number().int().min(0).max(16).default(0),
   // 0 = per-backend auto (fps for H.264, ~fps/2 for MPEG-2). Positive
@@ -129,7 +140,9 @@ export default function CreateChannelPage() {
       name: '', numa_node: 0, encoder_mode: 'auto', gpu_index: 0, video_codec: 'h264',
       audio_codec: 'aac',
       audio_bitrate_kbps: 128, audio_sample_rate: 48000,
-      resolution: '1920x1080', fps: 25, bitrate_kbps: 4000, max_b_frames: 0, gop_size: 0,
+      resolution: '1920x1080', fps: 25, bitrate_kbps: 4000,
+      bitrate_mode: 'cbr', bitrate_max_kbps: 0, crf: 0,
+      max_b_frames: 0, gop_size: 0,
       h264_profile: '', h264_level: 0,
       mpeg2_profile: '', mpeg2_level: 0,
       preset: 'veryfast',
@@ -153,6 +166,7 @@ export default function CreateChannelPage() {
   const outputBind   = watch('output_bind_address');
   const logSink      = watch('log_sink');
   const videoCodec   = watch('video_codec');
+  const bitrateMode  = watch('bitrate_mode');
   const contentMode  = watch('content_mode');
   const contentSrc   = watch('content_source_path');
   const contentShare = watch('content_share_path');
@@ -268,6 +282,13 @@ export default function CreateChannelPage() {
           bitrate: v.bitrate_kbps * 1000,
           ...(v.max_b_frames !== 0 ? { max_b_frames: v.max_b_frames } : {}),
           ...(v.gop_size !== 0 ? { gop_size: v.gop_size } : {}),
+          // Rate control. Omit at the default (cbr) so cfg.json stays clean;
+          // send bitrate_max/crf only when they matter for the picked mode.
+          // Backend converts kbps → bps for bitrate_max just like bitrate.
+          ...(v.bitrate_mode !== 'cbr' ? { bitrate_mode: v.bitrate_mode } : {}),
+          ...(v.bitrate_mode === 'vbr' && v.bitrate_max_kbps > 0
+              ? { bitrate_max: v.bitrate_max_kbps * 1000 } : {}),
+          ...(v.bitrate_mode === 'crf' && v.crf > 0 ? { crf: v.crf } : {}),
           // profile/level only meaningful for H.264; skip verbatim defaults
           // ("" / 0) so cfg.json omits them and downstream tooling doesn't
           // show phantom overrides.
@@ -309,7 +330,8 @@ export default function CreateChannelPage() {
           || errs.audio_bitrate_kbps || errs.audio_sample_rate
           || errs.max_b_frames || errs.gop_size
           || errs.h264_profile || errs.h264_level
-          || errs.mpeg2_profile || errs.mpeg2_level) setStep(1);
+          || errs.mpeg2_profile || errs.mpeg2_level
+          || errs.bitrate_mode || errs.bitrate_max_kbps || errs.crf) setStep(1);
     },
   );
 
@@ -425,6 +447,40 @@ export default function CreateChannelPage() {
                 <input {...register('bitrate_kbps')} type="number" className={inputCls} />
                 {errors.bitrate_kbps && <p className={errCls}>{errors.bitrate_kbps.message}</p>}
               </div>
+
+              <div className="flex flex-col gap-1">
+                <label className={labelCls}>{t('channels.config.fieldBitrateMode')}</label>
+                <select {...register('bitrate_mode')} className={inputCls}>
+                  <option value="cbr">CBR — {t('channels.config.bitrateModeCbr')}</option>
+                  <option value="vbr">VBR — {t('channels.config.bitrateModeVbr')}</option>
+                  <option value="crf">CRF — {t('channels.config.bitrateModeCrf')}</option>
+                </select>
+                <p className="text-xs text-[var(--text-muted)]">
+                  {t('channels.config.bitrateModeHint')}
+                </p>
+              </div>
+
+              {bitrateMode === 'vbr' && (
+                <div className="flex flex-col gap-1">
+                  <label className={labelCls}>{t('channels.config.fieldBitrateMax')} (kbps)</label>
+                  <input {...register('bitrate_max_kbps')} type="number" min={0} max={200_000} className={inputCls} />
+                  <p className="text-xs text-[var(--text-muted)]">
+                    {t('channels.config.bitrateMaxHint')}
+                  </p>
+                  {errors.bitrate_max_kbps && <p className={errCls}>{errors.bitrate_max_kbps.message}</p>}
+                </div>
+              )}
+
+              {bitrateMode === 'crf' && (
+                <div className="flex flex-col gap-1">
+                  <label className={labelCls}>{t('channels.config.fieldCrf')}</label>
+                  <input {...register('crf')} type="number" min={0} max={51} className={inputCls} />
+                  <p className="text-xs text-[var(--text-muted)]">
+                    {t('channels.config.crfHint')}
+                  </p>
+                  {errors.crf && <p className={errCls}>{errors.crf.message}</p>}
+                </div>
+              )}
 
               <div className="flex flex-col gap-1">
                 <label className={labelCls}>{t('channels.config.fieldMaxB')}</label>

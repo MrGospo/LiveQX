@@ -121,6 +121,27 @@ describe('CreateChannelPage form parity with Detail', () => {
     expect(lvlVals).toEqual(expect.arrayContaining([0, 4, 6, 8, 10]));
   });
 
+  it('exposes rate-control (bitrate_mode) on step 1 with VBR/CRF conditional inputs', async () => {
+    const { default: CreateChannelPage } = await import('@/features/channels/CreateChannelPage');
+    const { container } = render(wrap(<CreateChannelPage />));
+    // bitrate_mode select must be present with cbr default.
+    const mode = container.querySelector('select[name="bitrate_mode"]') as HTMLSelectElement;
+    expect(mode).toBeTruthy();
+    expect(mode.value).toBe('cbr');
+    // Options must cover the three modes.
+    const modeVals = Array.from(mode.options).map(o => o.value);
+    expect(modeVals).toEqual(expect.arrayContaining(['cbr', 'vbr', 'crf']));
+    // VBR-only bitrate_max and CRF-only crf inputs must NOT render in CBR default.
+    expect(container.querySelector('input[name="bitrate_max_kbps"]')).toBeNull();
+    expect(container.querySelector('input[name="crf"]')).toBeNull();
+    // Switch to VBR — bitrate_max appears.
+    fireEvent.change(mode, { target: { value: 'vbr' } });
+    expect(container.querySelector('input[name="bitrate_max_kbps"]')).toBeTruthy();
+    // Switch to CRF — crf appears.
+    fireEvent.change(mode, { target: { value: 'crf' } });
+    expect(container.querySelector('input[name="crf"]')).toBeTruthy();
+  });
+
   it('exposes MPEG-TS identity and mux fields on step 2 when output is multicast', async () => {
     const { default: CreateChannelPage } = await import('@/features/channels/CreateChannelPage');
     const { container, getByText } = render(wrap(<CreateChannelPage />));
