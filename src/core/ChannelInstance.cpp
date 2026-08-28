@@ -399,6 +399,40 @@ void ChannelInstance::buildLongLived(const json& cfg) {
             enc_cfg_.mpeg2_level = ml;
         }
     }
+    {
+        // Rate control mode. Enterprise IPTV/DVB overwhelmingly uses CBR;
+        // VBR / CRF are exposed for OTT/HLS pipelines.
+        std::string bm = cfg.value("bitrate_mode", std::string("cbr"));
+        std::transform(bm.begin(), bm.end(), bm.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (bm != "cbr" && bm != "vbr" && bm != "crf") {
+            logger_->warn("bitrate_mode=\"{}\" unknown, using cbr", bm);
+            bm = "cbr";
+        }
+        enc_cfg_.bitrate_mode = bm;
+    }
+    {
+        // VBR peak bitrate (bps). 0 = encoder auto (1.5×video_bitrate).
+        // Cap at a sane upper bound to catch UI decimal-comma bugs.
+        const int64_t bmax = cfg.value("bitrate_max", int64_t{0});
+        if (bmax < 0 || bmax > 1'000'000'000LL) {
+            logger_->warn("bitrate_max={} out of range, using 0 (auto)", bmax);
+            enc_cfg_.bitrate_max = 0;
+        } else {
+            enc_cfg_.bitrate_max = bmax;
+        }
+    }
+    {
+        // CRF quality target. 0 = libx264 default (23). x264 accepts 0..51;
+        // outside that libavcodec would clamp silently — better to catch it.
+        const int cr = cfg.value("crf", 0);
+        if (cr < 0 || cr > 51) {
+            logger_->warn("crf={} out of range [0..51], using 0 (default 23)", cr);
+            enc_cfg_.crf = 0;
+        } else {
+            enc_cfg_.crf = cr;
+        }
+    }
     if (cfg.contains("audio")) {
         enc_cfg_.audio_bitrate = cfg["audio"].value("bitrate", 128'000);
         enc_cfg_.sample_rate   = cfg["audio"].value("sample_rate", 48000);
@@ -1033,6 +1067,30 @@ bool ChannelInstance::updateConfig(const json& patch) {
         else
             logger_->warn("patch mpeg2_level={} not one of 4/6/8/10, ignored", ml);
     }
+    if (patch.contains("bitrate_mode")) {
+        std::string bm = patch.value("bitrate_mode", enc_cfg_.bitrate_mode);
+        std::transform(bm.begin(), bm.end(), bm.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (bm == "cbr" || bm == "vbr" || bm == "crf")
+            enc_cfg_.bitrate_mode = bm;
+        else
+            logger_->warn("patch bitrate_mode=\"{}\" unknown, keeping {}",
+                          bm, enc_cfg_.bitrate_mode);
+    }
+    if (patch.contains("bitrate_max")) {
+        const int64_t bmax = patch.value("bitrate_max", enc_cfg_.bitrate_max);
+        if (bmax >= 0 && bmax <= 1'000'000'000LL)
+            enc_cfg_.bitrate_max = bmax;
+        else
+            logger_->warn("patch bitrate_max={} out of range, ignored", bmax);
+    }
+    if (patch.contains("crf")) {
+        const int cr = patch.value("crf", enc_cfg_.crf);
+        if (cr >= 0 && cr <= 51)
+            enc_cfg_.crf = cr;
+        else
+            logger_->warn("patch crf={} out of range [0..51], ignored", cr);
+    }
     if (patch.contains("default_photo_duration"))
         cfg_["default_photo_duration"] = patch["default_photo_duration"];
     if (patch.contains("default_transition"))
@@ -1175,6 +1233,9 @@ nlohmann::json ChannelInstance::status() const {
     out["h264_level"]    = enc_cfg_.h264_level;
     out["mpeg2_profile"] = enc_cfg_.mpeg2_profile;
     out["mpeg2_level"]   = enc_cfg_.mpeg2_level;
+    out["bitrate_mode"]  = enc_cfg_.bitrate_mode;
+    out["bitrate_max"]   = enc_cfg_.bitrate_max;
+    out["crf"]           = enc_cfg_.crf;
     out["encoder_mode"]  = enc_cfg_.encoder_mode;
     out["gpu_index"]     = enc_cfg_.gpu_index;
     out["video_codec"]   = enc_cfg_.video_codec;

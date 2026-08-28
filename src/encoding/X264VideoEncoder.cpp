@@ -81,22 +81,37 @@ bool X264VideoEncoder::open() {
     vc->width        = cfg.width;
     vc->height       = cfg.height;
     vc->pix_fmt      = AV_PIX_FMT_YUV420P;
-    vc->bit_rate     = cfg.bitrate;
     vc->time_base    = { 1, cfg.fps };
     vc->framerate    = { cfg.fps, 1 };
     // GOP length: caller-picked wins, else 1 s @ nominal fps.
     vc->gop_size     = cfg.gop_size > 0 ? cfg.gop_size : cfg.fps;
     vc->max_b_frames = cfg.max_b_frames;
-    // Broadcast-grade CBR. rc_max_rate == rc_min_rate == rc_buffer_size ==
-    // bit_rate is the textbook single-second CBR VBV: the decoder never
-    // sees a bitrate spike above the declared value, and IPTV middleware
-    // like Otrum / hospitality-TV decoders (LG Pro:Centric etc.) can rely
-    // on the vbv envelope. Without this a scene cut easily peaks 2–3× the
-    // nominal bitrate, blowing the decoder buffer and causing macroblocks
-    // to "melt". VLC on a PC is tolerant thanks to its own client buffer.
-    vc->rc_max_rate    = cfg.bitrate;
-    vc->rc_min_rate    = cfg.bitrate;
-    vc->rc_buffer_size = static_cast<int>(cfg.bitrate);
+    // Rate control. Three shapes:
+    //   CBR (default) — rc_max == rc_min == bit_rate; textbook 1 s VBV
+    //     that IPTV middleware / hospitality decoders (LG Pro:Centric,
+    //     Otrum) trust. Mandatory for MPEG-TS multicast.
+    //   VBR — cap peak with rc_max_rate; leave rc_min unset so libx264 can
+    //     dip below average on quiet scenes. Better quality per byte on
+    //     unicast (HLS/RTMP), but violates MPEG-TS PCR timing on multicast.
+    //   CRF — quality target; bit_rate/rc_* unused, libx264 chooses bytes.
+    //     For OTT/archive only — bitrate is unknown until encode, so it
+    //     can't fit a broadcast mux slot.
+    if (cfg.bitrate_mode == "crf") {
+        // Do not set bit_rate — libx264 uses crf and rc_max only if the
+        // caller opts into capped-CRF (not exposed here yet).
+        vc->bit_rate = 0;
+    } else if (cfg.bitrate_mode == "vbr") {
+        vc->bit_rate       = cfg.bitrate;
+        vc->rc_max_rate    = cfg.bitrate_max > 0
+                                ? cfg.bitrate_max
+                                : cfg.bitrate * 3 / 2;
+        vc->rc_buffer_size = static_cast<int>(vc->rc_max_rate);
+    } else {
+        vc->bit_rate       = cfg.bitrate;
+        vc->rc_max_rate    = cfg.bitrate;
+        vc->rc_min_rate    = cfg.bitrate;
+        vc->rc_buffer_size = static_cast<int>(cfg.bitrate);
+    }
     // Closed-GOP so every GOP is independently decodable — required for
     // clean channel-tune-in on set-tops that latch on the next IDR.
     vc->flags |= AV_CODEC_FLAG_CLOSED_GOP;
@@ -124,24 +139,27 @@ bool X264VideoEncoder::open() {
     // really wants the lowest-latency live profile (max_b == 0).
     if (cfg.max_b_frames == 0)
         av_dict_set(&vopts, "tune", "zerolatency", 0);
-    // x264-params is the only way to reach these libx264 internals — none
-    // of them are surfaced as AVCodecContext fields.
-    //   nal-hrd=cbr     — signal CBR in the HRD parameters so downstream
-    //                     decoders trust the vbv envelope. Mandatory for
-    //                     spec-compliant CBR.
-    //   force-cfr=1     — refuse to drop or duplicate frames; keeps output
-    //                     truly constant-framerate for PCR stability.
-    //   aud=1           — emit Access Unit Delimiter NALs. Many
-    //                     hospitality-TV decoders and IPTV middleware
-    //                     require AUDs to find frame boundaries reliably.
-    //   sc_threshold=0  — disable scene-cut IDR insertion. Scene cuts
-    //                     would sit outside the fixed GOP grid and blow
-    //                     past vbv-maxrate on random frames, defeating
-    //                     the CBR envelope above.
-    av_dict_set(&vopts,
-                "x264-params",
-                "nal-hrd=cbr:force-cfr=1:aud=1:sc_threshold=0",
-                0);
+    // CRF quality target — only meaningful for bitrate_mode == "crf".
+    // libx264 uses 23 when unset; sensible 18..28 range enforced upstream.
+    if (cfg.bitrate_mode == "crf" && cfg.crf > 0) {
+        char crfbuf[8];
+        std::snprintf(crfbuf, sizeof(crfbuf), "%d", cfg.crf);
+        av_dict_set(&vopts, "crf", crfbuf, 0);
+    }
+    // x264-params — libx264 internals not surfaced as AVCodecContext.
+    //   nal-hrd={cbr,vbr,none} — HRD signalling in the SPS/VUI. CBR wants
+    //     hrd=cbr, VBR wants hrd=vbr, CRF wants none (no HRD envelope).
+    //   force-cfr=1  — refuse to drop or duplicate frames; PCR stability.
+    //   aud=1        — Access Unit Delimiter NALs, required by many
+    //                  hospitality-TV / IPTV middleware decoders.
+    //   sc_threshold=0 — disable scene-cut IDR insertion; scene cuts fall
+    //                  outside the fixed GOP grid and blow the vbv envelope.
+    const char* xparams = "nal-hrd=cbr:force-cfr=1:aud=1:sc_threshold=0";
+    if (cfg.bitrate_mode == "vbr")
+        xparams = "nal-hrd=vbr:force-cfr=1:aud=1:sc_threshold=0";
+    else if (cfg.bitrate_mode == "crf")
+        xparams = "force-cfr=1:aud=1:sc_threshold=0";
+    av_dict_set(&vopts, "x264-params", xparams, 0);
     const int vopen = avcodec_open2(vc, vcodec, &vopts);
     av_dict_free(&vopts);
     if (vopen < 0) {
@@ -268,6 +286,18 @@ int X264VideoEncoder::effectiveLevelIdc() const noexcept {
                                         impl_->ctx->extradata_size);
     // SPS byte layout: profile_idc, constraint_set_flags, level_idc, ...
     return sps ? sps[2] : -1;
+}
+
+int64_t X264VideoEncoder::effectiveBitrate() const noexcept {
+    return impl_->ctx ? impl_->ctx->bit_rate : -1;
+}
+
+int64_t X264VideoEncoder::effectiveMaxBitrate() const noexcept {
+    return impl_->ctx ? impl_->ctx->rc_max_rate : -1;
+}
+
+int64_t X264VideoEncoder::effectiveMinBitrate() const noexcept {
+    return impl_->ctx ? impl_->ctx->rc_min_rate : -1;
 }
 
 }  // namespace liveqx::encoding

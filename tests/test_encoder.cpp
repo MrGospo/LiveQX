@@ -521,3 +521,64 @@ TEST(Mpeg2EncoderTest, EmptyProfileFallsBackToMpAtMl) {
     EXPECT_EQ(pl.profile, AV_PROFILE_MPEG2_MAIN);
     EXPECT_EQ(pl.level,   8);
 }
+
+// ─── x264 bitrate-mode wiring ───────────────────────────────────────────────
+// CBR = rc_max == rc_min == bit_rate (DVB / MPEG-TS multicast contract).
+// VBR = rc_max > bit_rate, rc_min unset (OTT / HLS).
+// CRF = bit_rate == 0, quality-target (OTT / archive only). If any of these
+// invariants slip, downstream MPEG-TS mux math and set-top decoder buffers
+// go sideways silently — hence the explicit context readback.
+namespace {
+struct RcSnapshot { int64_t bit_rate; int64_t rc_max; int64_t rc_min; };
+
+RcSnapshot openX264AndReadRc(const std::string& mode, int64_t bitrate,
+                             int64_t bitrate_max, int crf) {
+    ec::IVideoEncoder::Config c;
+    c.width        = 320;
+    c.height       = 240;
+    c.fps          = 25;
+    c.bitrate      = bitrate;
+    c.preset       = "veryfast";
+    c.bitrate_mode = mode;
+    c.bitrate_max  = bitrate_max;
+    c.crf          = crf;
+    ec::X264VideoEncoder enc(c, nullptr);
+    if (!enc.open()) return {-1, -1, -1};
+    RcSnapshot r{enc.effectiveBitrate(), enc.effectiveMaxBitrate(), enc.effectiveMinBitrate()};
+    enc.close();
+    return r;
+}
+}  // namespace
+
+TEST(X264EncoderTest, CbrModeSetsAllThreeRateFields) {
+    // CBR: bit_rate == rc_max == rc_min. Textbook 1-second VBV.
+    auto r = openX264AndReadRc("cbr", 2'000'000, 0, 0);
+    EXPECT_EQ(r.bit_rate, 2'000'000);
+    EXPECT_EQ(r.rc_max,   2'000'000);
+    EXPECT_EQ(r.rc_min,   2'000'000);
+}
+
+TEST(X264EncoderTest, VbrModeSetsMaxAboveBitrateAndUnsetsMin) {
+    // VBR with explicit peak — rc_max honored, rc_min stays 0 so the
+    // encoder can dip below average on quiet scenes.
+    auto r = openX264AndReadRc("vbr", 2'000'000, 4'000'000, 0);
+    EXPECT_EQ(r.bit_rate, 2'000'000);
+    EXPECT_EQ(r.rc_max,   4'000'000);
+    EXPECT_EQ(r.rc_min,   0);
+}
+
+TEST(X264EncoderTest, VbrModeAutoPeakIs150PercentOfAverage) {
+    // bitrate_max == 0 must fall back to 1.5 × bitrate — enough headroom
+    // for scene changes without doubling the pipe width.
+    auto r = openX264AndReadRc("vbr", 2'000'000, 0, 0);
+    EXPECT_EQ(r.rc_max, 3'000'000);
+}
+
+TEST(X264EncoderTest, CrfModeLeavesBitRateAtZero) {
+    // In CRF mode libx264 owns the byte budget; the AVCodecContext's
+    // bit_rate must be 0 so downstream muxers don't advertise a phantom
+    // constant bitrate. If this test flips, the encoder is silently
+    // running CBR/VBR while the UI shows CRF.
+    auto r = openX264AndReadRc("crf", 2'000'000, 0, 23);
+    EXPECT_EQ(r.bit_rate, 0);
+}

@@ -170,7 +170,19 @@ bool VaapiVideoEncoder::open() {
                           cfg.h264_level / 10, cfg.h264_level % 10);
         av_dict_set(&vopts, "level", lvl, 0);
     }
-    av_dict_set(&vopts, "rc_mode", "CBR", 0);
+    // VAAPI rc_mode: CBR / VBR / CQP / ICQ / QVBR. We expose CBR (broadcast
+    // norm) and VBR; CRF has no direct VAAPI analog — closest would be ICQ,
+    // but its quality scale is driver-dependent and doesn't match libx264's
+    // 0..51. Falling back to VBR keeps behaviour predictable.
+    const char* va_rc = "CBR";
+    if (cfg.bitrate_mode == "vbr" || cfg.bitrate_mode == "crf") {
+        va_rc = "VBR";
+        if (cfg.bitrate_mode == "crf")
+            impl_->lg().warn("VaapiVideoEncoder: bitrate_mode=crf not supported, using VBR");
+        if (cfg.bitrate_max > 0)
+            vc->rc_max_rate = cfg.bitrate_max;
+    }
+    av_dict_set(&vopts, "rc_mode", va_rc, 0);
     // Same forced-IDR caveat as NVENC/QSV — without this h264_vaapi may
     // ignore pict_type=I and emit a normal P-frame.
     av_dict_set(&vopts, "forced_idr", "1", 0);

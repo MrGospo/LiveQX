@@ -163,6 +163,18 @@ bool QsvVideoEncoder::open() {
         av_dict_set(&vopts, "look_ahead",   "0", 0);
         av_dict_set(&vopts, "low_delay_brc", "1", 0);
     }
+    // QSV rate control is driven by whether rc_max_rate/rc_min_rate are set.
+    // Setting both equal → CBR (VCM mode). Only max set → VBR. QSV also has
+    // ICQ/CQP for quality-target, but their scales don't match libx264's
+    // CRF, so CRF requests fall back to VBR with a warning.
+    if (cfg.bitrate_mode == "vbr" || cfg.bitrate_mode == "crf") {
+        if (cfg.bitrate_mode == "crf")
+            impl_->lg().warn("QsvVideoEncoder: bitrate_mode=crf not supported, using vbr");
+        vc->rc_max_rate = cfg.bitrate_max > 0 ? cfg.bitrate_max : cfg.bitrate * 3 / 2;
+    } else {
+        vc->rc_max_rate = cfg.bitrate;
+        vc->rc_min_rate = cfg.bitrate;
+    }
     // forced_idr — same problem as NVENC: without it pict_type=I is
     // demoted to a regular P-frame and forceKeyframe() becomes a no-op.
     av_dict_set(&vopts, "forced_idr", "1", 0);

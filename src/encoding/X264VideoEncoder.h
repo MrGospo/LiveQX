@@ -47,6 +47,13 @@ public:
     int effectiveProfileIdc() const noexcept;
     int effectiveLevelIdc()   const noexcept;
 
+    // Diagnostic: rate-control values on the AVCodecContext after open().
+    // CBR sets bit_rate == rc_max == rc_min. VBR sets bit_rate + rc_max
+    // (rc_min == 0). CRF sets bit_rate == 0. Return -1 if not opened.
+    int64_t effectiveBitrate()    const noexcept;
+    int64_t effectiveMaxBitrate() const noexcept;
+    int64_t effectiveMinBitrate() const noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

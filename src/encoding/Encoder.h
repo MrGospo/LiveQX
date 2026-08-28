@@ -61,6 +61,16 @@ public:
         std::string mpeg2_profile  = "";
         int         mpeg2_level    = 0;
 
+        // Rate control. "cbr" (default, HRD-compliant broadcast norm),
+        // "vbr" (variable within bitrate..bitrate_max), or "crf" (x264-only
+        // quality target). See IVideoEncoder::Config for cross-backend
+        // fallback semantics.
+        std::string bitrate_mode   = "cbr";
+        // VBR peak (bps). 0 = auto (1.5×video_bitrate). Ignored outside VBR.
+        int64_t     bitrate_max    = 0;
+        // Constant-Rate-Factor for CRF mode (x264). 0 = libx264 default 23.
+        int         crf            = 0;
+
         // fix29: pluggable video backend selection.
         //   "cpu" / "x264"       — libx264 (always available, default).
         //   "nvenc" / "qsv" /    — explicit GPU backend; channel fails to

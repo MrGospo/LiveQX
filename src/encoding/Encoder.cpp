@@ -150,6 +150,9 @@ bool Encoder::open() {
     vcfg.h264_level    = cfg_.h264_level;
     vcfg.mpeg2_profile = cfg_.mpeg2_profile;
     vcfg.mpeg2_level   = cfg_.mpeg2_level;
+    vcfg.bitrate_mode  = cfg_.bitrate_mode;
+    vcfg.bitrate_max   = cfg_.bitrate_max;
+    vcfg.crf           = cfg_.crf;
     vcfg.global_header = needs_global_header;
     vcfg.gpu_index     = cfg_.gpu_index;
 

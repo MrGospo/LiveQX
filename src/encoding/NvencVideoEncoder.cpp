@@ -167,7 +167,19 @@ bool NvencVideoEncoder::open() {
     }
     if (cfg.max_b_frames == 0)
         av_dict_set(&vopts, "tune", "ll", 0);   // low-latency, NVENC equivalent of zerolatency
-    av_dict_set(&vopts, "rc", "cbr", 0);
+    // Rate control. NVENC's supported modes: constqp / vbr / cbr / cbr_hq /
+    // cbr_ld_hq / vbr_hq. For the enterprise IPTV path we only expose CBR
+    // and VBR; CRF is a libx264 concept and doesn't translate — fall back
+    // to VBR (constqp is close but the API surface would drift from x264).
+    const char* nv_rc = "cbr";
+    if (cfg.bitrate_mode == "vbr" || cfg.bitrate_mode == "crf") {
+        nv_rc = "vbr";
+        if (cfg.bitrate_mode == "crf")
+            impl_->lg().warn("NvencVideoEncoder: bitrate_mode=crf not supported, using vbr");
+        if (cfg.bitrate_max > 0)
+            vc->rc_max_rate = cfg.bitrate_max;
+    }
+    av_dict_set(&vopts, "rc", nv_rc, 0);
     // forced-idr=1 — without this h264_nvenc silently ignores
     // pict_type=AV_PICTURE_TYPE_I on the input frame, so forceKeyframe()
     // would be a no-op and downstream RTMP/HLS reconnects would never

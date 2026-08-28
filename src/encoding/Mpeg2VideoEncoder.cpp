@@ -104,11 +104,22 @@ bool Mpeg2VideoEncoder::open() {
     // encoders in this project). The DVB "IBBPBBP" cadence uses 2 B-frames —
     // that hint lives in the UI, not as a silent backend clamp.
     vc->max_b_frames = cfg.max_b_frames;
-    // CBR envelope for broadcast set-tops: rc_max == rc_min == bit_rate,
-    // with a VBV buffer of ~half a second (the DVB reference figure).
-    vc->rc_max_rate    = cfg.bitrate;
-    vc->rc_min_rate    = cfg.bitrate;
-    vc->rc_buffer_size = static_cast<int>(cfg.bitrate / 2);
+    // Rate control. CBR is the DVB / MPEG-TS multicast norm; VBR is
+    // supported for OTT/HLS delivery. CRF is not a MPEG-2 concept —
+    // treat it as VBR with a log at the ChannelInstance layer.
+    if (cfg.bitrate_mode == "vbr" || cfg.bitrate_mode == "crf") {
+        vc->rc_max_rate    = cfg.bitrate_max > 0
+                                ? cfg.bitrate_max
+                                : cfg.bitrate * 3 / 2;
+        // rc_min_rate deliberately unset — allow the encoder to dip.
+        vc->rc_buffer_size = static_cast<int>(vc->rc_max_rate / 2);
+    } else {
+        // CBR envelope for set-tops: rc_max == rc_min == bit_rate, VBV
+        // half a second (DVB reference figure).
+        vc->rc_max_rate    = cfg.bitrate;
+        vc->rc_min_rate    = cfg.bitrate;
+        vc->rc_buffer_size = static_cast<int>(cfg.bitrate / 2);
+    }
     // NOTE: AV_CODEC_FLAG_CLOSED_GOP is not implemented for mpeg2video in
     // FFmpeg 7.1 (avcodec_open2 returns AVERROR_PATCHWELCOME). Fixed GOP
     // cadence is achieved by holding gop_size constant and disabling

@@ -75,6 +75,24 @@ public:
         //     720x576i/480i @ ≤15 Mbps — the SD IPTV / DVB-C/S baseline.
         std::string mpeg2_profile = "";
         int         mpeg2_level   = 0;
+        // Rate control mode. "cbr" = constant bitrate (broadcast/IPTV
+        // default, HRD-compliant, DVB / MPEG-TS multicast requirement).
+        // "vbr" = variable bitrate with a peak ceiling (bitrate = average,
+        //   bitrate_max = peak); allowed on unicast/HLS/RTMP for better
+        //   quality per byte, but wrecks MPEG-TS multicast timing.
+        // "crf" = constant rate factor (quality target, variable bitrate);
+        //   x264 only. mpeg2video ignores this and falls back to VBR;
+        //   GPU backends ignore this and fall back to CBR with a log
+        //   warning (no reliable quality-target mode across drivers).
+        std::string bitrate_mode  = "cbr";
+        // VBR peak ceiling (bps). Only read when bitrate_mode == "vbr".
+        // 0 = auto (encoder picks 1.5 × bitrate — enough headroom for scene
+        // changes without doubling the pipe width).
+        int64_t     bitrate_max   = 0;
+        // Constant-Rate-Factor for CRF mode. Only read when
+        // bitrate_mode == "crf" (x264). 0 = libx264 default (23). Sensible
+        // range 18..28 — lower = better quality, larger file.
+        int         crf           = 0;
         // Whether the muxer requested AVFMT_GLOBALHEADER. Encoder must set
         // AV_CODEC_FLAG_GLOBAL_HEADER on the codec context before open()
         // when this is true (or extradata will be written inline and
