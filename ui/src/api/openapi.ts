@@ -3713,6 +3713,65 @@ export interface paths {
         };
         trace?: never;
     };
+    "/api/streams/probe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sniff a multicast/unicast UDP source and report PSI (PAT/PMT/SDT).
+         * @description Оператор+. Открывает приёмный UDP-сокет на короткое окно
+         *     (`duration_ms`, зажатый на сервере в 200..10000), собирает PSI-секции
+         *     и возвращает список программ с именами сервисов из SDT, элементарные
+         *     потоки с кодеком и языком, битрейт на PID и суммарный.
+         *     Никакого состояния в GatewayManager не создаёт — только чтение.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["StreamProbeRequest"];
+                };
+            };
+            responses: {
+                /** @description ok */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["StreamProbeResult"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Probe failed (socket open error). */
+                502: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/system/interfaces": {
         parameters: {
             query?: never;
@@ -6891,6 +6950,37 @@ export interface components {
             encoder_mode?: "auto" | "x264" | "nvenc" | "qsv" | "vaapi";
             /** @description Только если encoder_mode != x264. */
             gpu_index?: number;
+            /** @description GOP length в кадрах. `0` = auto (= fps_target). */
+            gop_size?: number;
+            /**
+             * @description Пусто = auto (libx264 сам выберет). Только при video_codec=h264.
+             * @enum {string}
+             */
+            h264_profile?: "" | "baseline" | "main" | "high";
+            /** @description Level×10 (30 = 3.0, 41 = 4.1). `0` = auto. */
+            h264_level?: number;
+            /**
+             * @description Пусто = MP@ML. Только при video_codec=mpeg2video.
+             * @enum {string}
+             */
+            mpeg2_profile?: "" | "simple" | "main" | "422" | "high";
+            /** @description Допустимые: 4=Low, 6=Main, 8=High-1440, 10=High. `0` = auto. */
+            mpeg2_level?: number;
+            /**
+             * @description Rate-control. `cbr` — обязателен для MPEG-TS multicast; `vbr` —
+             *     для unicast/HLS/RTMP; `crf` — quality-target (x264 only, на
+             *     GPU/mpeg2 откатывается в vbr).
+             * @default cbr
+             * @enum {string}
+             */
+            bitrate_mode?: "cbr" | "vbr" | "crf";
+            /**
+             * Format: int64
+             * @description VBR peak (bps). `0` = auto (1.5×bitrate). Игнорируется вне VBR.
+             */
+            bitrate_max?: number;
+            /** @description CRF quality target для x264. `0` = libx264 default (23). */
+            crf?: number;
             playlist?: components["schemas"]["Playlist"];
             schedule?: components["schemas"]["Schedule"];
             outputs?: components["schemas"]["OutputConfig"][];
@@ -6903,6 +6993,35 @@ export interface components {
          *     другие поля → 409 requires_restart.
          */
         ChannelConfigPatch: {
+            /** @description GOP length в кадрах. Требует restart. */
+            gop_size?: number;
+            /**
+             * @description Профиль H.264. Пусто = auto. Требует restart.
+             * @enum {string}
+             */
+            h264_profile?: "" | "baseline" | "main" | "high";
+            /** @description Level×10. `0` = auto. Требует restart. */
+            h264_level?: number;
+            /**
+             * @description Профиль MPEG-2. Пусто = MP@ML. Требует restart.
+             * @enum {string}
+             */
+            mpeg2_profile?: "" | "simple" | "main" | "422" | "high";
+            /** @description MPEG-2 level. `0` = auto. Требует restart. */
+            mpeg2_level?: number;
+            /**
+             * @description Rate-control. Требует restart.
+             * @enum {string}
+             */
+            bitrate_mode?: "cbr" | "vbr" | "crf";
+            /**
+             * Format: int64
+             * @description VBR peak (bps). `0` = auto. Требует restart.
+             */
+            bitrate_max?: number;
+            /** @description CRF quality target. Требует restart. */
+            crf?: number;
+        } & {
             [key: string]: unknown;
         };
         /**
@@ -6935,33 +7054,56 @@ export interface components {
             preset: string;
             max_b_frames: number;
             /**
-             * @description GOP length in frames. 0 = per-backend auto default (fps for
-             *     x264/NVENC/QSV/VAAPI, max(fps/2, 6) for mpeg2video). Positive
-             *     values are honored verbatim by every backend.
+             * @description GOP length (keyframe interval) в кадрах. `0` = auto (= fps_target,
+             *     1 s @ nominal fps — DVB-совместимо). Верхний предел выбирается
+             *     UI (~600, 12 s @ 50 fps) — за ним HRD/VBV envelope перестаёт
+             *     работать корректно.
              */
             gop_size?: number;
             /**
-             * @description H.264 profile hint. "" means "encoder picks"; otherwise one of
-             *     libavcodec's known profile names. Ignored by mpeg2video.
+             * @description Профиль H.264. Пусто = auto (libx264 сам выберет). Применяется
+             *     только при video_codec=h264 (x264/nvenc/qsv/vaapi).
              * @enum {string}
              */
-            h264_profile?: "" | "baseline" | "main" | "high" | "high10" | "high422" | "high444";
+            h264_profile?: "" | "baseline" | "main" | "high";
             /**
-             * @description H.264 level as AVCC integer (major*10 + minor). 0 = auto,
-             *     31 = 3.1, 40 = 4.0, 41 = 4.1, 51 = 5.1. Ignored by mpeg2video.
+             * @description H.264 level × 10 (30 = 3.0, 41 = 4.1). `0` = auto. Сюда попадают
+             *     только реальные значения из ISO 14496-10 — ограничения зашиты
+             *     в форме UI.
              */
             h264_level?: number;
             /**
-             * @description MPEG-2 profile hint. "" means "encoder default (MP)"; otherwise
-             *     "simple", "main", "high", or "422". Ignored by H.264 backends.
+             * @description Профиль MPEG-2 Video. Пусто = MP@ML (Main Profile @ Main Level —
+             *     DVB-SD baseline). Применяется только при video_codec=mpeg2video.
              * @enum {string}
              */
-            mpeg2_profile?: "" | "simple" | "main" | "high" | "422";
+            mpeg2_profile?: "" | "simple" | "main" | "422" | "high";
             /**
-             * @description MPEG-2 level ordinal (LOW=10, MAIN=8, HIGH_1440=6, HIGH=4).
-             *     0 = auto (encoder picks MP@ML). Ignored by H.264 backends.
+             * @description MPEG-2 level. `0` = auto (Main Level). Допустимые: 4=Low,
+             *     6=Main, 8=High-1440, 10=High.
              */
             mpeg2_level?: number;
+            /**
+             * @description Rate-control режим. `cbr` — константный битрейт, обязательное
+             *     требование DVB/MPEG-TS multicast. `vbr` — переменный с пиком
+             *     `bitrate_max`; допустим на unicast/HLS/RTMP. `crf` — quality-target
+             *     (x264 only); на GPU-энкодерах и mpeg2video откатывается в vbr
+             *     с warning'ом в логе.
+             * @enum {string}
+             */
+            bitrate_mode?: "cbr" | "vbr" | "crf";
+            /**
+             * Format: int64
+             * @description VBR-пик (bps). `0` = auto (1.5×bitrate — headroom для сцен-катов
+             *     без удвоения полосы). Игнорируется вне VBR.
+             */
+            bitrate_max?: number;
+            /**
+             * @description Constant-Rate-Factor для CRF-режима (x264). `0` = libx264 default
+             *     (23). Разумный диапазон 18..28: меньше = лучше качество, больше
+             *     размер. Игнорируется вне CRF.
+             */
+            crf?: number;
             /**
              * @description Активный режим энкодера. Зеркало `enc_cfg_.encoder_mode` —
              *     эмитится status()-ом всегда (default `cpu`), даже если в cfg
@@ -7950,6 +8092,51 @@ export interface components {
          *     Используйте `GatewayInputCfg` / `GatewayOutputCfg`.
          */
         GatewayEndpoint: components["schemas"]["GatewayInputCfg"];
+        StreamProbeRequest: {
+            /**
+             * @description IPv4 unicast или multicast.
+             * @example 239.1.2.3
+             */
+            address: string;
+            port: number;
+            /** @description NIC name (e.g. eth0). Alternative to interface_addr. */
+            interface_name?: string;
+            /** @description IPv4 of the NIC. Wins if both fields are set. */
+            interface_addr?: string;
+            /** @default 3000 */
+            duration_ms?: number;
+            /** @default 1024 */
+            recv_buffer_kb?: number;
+        };
+        StreamProbeStream: {
+            pid?: number;
+            stream_type?: number;
+            codec?: string;
+            /** @description ISO 639-2 lowercase or empty. */
+            language?: string;
+            /** Format: int64 */
+            bitrate_bps?: number;
+        };
+        StreamProbeProgram: {
+            program_number?: number;
+            pmt_pid?: number;
+            pcr_pid?: number;
+            service_name?: string;
+            provider_name?: string;
+            streams?: components["schemas"]["StreamProbeStream"][];
+        };
+        StreamProbeResult: {
+            transport_stream_id?: number;
+            original_network_id?: number;
+            /** Format: int64 */
+            total_bitrate_bps?: number;
+            /** Format: int64 */
+            bytes_received?: number;
+            /** Format: int64 */
+            packets_received?: number;
+            duration_ms?: number;
+            programs?: components["schemas"]["StreamProbeProgram"][];
+        };
         /**
          * @description Snapshot одного gateway — `Gateway::statusJson()` /
          *     `DemuxGateway::statusJson()` / `RemuxGateway::statusJson()` /

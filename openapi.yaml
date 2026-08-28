@@ -5154,6 +5154,44 @@ components:
           type: integer
           minimum: 0
           description: 'Только если encoder_mode != x264.'
+        gop_size:
+          type: integer
+          minimum: 0
+          description: 'GOP length в кадрах. `0` = auto (= fps_target).'
+        h264_profile:
+          type: string
+          enum: ['', baseline, main, high]
+          description: 'Пусто = auto (libx264 сам выберет). Только при video_codec=h264.'
+        h264_level:
+          type: integer
+          minimum: 0
+          description: 'Level×10 (30 = 3.0, 41 = 4.1). `0` = auto.'
+        mpeg2_profile:
+          type: string
+          enum: ['', simple, main, '422', high]
+          description: 'Пусто = MP@ML. Только при video_codec=mpeg2video.'
+        mpeg2_level:
+          type: integer
+          minimum: 0
+          description: 'Допустимые: 4=Low, 6=Main, 8=High-1440, 10=High. `0` = auto.'
+        bitrate_mode:
+          type: string
+          enum: [cbr, vbr, crf]
+          default: cbr
+          description: |
+            Rate-control. `cbr` — обязателен для MPEG-TS multicast; `vbr` —
+            для unicast/HLS/RTMP; `crf` — quality-target (x264 only, на
+            GPU/mpeg2 откатывается в vbr).
+        bitrate_max:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 'VBR peak (bps). `0` = auto (1.5×bitrate). Игнорируется вне VBR.'
+        crf:
+          type: integer
+          minimum: 0
+          maximum: 51
+          description: 'CRF quality target для x264. `0` = libx264 default (23).'
         playlist:
           $ref: '#/components/schemas/Playlist'
         schedule:
@@ -5170,6 +5208,41 @@ components:
         PUT /api/channels/{id}/config body. **`name` запрещён** (immutable
         — попытка указать → 400). Hot-reloadable subset применяется мгновенно;
         другие поля → 409 requires_restart.
+      properties:
+        gop_size:
+          type: integer
+          minimum: 0
+          description: 'GOP length в кадрах. Требует restart.'
+        h264_profile:
+          type: string
+          enum: ['', baseline, main, high]
+          description: 'Профиль H.264. Пусто = auto. Требует restart.'
+        h264_level:
+          type: integer
+          minimum: 0
+          description: 'Level×10. `0` = auto. Требует restart.'
+        mpeg2_profile:
+          type: string
+          enum: ['', simple, main, '422', high]
+          description: 'Профиль MPEG-2. Пусто = MP@ML. Требует restart.'
+        mpeg2_level:
+          type: integer
+          minimum: 0
+          description: 'MPEG-2 level. `0` = auto. Требует restart.'
+        bitrate_mode:
+          type: string
+          enum: [cbr, vbr, crf]
+          description: 'Rate-control. Требует restart.'
+        bitrate_max:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 'VBR peak (bps). `0` = auto. Требует restart.'
+        crf:
+          type: integer
+          minimum: 0
+          maximum: 51
+          description: 'CRF quality target. Требует restart.'
 
     ChannelStatus:
       type: object
@@ -5225,6 +5298,63 @@ components:
           type: string
         max_b_frames:
           type: integer
+        gop_size:
+          type: integer
+          minimum: 0
+          description: |
+            GOP length (keyframe interval) в кадрах. `0` = auto (= fps_target,
+            1 s @ nominal fps — DVB-совместимо). Верхний предел выбирается
+            UI (~600, 12 s @ 50 fps) — за ним HRD/VBV envelope перестаёт
+            работать корректно.
+        h264_profile:
+          type: string
+          enum: ['', baseline, main, high]
+          description: |
+            Профиль H.264. Пусто = auto (libx264 сам выберет). Применяется
+            только при video_codec=h264 (x264/nvenc/qsv/vaapi).
+        h264_level:
+          type: integer
+          minimum: 0
+          description: |
+            H.264 level × 10 (30 = 3.0, 41 = 4.1). `0` = auto. Сюда попадают
+            только реальные значения из ISO 14496-10 — ограничения зашиты
+            в форме UI.
+        mpeg2_profile:
+          type: string
+          enum: ['', simple, main, '422', high]
+          description: |
+            Профиль MPEG-2 Video. Пусто = MP@ML (Main Profile @ Main Level —
+            DVB-SD baseline). Применяется только при video_codec=mpeg2video.
+        mpeg2_level:
+          type: integer
+          minimum: 0
+          description: |
+            MPEG-2 level. `0` = auto (Main Level). Допустимые: 4=Low,
+            6=Main, 8=High-1440, 10=High.
+        bitrate_mode:
+          type: string
+          enum: [cbr, vbr, crf]
+          description: |
+            Rate-control режим. `cbr` — константный битрейт, обязательное
+            требование DVB/MPEG-TS multicast. `vbr` — переменный с пиком
+            `bitrate_max`; допустим на unicast/HLS/RTMP. `crf` — quality-target
+            (x264 only); на GPU-энкодерах и mpeg2video откатывается в vbr
+            с warning'ом в логе.
+        bitrate_max:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            VBR-пик (bps). `0` = auto (1.5×bitrate — headroom для сцен-катов
+            без удвоения полосы). Игнорируется вне VBR.
+        crf:
+          type: integer
+          minimum: 0
+          maximum: 51
+          description: |
+            Constant-Rate-Factor для CRF-режима (x264). `0` = libx264 default
+            (23). Разумный диапазон 18..28: меньше = лучше качество, больше
+            размер. Игнорируется вне CRF.
         encoder_mode:
           type: string
           enum: [auto, cpu, x264, nvenc, qsv, vaapi]
