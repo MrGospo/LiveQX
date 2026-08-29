@@ -27,6 +27,7 @@ const PluginInstallPage        = React.lazy(() => import('@/features/plugins/Plu
 const MetricsPage              = React.lazy(() => import('@/features/observability/MetricsPage'));
 const EventsPage               = React.lazy(() => import('@/features/observability/EventsPage'));
 const HealthPage               = React.lazy(() => import('@/features/observability/HealthPage'));
+const ServerPage               = React.lazy(() => import('@/features/observability/ServerPage'));
 
 const StressOverviewPage       = React.lazy(() => import('@/features/operations/StressOverviewPage'));
 const StressReportPage         = React.lazy(() => import('@/features/operations/StressReportPage'));
@@ -115,6 +116,7 @@ export function AppRoutes() {
           <Route path="/observability/metrics" element={<MetricsPage />} />
           <Route path="/observability/events"  element={<EventsPage />} />
           <Route path="/observability/health"  element={<HealthPage />} />
+          <Route path="/observability/server"  element={<RequireRole minRole="admin"><ServerPage /></RequireRole>} />
 
           {/* Operations */}
           <Route path="/operations/stress"            element={<RequireRole minRole="operator"><StressOverviewPage /></RequireRole>} />
