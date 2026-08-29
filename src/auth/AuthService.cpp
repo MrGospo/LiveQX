@@ -34,6 +34,7 @@
 
 #include "auth/AuthDb.h"
 #include "auth/PasswordHasher.h"
+#include "events/EventBus.h"
 #include "utils/Log.h"
 
 namespace liveqx::auth {
@@ -300,8 +301,36 @@ void AuthService::emitAudit(std::string_view event,
     e.username     = std::string(username);
     e.ip           = std::string(ip);
     e.details_json = std::string(details_json);
-    if (!db_.insertAuditEvent(e)) {
+    const bool inserted = db_.insertAuditEvent(e);
+    if (!inserted) {
         LOG_WARN("AuthService: failed to write audit event '{}'", e.event);
+    }
+    // Publish to SSE regardless of DB outcome — an operator watching the
+    // events stream still wants to see live activity even if retention
+    // storage is temporarily broken (disk full, WAL locked).
+    if (event_bus_) {
+        nlohmann::json payload = {
+            {"event",    e.event},
+            {"ts",       e.ts},
+            {"username", e.username},
+            {"ip",       e.ip},
+        };
+        if (e.user_id.has_value()) {
+            payload["user_id"] = *e.user_id;
+        } else {
+            payload["user_id"] = nullptr;
+        }
+        if (!e.details_json.empty()) {
+            try {
+                payload["details"] = nlohmann::json::parse(e.details_json);
+            } catch (const std::exception&) {
+                // Legacy call site passed a non-JSON string — preserve it
+                // verbatim so the UI can still render something meaningful.
+                payload["details"] = e.details_json;
+            }
+        }
+        event_bus_->publish(liveqx::events::EventType::AuthAudit,
+                            /*channel_id=*/-1, std::move(payload));
     }
 }
 

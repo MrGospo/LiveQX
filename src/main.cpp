@@ -731,6 +731,7 @@ int main(int argc, char* argv[]) {
         liveqx::events::EventBus event_bus;
         manager.setEventBus(&event_bus);
         gateways.setEventBus(&event_bus);
+        auth_svc.setEventBus(&event_bus);
 
         // ── fix41 — CIFS/NFS mounts ─────────────────────────────────────
         //
@@ -1093,6 +1094,7 @@ int main(int argc, char* argv[]) {
         // past stopAll() touches a dead bus / manager.
         manager.setEventBus(nullptr);
         manager.setPreviewManager(nullptr);
+        auth_svc.setEventBus(nullptr);
     }
 
     gateways.stopAll();

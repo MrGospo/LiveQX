@@ -14,6 +14,8 @@
 #include "auth/AuthTypes.h"
 #include "auth/JwtIssuer.h"
 
+namespace liveqx::events { class EventBus; }
+
 namespace liveqx::auth {
 
 // fix22 commit 5/24 — оркестратор login/logout/refresh.
@@ -352,6 +354,13 @@ public:
     LockoutPolicy lockoutPolicy() const noexcept { return policy_; }
     void setLockoutPolicy(LockoutPolicy p) noexcept { policy_ = p; }
 
+    // Wire process-wide EventBus. Optional: when set, emitAudit() fans out
+    // an AuthAudit event to SSE subscribers so /observability/events can
+    // render admin actions in real time without polling the auth_audit
+    // table. Nullable; unset (or explicitly nullptr) keeps the DB-only
+    // behaviour used by unit tests that don't want a live bus.
+    void setEventBus(liveqx::events::EventBus* bus) noexcept { event_bus_ = bus; }
+
     // Снимает блокировку и обнуляет счётчик. Возвращает true если юзер
     // существует. Идемпотентно: повторный unlock «чистого» юзера тоже true.
     bool adminUnlockUser(std::int64_t id);
@@ -443,6 +452,10 @@ private:
     // fix35 A3.16 — see setInitialAdminPasswordFile(). Empty when not
     // wired (CLI-only contexts, certain unit tests).
     std::filesystem::path initial_admin_password_file_;
+
+    // Set via setEventBus(). nullptr in unit tests — emitAudit skips the
+    // publish step then; DB insert happens regardless.
+    liveqx::events::EventBus* event_bus_{nullptr};
 
     // Issue + persist session row. Used by both login() and refresh().
     // grants_override: если указан, используется вместо grants_for_user_
