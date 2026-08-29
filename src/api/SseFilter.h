@@ -32,4 +32,16 @@ namespace liveqx::api {
 bool sseEventVisibleTo(const liveqx::auth::RequestContext& ctx,
                        const liveqx::events::Event& e) noexcept;
 
+// True if the event type is part of the *default* /api/events/stream
+// subscription (i.e. what the operator sees on the general "События" page
+// without narrowing via ?types=). Loud, per-clip traffic (ClipChange) is
+// excluded from the default set — such events belong in the per-channel
+// log tab which subscribes explicitly with ?types=clip_change. Rationale:
+// on a busy install with dozens of channels ClipChange fires several times
+// per minute per channel and drowns operational events (health / output
+// state / audit) that actually need operator attention. Excluding it from
+// the default set does not change RBAC or EventBus publish behaviour —
+// clients that ask for it get it.
+bool sseEventInDefaultSubscription(liveqx::events::EventType t) noexcept;
+
 }  // namespace liveqx::api

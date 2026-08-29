@@ -808,6 +808,11 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     //   ?types=clip_change,output_state_change   фильтр по типам
     //   Last-Event-ID: <int>                     replay из ring buffer
     //
+    // Без ?types=... включён default subscription: часть шумных типов
+    // (сейчас — clip_change) в дефолтную ленту не попадает, чтобы не
+    // затопить страницу «События». Клиенты, которым эти типы нужны
+    // (LogTab канала), подписываются явно через ?types=clip_change.
+    //
     // RBAC pre-handler уже проверил Bearer + role.viewer. Здесь мы ещё раз
     // авторизуем (дёшево — те же rules в hash-map), чтобы вытащить
     // RequestContext (role + channel_grants) и применять per-event фильтр
@@ -862,7 +867,12 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             }
         }
         auto matches = [filter](liveqx::events::EventType t) {
-            if (filter.empty()) return true;
+            if (filter.empty()) {
+                // Default subscription: hide loud per-clip traffic. Clients
+                // that want it must ask for it via ?types=clip_change (the
+                // channel Log tab does exactly that).
+                return liveqx::api::sseEventInDefaultSubscription(t);
+            }
             for (auto f : filter) if (f == t) return true;
             return false;
         };

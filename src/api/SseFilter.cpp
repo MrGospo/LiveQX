@@ -29,4 +29,15 @@ bool sseEventVisibleTo(const liveqx::auth::RequestContext& ctx,
     return false;
 }
 
+bool sseEventInDefaultSubscription(liveqx::events::EventType t) noexcept {
+    using EventType = liveqx::events::EventType;
+    switch (t) {
+        case EventType::ClipChange:
+            // Per-clip traffic — subscribed explicitly by the channel Log tab.
+            return false;
+        default:
+            return true;
+    }
+}
+
 }  // namespace liveqx::api

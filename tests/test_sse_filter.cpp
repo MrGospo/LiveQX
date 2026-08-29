@@ -104,3 +104,26 @@ TEST(SseFilter, OperatePermissionAlsoCounts) {
     ctx.channel_grants.push_back(ChannelGrant{42, ChannelPermission::Operate});
     EXPECT_TRUE(sseEventVisibleTo(ctx, evtFor(EventType::ChannelStateChange, 42)));
 }
+
+// ── Default-subscription filter ───────────────────────────────────────────────
+// Loud per-clip traffic is excluded from the default /api/events/stream feed;
+// clients that need it subscribe explicitly (?types=clip_change). RBAC
+// visibility (sseEventVisibleTo) is unaffected — this filter runs on top.
+
+TEST(SseFilter, DefaultSubscriptionExcludesClipChange) {
+    using liveqx::api::sseEventInDefaultSubscription;
+    EXPECT_FALSE(sseEventInDefaultSubscription(EventType::ClipChange));
+}
+
+TEST(SseFilter, DefaultSubscriptionIncludesOperationalEvents) {
+    using liveqx::api::sseEventInDefaultSubscription;
+    EXPECT_TRUE(sseEventInDefaultSubscription(EventType::AuthAudit));
+    EXPECT_TRUE(sseEventInDefaultSubscription(EventType::ChannelStateChange));
+    EXPECT_TRUE(sseEventInDefaultSubscription(EventType::OutputStateChange));
+    EXPECT_TRUE(sseEventInDefaultSubscription(EventType::HealthChange));
+    EXPECT_TRUE(sseEventInDefaultSubscription(EventType::ScheduleActive));
+    EXPECT_TRUE(sseEventInDefaultSubscription(EventType::PluginStatusChange));
+    EXPECT_TRUE(sseEventInDefaultSubscription(EventType::StressRunStarted));
+    EXPECT_TRUE(sseEventInDefaultSubscription(EventType::StressRunFinished));
+    EXPECT_TRUE(sseEventInDefaultSubscription(EventType::GatewayStateChange));
+}
