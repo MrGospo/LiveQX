@@ -1185,7 +1185,9 @@
     "group_schedule": "Schedule",
     "group_plugin": "Plugin",
     "group_auth": "Audit",
-    "group_stress": "Stress"
+    "group_stress": "Stress",
+    "group_gateway": "Gateway",
+    "colActor": "Actor"
   },
   "perf": {
     "mode": "Mode",

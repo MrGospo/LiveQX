@@ -17,8 +17,33 @@ import { useAuthStore } from '@/stores/auth';
 import { useEscClose } from '@/hooks/useEscClose';
 
 const EVENT_TYPE_GROUPS = [
-  'all', 'channel', 'output', 'schedule', 'plugin', 'auth', 'stress',
+  'all', 'channel', 'output', 'schedule', 'gateway', 'plugin', 'auth', 'stress',
 ] as const;
+
+// Fields that carry stream-level metadata rather than event payload.
+// Stripped from the compact JSON preview so operators see only what the
+// producer actually attached.
+const META_KEYS = new Set(['type', 'ts', 'id', 'channel_id']);
+
+function payloadPreview(ev: SseEvent): string {
+  const rest: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(ev)) {
+    if (!META_KEYS.has(k)) rest[k] = v;
+  }
+  return Object.keys(rest).length ? JSON.stringify(rest) : '';
+}
+
+// Render an auth_audit event's payload as `event · details` so operators
+// see the action verb (channel.play, admin.user.created, …) without
+// squinting at raw JSON. Falls back to generic preview if the shape is
+// unexpected.
+function auditPreview(ev: SseEvent): string {
+  const action = typeof ev.event === 'string' ? ev.event : '';
+  const details = (ev as { details?: unknown }).details;
+  if (!action) return payloadPreview(ev);
+  if (details === undefined || details === null) return action;
+  return `${action} · ${typeof details === 'string' ? details : JSON.stringify(details)}`;
+}
 
 const EVENT_COLORS: Record<string, string> = {
   channel_state_change:  'text-[var(--accent)]',
@@ -63,10 +88,10 @@ export default function EventsPage() {
   });
 
   const COLS = [
-    { key: 'ts',         label: t('events.colTime'),    w: 90  },
-    { key: 'type',       label: t('events.colType'),    w: 220 },
-    { key: 'channel_id', label: t('events.colChannel'), w: 70  },
-    { key: 'data',       label: t('events.colPayload')         },
+    { key: 'ts',      label: t('events.colTime'),                          w: 90  },
+    { key: 'type',    label: t('events.colType'),                          w: 220 },
+    { key: 'actor',   label: `${t('events.colActor')}/${t('events.colChannel')}`, w: 170 },
+    { key: 'payload', label: t('events.colPayload')                              },
   ];
 
   return (
@@ -139,24 +164,44 @@ export default function EventsPage() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((ev, i) => (
-                  <tr key={`${ev.id}-${i}`}
-                    onClick={() => setSelectedEvent(ev)}
-                    className="border-b border-[var(--border-subtle)] hover:bg-surface2 cursor-pointer transition-colors">
-                    <td className="px-3 py-2 tabular-nums text-[var(--text-muted)] whitespace-nowrap">
-                      {new Date(Number(ev.id ?? 0)).toLocaleTimeString('en', { hour12: false })}
-                    </td>
-                    <td className="px-3 py-2">
-                      <span className={`font-mono ${EVENT_COLORS[ev.type] ?? 'text-[var(--text-muted)]'}`}>{ev.type}</span>
-                    </td>
-                    <td className="px-3 py-2 tabular-nums text-[var(--accent)]">
-                      {ev.channel_id ? `ch${ev.channel_id}` : ''}
-                    </td>
-                    <td className="px-3 py-2 font-mono text-[var(--text-muted)] truncate max-w-xs">
-                      {JSON.stringify(ev.data)}
-                    </td>
-                  </tr>
-                ))}
+                {filtered.map((ev, i) => {
+                  const isAudit = ev.type === 'auth_audit';
+                  const username = typeof ev.username === 'string' ? ev.username : '';
+                  const ip       = typeof ev.ip === 'string' ? ev.ip : '';
+                  const preview  = isAudit ? auditPreview(ev) : payloadPreview(ev);
+                  // Time source: prefer ev.ts (backend unix-ms), fall back to
+                  // event id (ring-buffer sequence — not a timestamp, but at
+                  // least monotonic). New events always carry ts now that
+                  // wire["ts"] is set by ControlApi's SSE encoder.
+                  const timeMs = typeof ev.ts === 'number' ? ev.ts : Number(ev.id ?? 0);
+                  return (
+                    <tr key={`${ev.id}-${i}`}
+                      onClick={() => setSelectedEvent(ev)}
+                      className="border-b border-[var(--border-subtle)] hover:bg-surface2 cursor-pointer transition-colors">
+                      <td className="px-3 py-2 tabular-nums text-[var(--text-muted)] whitespace-nowrap">
+                        {new Date(timeMs).toLocaleTimeString('en', { hour12: false })}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={`font-mono ${EVENT_COLORS[ev.type] ?? 'text-[var(--text-muted)]'}`}>{ev.type}</span>
+                      </td>
+                      <td className="px-3 py-2 text-[var(--text-primary)] truncate">
+                        {isAudit ? (
+                          <span className="font-mono text-xs">
+                            {username || '—'}
+                            {ip && <span className="text-[var(--text-muted)]"> · {ip}</span>}
+                          </span>
+                        ) : (
+                          <span className="tabular-nums text-[var(--accent)]">
+                            {ev.channel_id ? `ch${ev.channel_id}` : ''}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-[var(--text-muted)] truncate max-w-xs">
+                        {preview}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}
