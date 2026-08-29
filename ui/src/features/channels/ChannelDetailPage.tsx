@@ -2570,6 +2570,11 @@ function LogTab({ channelId }: { channelId: number }) {
   const { data, isLoading }  = usePlaybackLog(channelId, params);
   const { mutate: purgeMutate, isPending: purgePending } = usePurgePlaybackLog(channelId);
 
+  // Live tail via SSE — dedicated stream because clip_change is filtered
+  // out of the default /api/events/stream subscription set. Cheap because
+  // the connection is scoped to the mounted LogTab.
+  useClipChangeInvalidation(channelId);
+
   const [purgeOpen, setPurgeOpen]     = React.useState(false);
   const [purgePreset, setPurgePreset] = React.useState<'last7' | 'last30' | 'filter' | 'all'>('last7');
 
@@ -3078,3 +3083,4 @@ function PermissionsPlaceholder({ channelId }: { channelId: number }) {
 import { useWatcherStatus, useRescan, usePlaybackLog, usePlaybackLogStatus, usePurgePlaybackLog } from '@/api/queries/playlist';
 import type { PlaybackLogEvent } from '@/api/queries/playlist';
 import { useChannelPermissions } from '@/api/queries/channels';
+import { useClipChangeInvalidation } from '@/features/channels/useClipChangeInvalidation';
