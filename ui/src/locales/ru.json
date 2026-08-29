@@ -1261,7 +1261,20 @@
     "purgeSuccess_one": "Удалена {{count}} запись (файлов удалено: {{files}})",
     "purgeSuccess_few": "Удалено {{count}} записи (файлов удалено: {{files}})",
     "purgeSuccess_many": "Удалено {{count}} записей (файлов удалено: {{files}})",
-    "purgeError": "Не удалось очистить лог"
+    "purgeError": "Не удалось очистить лог",
+    "sub_events": "События",
+    "sub_file": "Файл",
+    "fileTitle": "channel.log",
+    "fileTail": "Строк",
+    "fileFilter": "Поиск в строках…",
+    "filePause": "Пауза",
+    "fileResume": "Возобновить",
+    "fileStatusLive": "живой поток",
+    "fileStatusOffline": "нет соединения",
+    "fileStatusPaused": "пауза",
+    "fileEmpty": "Файл пуст или ещё не создан.",
+    "fileTruncated": "Показан только хвост файла — старые строки не загружены.",
+    "fileForbidden": "Просмотр файла лога доступен только администратору."
   },
   "overview": {
     "status": "Статус",

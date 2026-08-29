@@ -1672,10 +1672,15 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
 
                 // Rotation / truncation — file shrank under us. Reset
                 // offset to 0 and tell the client to drop its buffer.
+                // Sent as a `data:` frame (not an SSE comment) so it
+                // reaches the fetch+ReadableStream parser on the client;
+                // EventSource-style comments are silently dropped by
+                // our sseClient.
                 if (sz < state->offset) {
                     state->offset = 0;
                     state->carry.clear();
-                    static constexpr char kRot[] = ": rotated\n\n";
+                    static constexpr char kRot[] =
+                        "data: {\"rotated\":true}\n\n";
                     if (!sink.write(kRot, sizeof(kRot) - 1)) return false;
                 }
 

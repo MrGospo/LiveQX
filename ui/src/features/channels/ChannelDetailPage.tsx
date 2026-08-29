@@ -2543,9 +2543,128 @@ const STATUS_TONE: Record<string, 'ok' | 'warn' | 'danger' | 'muted'> = {
   error:        'danger',
 };
 
+// FileLogView — raw channel.log tail + live SSE stream. Admin-only on
+// the backend; a non-admin viewer sees an empty state (403 surfaces
+// via the api client and the tail query returns no data).
+function FileLogView({ channelId }: { channelId: number }) {
+  const { t } = useTranslation();
+  const [tailSize, setTailSize] = React.useState(500);
+  const [live, setLive]         = React.useState(true);
+  const [filter, setFilter]     = React.useState('');
+
+  const { data: seed, isLoading, error } = useChannelLogTail(channelId, tailSize);
+  const { lines: streamed, connected }   = useChannelLogStream(channelId, live);
+
+  // Merge: seed lines first (historical), then streamed appends. The
+  // stream begins at EOF so there's no overlap with the seed.
+  const all = React.useMemo(() => {
+    const base = seed?.lines ?? [];
+    return live ? [...base, ...streamed] : base;
+  }, [seed, streamed, live]);
+
+  const visible = React.useMemo(() => {
+    if (!filter) return all;
+    const q = filter.toLowerCase();
+    return all.filter(l => l.toLowerCase().includes(q));
+  }, [all, filter]);
+
+  const scrollRef = React.useRef<HTMLDivElement | null>(null);
+  const [atBottom, setAtBottom] = React.useState(true);
+
+  // Auto-scroll when new content arrives, but only if the operator is
+  // already at the bottom (scrolling up to read pauses the follow).
+  React.useLayoutEffect(() => {
+    if (!atBottom) return;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [visible, atBottom]);
+
+  const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    const gap = el.scrollHeight - el.clientHeight - el.scrollTop;
+    setAtBottom(gap < 8);
+  };
+
+  const errStatus = (error as { status?: number } | null)?.status;
+  const forbidden = errStatus === 403;
+
+  return (
+    <Block padding="p-0" className="flex flex-col overflow-hidden">
+      <div className="flex items-center gap-3 flex-wrap px-4 py-3 border-b border-[var(--border-subtle)]">
+        <span className="text-sm font-semibold text-[var(--text-primary)]">
+          {t('log.fileTitle')}
+        </span>
+        <div className="flex items-center gap-1.5">
+          <div className={`w-2 h-2 rounded-full transition-colors ${
+            live && connected ? 'bg-[var(--success)] animate-pulse' : 'bg-[var(--text-muted)]'
+          }`} />
+          <span className="text-xs text-[var(--text-muted)]">
+            {live ? (connected ? t('log.fileStatusLive') : t('log.fileStatusOffline')) : t('log.fileStatusPaused')}
+          </span>
+        </div>
+        <div className="flex-1" />
+
+        <label className="text-xs text-[var(--text-muted)] flex items-center gap-1">
+          {t('log.fileTail')}
+          <select value={tailSize} onChange={e => setTailSize(Number(e.target.value))}
+            className="ml-1 px-2 py-1 text-xs bg-canvas border border-[var(--border-subtle)] rounded-md text-[var(--text-primary)]">
+            {[100, 500, 1000, 2000, 5000].map(n => (
+              <option key={n} value={n}>{n}</option>
+            ))}
+          </select>
+        </label>
+
+        <input type="text" value={filter} onChange={e => setFilter(e.target.value)}
+          placeholder={t('log.fileFilter')}
+          className="px-3 py-1.5 text-xs bg-canvas border border-[var(--border-subtle)] rounded-md text-[var(--text-primary)] w-44 outline-none focus-visible:border-[var(--accent)]" />
+
+        <button type="button" onClick={() => setLive(l => !l)}
+          className={`px-3 py-1.5 text-xs rounded-md border transition-colors ${
+            live
+              ? 'bg-[var(--accent)] text-white border-transparent'
+              : 'border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+          }`}>
+          {live ? t('log.filePause') : t('log.fileResume')}
+        </button>
+      </div>
+
+      {forbidden ? (
+        <div className="px-4 py-12 text-center text-sm text-[var(--text-muted)]">
+          {t('log.fileForbidden')}
+        </div>
+      ) : isLoading ? (
+        <div className="h-64 bg-surface2 animate-pulse" />
+      ) : visible.length === 0 ? (
+        <div className="px-4 py-12 text-center text-sm text-[var(--text-muted)]">
+          {t('log.fileEmpty')}
+        </div>
+      ) : (
+        <div ref={scrollRef} onScroll={onScroll}
+          className="overflow-y-auto font-mono text-xs leading-relaxed text-[var(--text-primary)] p-4 bg-canvas whitespace-pre-wrap break-all"
+          style={{ maxHeight: 'calc(100vh - 380px)', minHeight: '300px' }}>
+          {visible.map((line, i) => (
+            <div key={i} className="hover:bg-surface2 -mx-1 px-1">{line}</div>
+          ))}
+        </div>
+      )}
+
+      {seed?.truncated && (
+        <div className="px-4 py-2 text-xs text-[var(--text-muted)] border-t border-[var(--border-subtle)]">
+          {t('log.fileTruncated')}
+        </div>
+      )}
+    </Block>
+  );
+}
+
 function LogTab({ channelId }: { channelId: number }) {
   const { t } = useTranslation();
   const toast = useToast();
+
+  // Sub-tab: 'events' — structured playback events (spreads the playback-log
+  // sink); 'file' — raw channel.log for admins (ffmpeg / decoder diagnostics
+  // that never make it into a structured event).
+  const [sub, setSub] = React.useState<'events' | 'file'>('events');
 
   // Filters live in URL-free local state — channel page is leaf-only.
   const [from, setFrom]       = React.useState('');
@@ -2594,10 +2713,29 @@ function LogTab({ channelId }: { channelId: number }) {
 
   const sink = status?.sink_type ?? 'none';
 
-  // sink=none: backend explicitly returns empty results. Show explanation.
-  if (sink === 'none') {
+  // Sub-tab pills — rendered above every branch so operators can flip
+  // to the raw file view even when the playback sink is disabled.
+  const subTabs = (
+    <div className="flex gap-1.5">
+      {(['events', 'file'] as const).map(k => (
+        <button key={k} type="button" onClick={() => setSub(k)}
+          className={`px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
+            sub === k
+              ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]'
+              : 'border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+          }`}>
+          {t(`log.sub_${k}`)}
+        </button>
+      ))}
+    </div>
+  );
+
+  // sink=none + events tab: backend explicitly returns empty results.
+  // The file tab still works (raw log is independent of the sink type).
+  if (sink === 'none' && sub === 'events') {
     return (
-      <div className="w-full">
+      <div className="flex flex-col gap-4 w-full">
+        {subTabs}
         <Block>
           <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-2">{t('log.title')}</h2>
           <p className="text-sm text-[var(--text-muted)]">{t('log.disabledBody')}</p>
@@ -2606,8 +2744,18 @@ function LogTab({ channelId }: { channelId: number }) {
     );
   }
 
+  if (sub === 'file') {
+    return (
+      <div className="flex flex-col gap-4 w-full">
+        {subTabs}
+        <FileLogView channelId={channelId} />
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4 w-full">
+      {subTabs}
       {/* Sink status block */}
       <Block>
         <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">{t('log.sinkTitle')}</h2>
@@ -3080,7 +3228,8 @@ function PermissionsPlaceholder({ channelId }: { channelId: number }) {
   );
 }
 
-import { useWatcherStatus, useRescan, usePlaybackLog, usePlaybackLogStatus, usePurgePlaybackLog } from '@/api/queries/playlist';
+import { useWatcherStatus, useRescan, usePlaybackLog, usePlaybackLogStatus, usePurgePlaybackLog, useChannelLogTail } from '@/api/queries/playlist';
 import type { PlaybackLogEvent } from '@/api/queries/playlist';
 import { useChannelPermissions } from '@/api/queries/channels';
 import { useClipChangeInvalidation } from '@/features/channels/useClipChangeInvalidation';
+import { useChannelLogStream } from '@/features/channels/useChannelLogStream';

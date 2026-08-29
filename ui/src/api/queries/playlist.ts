@@ -216,3 +216,25 @@ export const usePurgePlaybackLog = (channelId: number) => {
     },
   });
 };
+
+// ─── Channel raw log file (channel.log) ────────────────────────────────────────
+
+// GET /api/channels/{id}/logs?tail=N — last N lines of the raw spdlog file.
+// Admin-only on the backend; hook stays enabled regardless so a 403 surfaces
+// naturally through the api client and the caller renders an empty state.
+export interface ChannelLogTailResponse {
+  lines: string[];
+  truncated: boolean;
+  size_bytes: number;
+}
+
+export const useChannelLogTail = (channelId: number, tail = 500) =>
+  useQuery({
+    queryKey: ['channels', channelId, 'log-file', 'tail', tail],
+    queryFn: () =>
+      api.get<ChannelLogTailResponse>(
+        `/api/channels/${channelId}/logs?tail=${tail}`,
+      ),
+    staleTime: 5_000,
+    enabled: channelId > 0,
+  });

@@ -1256,7 +1256,20 @@
     "purgePending": "Clearing…",
     "purgeSuccess_one": "Removed {{count}} event (files removed: {{files}})",
     "purgeSuccess_other": "Removed {{count}} events (files removed: {{files}})",
-    "purgeError": "Failed to clear log"
+    "purgeError": "Failed to clear log",
+    "sub_events": "Events",
+    "sub_file": "File",
+    "fileTitle": "channel.log",
+    "fileTail": "Lines",
+    "fileFilter": "Filter lines…",
+    "filePause": "Pause",
+    "fileResume": "Resume",
+    "fileStatusLive": "live",
+    "fileStatusOffline": "disconnected",
+    "fileStatusPaused": "paused",
+    "fileEmpty": "File is empty or not yet created.",
+    "fileTruncated": "Showing only the file's tail — older lines are not loaded.",
+    "fileForbidden": "Raw log file is admin-only."
   },
   "overview": {
     "status": "Status",
