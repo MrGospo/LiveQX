@@ -49,6 +49,7 @@ extern "C" {
 #include "mounts/MountManager.h"
 #include "mounts/MountSpec.h"
 #include "metrics/ChannelMetrics.h"
+#include "metrics/HostMetrics.h"
 #include "utils/Log.h"
 #include "utils/NetIfaces.h"
 #include "utils/Tls.h"
@@ -368,6 +369,11 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     // ── System / network info ─────────────────────────────────────────
     rbac.registerEndpoint("GET /api/system/interfaces", rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("GET /api/system/gpu",        rbacRole(RbacRole::Admin));
+    // Host-resource dashboard (CPU/RAM/NIC/FS/disk-io). Snapshot GET is
+    // for scripts / manual curl; the SSE stream drives the admin UI page
+    // and is lazy-started per subscriber (no work when nobody is watching).
+    rbac.registerEndpoint("GET /api/system/host_metrics",        rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("GET /api/system/host_metrics/stream", rbacRole(RbacRole::Admin));
     // fix36: filesystem browse endpoint backs the UI folder picker for
     // share_path / hls_dir inputs. Admin-only — directory listing is
     // information disclosure on a multi-tenant box.
@@ -1698,6 +1704,51 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             {"codec_registered", codecRegistered("libx264")},
         };
         writeJson(res, 200, gpu);
+    });
+
+    // Host-resource dashboard: one-shot snapshot + SSE stream. Both are
+    // stateless as far as the server is concerned; the SSE handler holds
+    // the previous snapshot in a per-connection shared_ptr to compute
+    // CPU%/NIC-bps rates between successive samples. No background thread
+    // exists — sampling only runs while a client is connected.
+    s.Get("/api/system/host_metrics",
+          [](const httplib::Request&, httplib::Response& res) {
+        writeJson(res, 200,
+            liveqx::metrics::HostMetricsReader::toJson(
+                liveqx::metrics::HostMetricsReader::sample()));
+    });
+
+    s.Get("/api/system/host_metrics/stream",
+          [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Cache-Control",     "no-cache");
+        res.set_header("X-Accel-Buffering", "no");  // disable nginx buffering
+
+        struct StreamState {
+            bool                                  have_prev = false;
+            liveqx::metrics::HostSnapshot         prev{};
+        };
+        auto state = std::make_shared<StreamState>();
+
+        res.set_chunked_content_provider(
+            "text/event-stream",
+            [state](std::size_t, httplib::DataSink& sink) -> bool {
+                using namespace std::chrono_literals;
+                auto curr = liveqx::metrics::HostMetricsReader::sample();
+                nlohmann::json payload = state->have_prev
+                    ? liveqx::metrics::HostMetricsReader::toJsonWithRates(state->prev, curr)
+                    : liveqx::metrics::HostMetricsReader::toJson(curr);
+                state->prev      = std::move(curr);
+                state->have_prev = true;
+
+                std::string frame = "data: ";
+                frame += payload.dump();
+                frame += "\n\n";
+                if (!sink.write(frame.data(), frame.size())) return false;
+                // Sample cadence. Sleeping in the response thread is fine —
+                // this endpoint is admin-only, expected concurrency is 1-2.
+                std::this_thread::sleep_for(1s);
+                return true;
+            });
     });
 
     // fix36: directory browse for the UI folder picker. Admin-only. The

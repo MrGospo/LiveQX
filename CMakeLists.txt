@@ -321,6 +321,7 @@ set(SOURCES
     src/logging/FilePlaybackSink.cpp
     src/logging/SqlitePlaybackSink.cpp
     src/metrics/ProcessMetrics.cpp
+    src/metrics/HostMetrics.cpp
     src/persistence/StatePersistence.cpp
     src/persistence/ChannelStateSaver.cpp
     src/gateway/Gateway.cpp

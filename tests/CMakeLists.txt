@@ -44,6 +44,7 @@ add_executable(liveqx-tests
     test_url_sanitize.cpp
     test_output_manager.cpp
     test_process_metrics.cpp
+    test_host_metrics.cpp
     test_state_persistence.cpp
     test_state_saver.cpp
     test_gateway_cfg.cpp
@@ -162,6 +163,7 @@ add_executable(liveqx-tests
     ../src/persistence/StatePersistence.cpp
     ../src/persistence/ChannelStateSaver.cpp
     ../src/metrics/ProcessMetrics.cpp
+    ../src/metrics/HostMetrics.cpp
     ../src/output/OutputManager.cpp
     ../src/output/MulticastOutput.cpp
     ../src/clips/LiveClip.cpp
@@ -349,6 +351,7 @@ add_executable(liveqx-itests
     ../src/api/MetricsCollector.cpp
     ../src/api/RbacScope.cpp
     ../src/metrics/ProcessMetrics.cpp
+    ../src/metrics/HostMetrics.cpp
     ../src/persistence/StatePersistence.cpp
     ../src/persistence/ChannelStateSaver.cpp
     ../src/core/ChannelInstance.cpp
