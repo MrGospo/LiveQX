@@ -741,6 +741,13 @@ std::size_t ChannelManager::size() const {
     return channels_.size();
 }
 
+std::filesystem::path ChannelManager::channelDir(int id) const {
+    std::shared_lock lk(mu_);
+    auto it = channels_.find(id);
+    if (it == channels_.end()) return {};
+    return it->second->channelDir();
+}
+
 void ChannelManager::forEachChannel(
     const std::function<void(const ChannelInstance&)>& fn) const {
     std::shared_lock lk(mu_);

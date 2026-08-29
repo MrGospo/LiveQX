@@ -353,6 +353,14 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
                           rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("GET /api/channels/{id}/permissions",
                           rbacRole(RbacRole::Admin));
+    // Raw channel.log exposes internal diagnostic output (ffmpeg
+    // warnings, decoder fallbacks, thread stack traces on assert).
+    // Restrict to Admin — an Operator with a single-channel ACL
+    // shouldn't see host-level diagnostics.
+    rbac.registerEndpoint("GET /api/channels/{id}/logs",
+                          rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("GET /api/channels/{id}/logs/stream",
+                          rbacRole(RbacRole::Admin));
 
     // ── Gateways ──────────────────────────────────────────────────────
     rbac.registerEndpoint("GET /api/gateways",            rbacRole(RbacRole::Operator));
@@ -1526,6 +1534,199 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         const auto j = mgr.purgePlaybackLog(id, from_ns, to_ns);
         if (j.is_null()) { writeError(res, R::NotFound); return; }
         writeJson(res, 200, j);
+    });
+
+    // ── channel.log raw tail (admin-only) ───────────────────────────────────
+    // The channel log file lives at {channel_dir}/logs/channel.log and is
+    // written via spdlog rotating sink from ChannelInstance. The two
+    // endpoints below let the UI show operators the raw file contents
+    // (last N lines + live tail), which contains diagnostic output that
+    // isn't exposed via the structured event stream — muxer errors,
+    // ffmpeg warnings, gpu decode fallbacks, etc. Path is derived
+    // server-side from the live ChannelInstance via
+    // ChannelManager::channelDir(id) so a client never influences the
+    // filesystem lookup (no path-traversal surface).
+    auto channelLogPathOf = [&mgr](int id) -> std::filesystem::path {
+        auto dir = mgr.channelDir(id);
+        if (dir.empty()) return {};
+        return dir / "logs" / "channel.log";
+    };
+
+    // GET /api/channels/{id}/logs?tail=N
+    //   Returns the last N lines of channel.log. N is clamped to
+    //   [1, 5000], default 200. 200 → {lines: [...], truncated: bool,
+    //   size_bytes: N}. 404 if channel is not live or log file missing.
+    s.Get(R"(/api/channels/(\d+)/logs)",
+          [channelLogPathOf](const httplib::Request& req, httplib::Response& res) {
+        int id = 0; if (!parseId(req, res, id)) return;
+        const auto path = channelLogPathOf(id);
+        if (path.empty()) { writeError(res, R::NotFound); return; }
+
+        int tail = 200;
+        if (req.has_param("tail")) {
+            try { tail = std::stoi(req.get_param_value("tail")); } catch (...) {}
+        }
+        if (tail < 1)    tail = 1;
+        if (tail > 5000) tail = 5000;
+
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec) || ec) {
+            writeJson(res, 200, {{"lines", json::array()},
+                                 {"truncated", false},
+                                 {"size_bytes", 0}});
+            return;
+        }
+        const auto sz = std::filesystem::file_size(path, ec);
+        if (ec) { writeError(res, R::NotFound); return; }
+
+        std::ifstream in(path, std::ios::binary);
+        if (!in) { writeError(res, R::NotFound); return; }
+
+        // Read last ~256 KiB — enough for 5000 typical log lines. This
+        // avoids slurping arbitrarily large rotated files into memory.
+        constexpr std::uintmax_t kMaxRead = 256 * 1024;
+        std::uintmax_t start = sz > kMaxRead ? sz - kMaxRead : 0;
+        in.seekg(static_cast<std::streamoff>(start), std::ios::beg);
+        std::string buf((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+        if (start > 0) {
+            // Drop the first partial line so we don't return a truncated
+            // record. Safe on empty buf (find returns npos, +1 → 0 → substr(0)).
+            auto nl = buf.find('\n');
+            if (nl != std::string::npos) buf.erase(0, nl + 1);
+        }
+
+        std::vector<std::string> all_lines;
+        all_lines.reserve(256);
+        std::size_t pos = 0;
+        while (pos < buf.size()) {
+            auto nl = buf.find('\n', pos);
+            if (nl == std::string::npos) {
+                if (pos < buf.size()) all_lines.emplace_back(buf.substr(pos));
+                break;
+            }
+            all_lines.emplace_back(buf.substr(pos, nl - pos));
+            pos = nl + 1;
+        }
+
+        const bool truncated = (start > 0) ||
+                               (static_cast<int>(all_lines.size()) > tail);
+        json lines = json::array();
+        const std::size_t begin = all_lines.size() > static_cast<std::size_t>(tail)
+                                  ? all_lines.size() - tail : 0;
+        for (std::size_t i = begin; i < all_lines.size(); ++i) {
+            lines.push_back(std::move(all_lines[i]));
+        }
+        writeJson(res, 200, {{"lines",      std::move(lines)},
+                             {"truncated",  truncated},
+                             {"size_bytes", static_cast<std::int64_t>(sz)}});
+    });
+
+    // GET /api/channels/{id}/logs/stream
+    //   Server-Sent Events tail-F of channel.log. Each new line is
+    //   emitted as a `data:` frame with a JSON body {"line":"..."}. The
+    //   handler polls file size every 500ms and streams any new bytes
+    //   past its last read offset. On file shrink (spdlog rotation
+    //   truncated us out) we reset to offset 0 and emit a `rotated`
+    //   comment so the client can clear its buffer.
+    s.Get(R"(/api/channels/(\d+)/logs/stream)",
+          [channelLogPathOf](const httplib::Request& req, httplib::Response& res) {
+        int id = 0; if (!parseId(req, res, id)) return;
+        const auto path = channelLogPathOf(id);
+        if (path.empty()) { writeError(res, R::NotFound); return; }
+
+        struct StreamState {
+            std::filesystem::path path;
+            std::uintmax_t        offset{0};
+            std::string           carry;  // partial trailing line
+        };
+        auto state = std::make_shared<StreamState>();
+        state->path = path;
+
+        // Seed offset at end-of-file so the stream only shows lines
+        // appended after the client subscribed. Historical lines come
+        // from GET /logs?tail=N.
+        std::error_code ec;
+        if (std::filesystem::exists(state->path, ec) && !ec) {
+            const auto sz = std::filesystem::file_size(state->path, ec);
+            if (!ec) state->offset = sz;
+        }
+
+        res.set_header("Cache-Control",     "no-cache");
+        res.set_header("X-Accel-Buffering", "no");
+        res.set_chunked_content_provider(
+            "text/event-stream",
+            [state](std::size_t, httplib::DataSink& sink) -> bool {
+                using namespace std::chrono_literals;
+                std::error_code ec2;
+                if (!std::filesystem::exists(state->path, ec2) || ec2) {
+                    static constexpr char kKeepalive[] = ": keepalive\n\n";
+                    std::this_thread::sleep_for(500ms);
+                    return sink.write(kKeepalive, sizeof(kKeepalive) - 1);
+                }
+                const auto sz = std::filesystem::file_size(state->path, ec2);
+                if (ec2) {
+                    std::this_thread::sleep_for(500ms);
+                    return true;
+                }
+
+                // Rotation / truncation — file shrank under us. Reset
+                // offset to 0 and tell the client to drop its buffer.
+                if (sz < state->offset) {
+                    state->offset = 0;
+                    state->carry.clear();
+                    static constexpr char kRot[] = ": rotated\n\n";
+                    if (!sink.write(kRot, sizeof(kRot) - 1)) return false;
+                }
+
+                if (sz == state->offset) {
+                    static constexpr char kKeepalive[] = ": keepalive\n\n";
+                    std::this_thread::sleep_for(500ms);
+                    return sink.write(kKeepalive, sizeof(kKeepalive) - 1);
+                }
+
+                std::ifstream in(state->path, std::ios::binary);
+                if (!in) {
+                    std::this_thread::sleep_for(500ms);
+                    return true;
+                }
+                in.seekg(static_cast<std::streamoff>(state->offset), std::ios::beg);
+                std::string chunk((std::istreambuf_iterator<char>(in)),
+                                   std::istreambuf_iterator<char>());
+                state->offset = sz;
+
+                std::string body = state->carry + chunk;
+                state->carry.clear();
+
+                std::string payload;
+                payload.reserve(body.size() + 64);
+                std::size_t pos = 0;
+                while (pos < body.size()) {
+                    auto nl = body.find('\n', pos);
+                    if (nl == std::string::npos) {
+                        state->carry.assign(body, pos, std::string::npos);
+                        break;
+                    }
+                    std::string_view line(body.data() + pos, nl - pos);
+                    // Strip trailing '\r' (windows-style logs, unlikely
+                    // here but defensive).
+                    if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+                    nlohmann::json j = {{"line", std::string(line)}};
+                    payload += "data: ";
+                    payload += j.dump();
+                    payload += "\n\n";
+                    pos = nl + 1;
+                }
+
+                if (payload.empty()) {
+                    static constexpr char kKeepalive[] = ": keepalive\n\n";
+                    std::this_thread::sleep_for(500ms);
+                    return sink.write(kKeepalive, sizeof(kKeepalive) - 1);
+                }
+                if (!sink.write(payload.data(), payload.size())) return false;
+                std::this_thread::sleep_for(500ms);
+                return true;
+            });
     });
 
     // ── WebRTC preview (fix23) ──────────────────────────────────────────────

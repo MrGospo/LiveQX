@@ -244,6 +244,13 @@ public:
     // For tests: total channel count.
     std::size_t size() const;
 
+    // Directory owned by a live channel (channels/ch{id}-{sanitized}/…).
+    // Empty path when the channel is unknown OR when running in legacy
+    // mode without channel_root_. Used by the raw-log endpoints — the
+    // path is derived server-side from the live instance so a client
+    // never influences the filesystem lookup (no path-traversal surface).
+    std::filesystem::path channelDir(int id) const;
+
     // ── fix16 readiness signals ─────────────────────────────────────────────
     // True after loadFromRoot() has finished its disk scan (regardless of
     // how many channels were actually loaded — an empty channel root is a
