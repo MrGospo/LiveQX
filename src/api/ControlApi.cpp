@@ -952,16 +952,49 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             });
     });
 
+    // Channel-mutation audit helpers. Placed inline (rather than reusing
+    // the actorContext lambda at ~L2279) because the channel endpoints
+    // predate the auth block lexically and we don't want the extra file
+    // hop for readers tracing an /api/channels/... call. Same shape as
+    // pluginActorOf / mountActorOf: {user_id, username}, empty on absent
+    // bearer so pre-RBAC tests keep working. emitChannelAudit is a
+    // fire-and-forget wrapper — DB write + EventBus fan-out happen in
+    // AuthService::emitAudit, this is only the actor plumbing.
+    auto channelActorOf = [au](const httplib::Request& req)
+        -> std::pair<std::optional<std::int64_t>, std::string> {
+        if (!au || !req.has_header("Authorization")) return {std::nullopt, ""};
+        const auto v = req.get_header_value("Authorization");
+        constexpr const char* kPrefix = "Bearer ";
+        if (v.rfind(kPrefix, 0) != 0) return {std::nullopt, ""};
+        auto claims = au->verifyActiveAccess(v.substr(7));
+        if (!claims) return {std::nullopt, ""};
+        return {claims->user_id, claims->username};
+    };
+    auto emitChannelAudit = [au](std::string_view event,
+                                 const std::optional<std::int64_t>& uid,
+                                 std::string_view username,
+                                 std::string_view ip,
+                                 const json& details) {
+        if (!au) return;
+        au->emitAudit(event, uid, username, ip, details.dump());
+    };
+
     s.Get("/api/channels", [&mgr](const httplib::Request&, httplib::Response& res) {
         writeJson(res, 200, mgr.listJson());
     });
 
-    s.Post("/api/channels", [&mgr](const httplib::Request& req, httplib::Response& res) {
+    s.Post("/api/channels",
+           [&mgr, channelActorOf, emitChannelAudit]
+           (const httplib::Request& req, httplib::Response& res) {
         json body;
         if (!parseJsonBody(req, res, body)) return;
         int id = 0;
         const auto r = mgr.create(body, &id);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("channel.created", uid, uname, req.remote_addr,
+                         {{"channel_id", id},
+                          {"name", body.value("name", std::string{})}});
         writeJson(res, 201, {{"id", id}});
     });
 
@@ -974,15 +1007,25 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Delete(R"(/api/channels/(\d+))",
-             [&mgr](const httplib::Request& req, httplib::Response& res) {
+             [&mgr, channelActorOf, emitChannelAudit]
+             (const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
+        // Snapshot name BEFORE remove — post-delete statusJson is null.
+        std::string name;
+        if (auto snap = mgr.statusJson(id); !snap.is_null()) {
+            name = snap.value("name", std::string{});
+        }
         const auto r = mgr.remove(id);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("channel.deleted", uid, uname, req.remote_addr,
+                         {{"channel_id", id}, {"name", name}});
         res.status = 204;
     });
 
     s.Put(R"(/api/channels/(\d+)/config)",
-          [&mgr](const httplib::Request& req, httplib::Response& res) {
+          [&mgr, channelActorOf, emitChannelAudit]
+          (const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
         json patch;
         if (!parseJsonBody(req, res, patch)) return;
@@ -993,30 +1036,54 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         }
         const auto r = mgr.updateConfig(id, patch);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        // Log the keys the operator touched — not the full patch, so a
+        // secret-bearing field (SRT passphrase, if that ever migrated to
+        // updateConfig) doesn't land in the audit trail.
+        std::vector<std::string> keys;
+        if (patch.is_object()) {
+            keys.reserve(patch.size());
+            for (auto it = patch.begin(); it != patch.end(); ++it)
+                keys.push_back(it.key());
+        }
+        emitChannelAudit("channel.updated", uid, uname, req.remote_addr,
+                         {{"channel_id", id}, {"fields", keys}});
         writeJson(res, 200, mgr.statusJson(id));
     });
 
     s.Post(R"(/api/channels/(\d+)/play)",
-           [&mgr](const httplib::Request& req, httplib::Response& res) {
+           [&mgr, channelActorOf, emitChannelAudit]
+           (const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
         const auto r = mgr.play(id);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("channel.play", uid, uname, req.remote_addr,
+                         {{"channel_id", id}});
         writeJson(res, 200, mgr.statusJson(id));
     });
 
     s.Post(R"(/api/channels/(\d+)/stop)",
-           [&mgr](const httplib::Request& req, httplib::Response& res) {
+           [&mgr, channelActorOf, emitChannelAudit]
+           (const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
         const auto r = mgr.stop(id);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("channel.stop", uid, uname, req.remote_addr,
+                         {{"channel_id", id}});
         writeJson(res, 200, mgr.statusJson(id));
     });
 
     s.Post(R"(/api/channels/(\d+)/next)",
-           [&mgr](const httplib::Request& req, httplib::Response& res) {
+           [&mgr, channelActorOf, emitChannelAudit]
+           (const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
         const auto r = mgr.next(id);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("channel.next", uid, uname, req.remote_addr,
+                         {{"channel_id", id}});
         writeJson(res, 200, {{"ok", true}});
     });
 
@@ -1030,31 +1097,44 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Post(R"(/api/channels/(\d+)/playlist)",
-           [&mgr](const httplib::Request& req, httplib::Response& res) {
+           [&mgr, channelActorOf, emitChannelAudit]
+           (const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
         json body;
         if (!parseJsonBody(req, res, body)) return;
         if (!body.is_array()) { writeError(res, R::BadJson); return; }
+        const auto items = body.size();
         const auto r = mgr.replacePlaylist(id, body);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("playlist.replaced", uid, uname, req.remote_addr,
+                         {{"channel_id", id}, {"items", items}});
         writeJson(res, 200, mgr.playlistJson(id));
     });
 
     s.Post(R"(/api/channels/(\d+)/playlist/append)",
-           [&mgr](const httplib::Request& req, httplib::Response& res) {
+           [&mgr, channelActorOf, emitChannelAudit]
+           (const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
         json body;
         if (!parseJsonBody(req, res, body)) return;
         if (!body.is_array()) { writeError(res, R::BadJson); return; }
         int first_idx = -1;
+        const auto items = body.size();
         const auto r = mgr.appendPlaylist(id, body, &first_idx);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("playlist.appended", uid, uname, req.remote_addr,
+                         {{"channel_id", id},
+                          {"items", items},
+                          {"first_idx", first_idx}});
         writeJson(res, 200, {{"first_idx", first_idx},
                              {"playlist",  mgr.playlistJson(id)}});
     });
 
     s.Delete(R"(/api/channels/(\d+)/playlist/(\d+))",
-             [&mgr](const httplib::Request& req, httplib::Response& res) {
+             [&mgr, channelActorOf, emitChannelAudit]
+             (const httplib::Request& req, httplib::Response& res) {
         int id = 0;
         try { id = std::stoi(req.matches[1]); }
         catch (...) { writeJson(res, 400, {{"error", "invalid_id"}}); return; }
@@ -1064,15 +1144,24 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         bool was_active = false;
         const auto r = mgr.removeAt(id, idx, &was_active);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("playlist.item_removed", uid, uname, req.remote_addr,
+                         {{"channel_id", id},
+                          {"index", idx},
+                          {"was_active", was_active}});
         writeJson(res, 200, {{"was_active", was_active},
                              {"playlist",   mgr.playlistJson(id)}});
     });
 
     s.Delete(R"(/api/channels/(\d+)/playlist)",
-             [&mgr](const httplib::Request& req, httplib::Response& res) {
+             [&mgr, channelActorOf, emitChannelAudit]
+             (const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
         const auto r = mgr.clearPlaylist(id);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("playlist.cleared", uid, uname, req.remote_addr,
+                         {{"channel_id", id}});
         res.status = 204;
     });
 
@@ -1099,21 +1188,31 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Post(R"(/api/channels/(\d+)/outputs)",
-           [&mgr](const httplib::Request& req, httplib::Response& res) {
+           [&mgr, channelActorOf, emitChannelAudit]
+           (const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
         json body;
         if (!parseJsonBody(req, res, body)) return;
         const auto r = mgr.addOutput(id, body);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("output.added", uid, uname, req.remote_addr,
+                         {{"channel_id", id},
+                          {"kind", body.value("kind", std::string{})},
+                          {"output_id", body.value("id", std::string{})}});
         writeJson(res, 201, mgr.outputsJson(id));
     });
 
     s.Delete(R"(/api/channels/(\d+)/outputs/([^/]+))",
-             [&mgr](const httplib::Request& req, httplib::Response& res) {
+             [&mgr, channelActorOf, emitChannelAudit]
+             (const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
         const std::string oid = req.matches[2];
         const auto r = mgr.removeOutput(id, oid);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("output.removed", uid, uname, req.remote_addr,
+                         {{"channel_id", id}, {"output_id", oid}});
         writeJson(res, 200, mgr.outputsJson(id));
     });
 
@@ -1127,13 +1226,25 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Patch(R"(/api/channels/(\d+)/outputs/([^/]+))",
-            [&mgr](const httplib::Request& req, httplib::Response& res) {
+            [&mgr, channelActorOf, emitChannelAudit]
+            (const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
         const std::string oid = req.matches[2];
         json body;
         if (!parseJsonBody(req, res, body)) return;
         const auto r = mgr.patchOutput(id, oid, body);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        std::vector<std::string> keys;
+        if (body.is_object()) {
+            keys.reserve(body.size());
+            for (auto it = body.begin(); it != body.end(); ++it)
+                keys.push_back(it.key());
+        }
+        emitChannelAudit("output.updated", uid, uname, req.remote_addr,
+                         {{"channel_id", id},
+                          {"output_id", oid},
+                          {"fields", keys}});
         writeJson(res, 200, mgr.outputsJson(id));
     });
 
@@ -1298,13 +1409,18 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Put(R"(/api/channels/(\d+)/schedule)",
-          [&mgr](const httplib::Request& req, httplib::Response& res) {
+          [&mgr, channelActorOf, emitChannelAudit]
+          (const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
         json body;
         if (!parseJsonBody(req, res, body)) return;
         if (!body.is_array()) { writeError(res, R::BadJson); return; }
+        const auto entries = body.size();
         const auto r = mgr.replaceSchedule(id, body);
         if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("schedule.replaced", uid, uname, req.remote_addr,
+                         {{"channel_id", id}, {"entries", entries}});
         writeJson(res, 200, mgr.scheduleJson(id));
     });
 
