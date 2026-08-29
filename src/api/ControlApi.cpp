@@ -1335,7 +1335,8 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Put("/api/stress/config",
-          [st, stressUnavailable](const httplib::Request& req, httplib::Response& res) {
+          [st, stressUnavailable, channelActorOf, emitChannelAudit]
+          (const httplib::Request& req, httplib::Response& res) {
         if (!st) { stressUnavailable(res); return; }
         json body;
         if (!parseJsonBody(req, res, body)) return;
@@ -1344,24 +1345,35 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             writeJson(res, 400, {{"error", "invalid_config"}, {"detail", err}});
             return;
         }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("stress.config_updated", uid, uname, req.remote_addr,
+                         json::object());
         writeJson(res, 200, st->configJson());
     });
 
     s.Post("/api/stress/start",
-           [st, stressUnavailable](const httplib::Request&, httplib::Response& res) {
+           [st, stressUnavailable, channelActorOf, emitChannelAudit]
+           (const httplib::Request& req, httplib::Response& res) {
         if (!st) { stressUnavailable(res); return; }
         std::string err;
         if (!st->startNow(&err)) {
             writeJson(res, 409, {{"error", "cannot_start"}, {"detail", err}});
             return;
         }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("stress.started", uid, uname, req.remote_addr,
+                         json::object());
         writeJson(res, 202, st->statusJson());
     });
 
     s.Post("/api/stress/stop",
-           [st, stressUnavailable](const httplib::Request&, httplib::Response& res) {
+           [st, stressUnavailable, channelActorOf, emitChannelAudit]
+           (const httplib::Request& req, httplib::Response& res) {
         if (!st) { stressUnavailable(res); return; }
         st->stopNow();
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("stress.stopped", uid, uname, req.remote_addr,
+                         json::object());
         writeJson(res, 200, st->statusJson());
     });
 
@@ -1392,10 +1404,14 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Delete(R"(/api/stress/reports/([A-Za-z0-9_\-]+))",
-          [st, stressUnavailable](const httplib::Request& req, httplib::Response& res) {
+          [st, stressUnavailable, channelActorOf, emitChannelAudit]
+          (const httplib::Request& req, httplib::Response& res) {
         if (!st) { stressUnavailable(res); return; }
         const auto id = std::string(req.matches[1]);
         if (!st->removeReport(id)) { writeJson(res, 404, {{"error", "not_found"}}); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("stress.report_deleted", uid, uname, req.remote_addr,
+                         {{"report_id", id}});
         res.status = 204;
     });
 
@@ -1633,13 +1649,18 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Post("/api/gateways",
-           [gws](const httplib::Request& req, httplib::Response& res) {
+           [gws, channelActorOf, emitChannelAudit]
+           (const httplib::Request& req, httplib::Response& res) {
         if (!gws) { writeJson(res, 503, {{"error","gateways_not_configured"}}); return; }
         json body;
         if (!parseJsonBody(req, res, body)) return;
         int id = 0;
         const auto r = gws->create(body, &id);
         if (r != GR::Ok) { writeGatewayError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("gateway.created", uid, uname, req.remote_addr,
+                         {{"gateway_id", id},
+                          {"name", body.value("name", std::string{})}});
         writeJson(res, 201, {{"id", id}});
     });
 
@@ -1653,31 +1674,53 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Delete(R"(/api/gateways/(\d+))",
-             [gws](const httplib::Request& req, httplib::Response& res) {
+             [gws, channelActorOf, emitChannelAudit]
+             (const httplib::Request& req, httplib::Response& res) {
         if (!gws) { writeJson(res, 503, {{"error","gateways_not_configured"}}); return; }
         int id = 0; if (!parseId(req, res, id)) return;
+        std::string name;
+        if (auto snap = gws->statusJson(id); !snap.is_null()) {
+            name = snap.value("name", std::string{});
+        }
         const auto r = gws->remove(id);
         if (r != GR::Ok) { writeGatewayError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("gateway.deleted", uid, uname, req.remote_addr,
+                         {{"gateway_id", id}, {"name", name}});
         writeJson(res, 200, {{"status","deleted"},{"id",id}});
     });
 
     s.Patch(R"(/api/gateways/(\d+))",
-            [gws](const httplib::Request& req, httplib::Response& res) {
+            [gws, channelActorOf, emitChannelAudit]
+            (const httplib::Request& req, httplib::Response& res) {
         if (!gws) { writeJson(res, 503, {{"error","gateways_not_configured"}}); return; }
         int id = 0; if (!parseId(req, res, id)) return;
         json body;
         if (!parseJsonBody(req, res, body)) return;
         const auto r = gws->patch(id, body);
         if (r != GR::Ok) { writeGatewayError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        std::vector<std::string> keys;
+        if (body.is_object()) {
+            keys.reserve(body.size());
+            for (auto it = body.begin(); it != body.end(); ++it)
+                keys.push_back(it.key());
+        }
+        emitChannelAudit("gateway.updated", uid, uname, req.remote_addr,
+                         {{"gateway_id", id}, {"fields", keys}});
         writeJson(res, 200, gws->statusJson(id));
     });
 
     s.Post(R"(/api/gateways/(\d+)/play)",
-           [gws](const httplib::Request& req, httplib::Response& res) {
+           [gws, channelActorOf, emitChannelAudit]
+           (const httplib::Request& req, httplib::Response& res) {
         if (!gws) { writeJson(res, 503, {{"error","gateways_not_configured"}}); return; }
         int id = 0; if (!parseId(req, res, id)) return;
         const auto r = gws->play(id);
         if (r != GR::Ok) { writeGatewayError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("gateway.play", uid, uname, req.remote_addr,
+                         {{"gateway_id", id}});
         writeJson(res, 200, {{"status","playing"},{"id",id}});
     });
 
@@ -1697,7 +1740,8 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Patch(R"(/api/gateways/(\d+)/fec)",
-            [gws](const httplib::Request& req, httplib::Response& res) {
+            [gws, channelActorOf, emitChannelAudit]
+            (const httplib::Request& req, httplib::Response& res) {
         if (!gws) { writeJson(res, 503, {{"error","gateways_not_configured"}}); return; }
         int id = 0; if (!parseId(req, res, id)) return;
         json body;
@@ -1711,15 +1755,22 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         auto status = gws->statusJson(id);
         json fec_block = status.is_object() ? status.value("fec", json::object())
                                             : json::object();
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("gateway.fec_updated", uid, uname, req.remote_addr,
+                         {{"gateway_id", id}});
         writeJson(res, 200, fec_block);
     });
 
     s.Post(R"(/api/gateways/(\d+)/stop)",
-           [gws](const httplib::Request& req, httplib::Response& res) {
+           [gws, channelActorOf, emitChannelAudit]
+           (const httplib::Request& req, httplib::Response& res) {
         if (!gws) { writeJson(res, 503, {{"error","gateways_not_configured"}}); return; }
         int id = 0; if (!parseId(req, res, id)) return;
         const auto r = gws->stop(id);
         if (r != GR::Ok) { writeGatewayError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("gateway.stop", uid, uname, req.remote_addr,
+                         {{"gateway_id", id}});
         writeJson(res, 200, {{"status","stopped"},{"id",id}});
     });
 
