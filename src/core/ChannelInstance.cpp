@@ -2148,6 +2148,19 @@ void ChannelInstance::onClipBoundary(const ClipBoundaryEvent& ev) {
         pe.error_reason    = ev.error_reason;
         effective_sink_->log(pe);
     }
+    // Human-readable trace in the per-channel log so operators can follow
+    // clip switching in channel.log without querying the playback-log DB.
+    // Errors are elevated to warn so they surface at default log level.
+    if (logger_) {
+        const char* transition = transitionTypeName(ev.transition);
+        if (ev.status == "error") {
+            logger_->warn("clip end: '{}' type={} played={:.2f}s status=error reason='{}'",
+                          ev.prev_path, ev.prev_type, ev.played_sec, ev.error_reason);
+        } else {
+            logger_->info("clip end: '{}' type={} played={:.2f}s status={} transition={}",
+                          ev.prev_path, ev.prev_type, ev.played_sec, ev.status, transition);
+        }
+    }
     // fix17 — boundary is the most precise cursor save point: slot_pos_sec
     // just rolled back to 0, playlist_index advanced. Debouncer collapses
     // back-to-back boundaries with the periodic poll.
