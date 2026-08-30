@@ -61,6 +61,16 @@ public:
     // Decrypt — opposite of encrypt(). std::nullopt on tamper / wrong key.
     std::optional<std::string> decrypt(const std::vector<std::uint8_t>& ciphertext) const;
 
+    // HMAC-SHA256 keyed on the master key. Used by the audit-log hash
+    // chain: mac[N] = HMAC(master_key, prev_mac || canonical(record[N])).
+    // Returns 32 raw bytes. Empty array iff !loaded().
+    std::array<std::uint8_t, 32> hmacSha256(std::string_view msg) const;
+
+    // Short fingerprint of the current key — same 16-hex-char form used
+    // by getInfo(). Stored in every audit row so operators can prove
+    // which key epoch signed which chain segment across rotations.
+    std::string fingerprint() const;
+
     bool loaded() const noexcept { return loaded_; }
 
 private:

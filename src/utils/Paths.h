@@ -84,6 +84,15 @@ public:
     std::filesystem::path initialAdminPasswordFile() const    { return state_dir_ / "initial_admin_password.txt"; }
     std::filesystem::path playbackDb() const                  { return state_dir_ / "playback.db"; }
     std::filesystem::path mountsDb() const                    { return state_dir_ / "mounts.db"; }
+    // Enterprise audit trail. Separate DB (not auth.db) so retention,
+    // backup profile and BEGIN IMMEDIATE contention are independent from
+    // the auth path — audit must never be starved by login load and
+    // vice versa.
+    std::filesystem::path auditDb() const                     { return state_dir_ / "audit.db"; }
+    // Fallback JSONL file the AuditLogger writes to when audit.db is
+    // unavailable (fsync error, disk full). Ops recovers the trail from
+    // here into audit.db once the DB is back.
+    std::filesystem::path auditEmergencyFile() const          { return state_dir_ / "audit-emergency.jsonl"; }
 
     // Per-install bearer token guarding GET /api/metrics. Lives in state_dir
     // (writable by the engine) rather than in /etc/liveqx/config.json, so

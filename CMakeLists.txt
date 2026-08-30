@@ -346,6 +346,8 @@ set(SOURCES
     src/gateway/transcode/VideoTranscoder.cpp
     src/gateway/transcode/AudioTranscoder.cpp
     src/gateway/transcode/FfmpegTranscodePipeline.cpp
+    src/audit/AuditTypes.cpp
+    src/audit/AuditDb.cpp
     src/auth/AuthTypes.cpp
     src/auth/AuthDb.cpp
     src/auth/PasswordHasher.cpp

@@ -381,6 +381,25 @@ MasterKey::Info MasterKey::getInfo() const {
     return info;
 }
 
+std::array<std::uint8_t, 32> MasterKey::hmacSha256(std::string_view msg) const {
+    std::array<std::uint8_t, 32> out{};
+    if (!loaded_) return out;
+    static_assert(crypto_auth_hmacsha256_BYTES == 32,
+                  "hmacsha256 output must be 32 bytes");
+    // crypto_auth_hmacsha256_KEYBYTES == 32 by design — matches kKeyBytes.
+    crypto_auth_hmacsha256(
+        out.data(),
+        reinterpret_cast<const unsigned char*>(msg.data()),
+        msg.size(),
+        key_.data());
+    return out;
+}
+
+std::string MasterKey::fingerprint() const {
+    if (!loaded_) return {};
+    return keyFingerprint(key_);
+}
+
 std::optional<std::string>
 MasterKey::decrypt(const std::vector<std::uint8_t>& ciphertext) const {
     if (!loaded_) return std::nullopt;
