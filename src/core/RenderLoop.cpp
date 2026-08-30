@@ -59,12 +59,13 @@ void RenderLoop::setFrameTap(FrameTap tap) {
     frame_tap_ = std::move(tap);
 }
 
-void RenderLoop::emitBoundary(ClipBoundaryEvent ev) {
+bool RenderLoop::emitBoundary(ClipBoundaryEvent ev) {
     if (!boundary_q_.push(std::move(ev))) {
-        boundary_drops_.fetch_add(1, std::memory_order_relaxed);
-        return;
+        metrics_->boundary_drops.fetch_add(1, std::memory_order_relaxed);
+        return false;
     }
     boundary_q_.notify();
+    return true;
 }
 
 void RenderLoop::boundaryDispatcherLoop(std::stop_token st) {
@@ -140,6 +141,8 @@ void RenderLoop::run(std::stop_token st) {
     uint64_t last_fallbacks  = 0;
     uint64_t last_glitches   = 0;
     uint64_t last_decerrs    = 0;
+    uint64_t last_bnd_drops  = 0;
+    uint64_t last_clip_chg   = 0;
 
     // Boundary tracking — what was active last tick, when did it start.
     int            boundary_prev_idx        = -1;
@@ -347,6 +350,8 @@ void RenderLoop::run(std::stop_token st) {
             const uint64_t fallbacks = metrics_->loop_fallback_count.load(std::memory_order_relaxed);
             const uint64_t glitches  = metrics_->audio_loop_glitches.load(std::memory_order_relaxed);
             const uint64_t decerrs   = metrics_->decode_errors.load(std::memory_order_relaxed);
+            const uint64_t bnd_drops = metrics_->boundary_drops.load(std::memory_order_relaxed);
+            const uint64_t clip_chg  = metrics_->clip_changes.load(std::memory_order_relaxed);
             const double   elapsed_s =
                 duration_cast<microseconds>(now_tp - last_report_tp).count() / 1e6;
 
@@ -358,7 +363,7 @@ void RenderLoop::run(std::stop_token st) {
 
             lg().info("fps={:.1f} drops={} underruns={} loop_fallback={} "
                       "audio_glitch={} decode_err={} max_frame={}us "
-                      "push_max={}us push_avg={}us",
+                      "push_max={}us push_avg={}us clip_changes={} boundary_drops={}",
                 fps,
                 dropped   - last_dropped,
                 underruns - last_underruns,
@@ -366,7 +371,9 @@ void RenderLoop::run(std::stop_token st) {
                 glitches  - last_glitches,
                 decerrs   - last_decerrs,
                 metrics_->frame_time_max_us.exchange(0, std::memory_order_relaxed),
-                push_max_us, push_avg_us);
+                push_max_us, push_avg_us,
+                clip_chg  - last_clip_chg,
+                bnd_drops - last_bnd_drops);
 
             push_max_us = 0;
             push_sum_us = 0;
@@ -378,6 +385,8 @@ void RenderLoop::run(std::stop_token st) {
             last_fallbacks = fallbacks;
             last_glitches  = glitches;
             last_decerrs   = decerrs;
+            last_bnd_drops = bnd_drops;
+            last_clip_chg  = clip_chg;
             last_report_tp = now_tp;
         }
 

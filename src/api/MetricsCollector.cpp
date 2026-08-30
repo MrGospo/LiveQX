@@ -206,6 +206,9 @@ std::string MetricsCollector::renderPrometheus(
                 "1 if channel is in running state, else 0.", "gauge");
     writeHeader(out, "liveqx_clip_changes_total",
                 "Active-clip transitions observed since channel start.", "counter");
+    writeHeader(out, "liveqx_boundary_drops_total",
+                "Boundary events dropped because the dispatcher queue was full.",
+                "counter");
     writeHeader(out, "liveqx_transition_active",
                 "1 iff render loop is currently mid-transition between two clips.",
                 "gauge");
@@ -269,6 +272,7 @@ std::string MetricsCollector::renderPrometheus(
         emitChannelGauge  (out, "liveqx_last_tick_age_seconds", ch.id(), ch.name(), tick_age_s);
         emitChannelGauge  (out, "liveqx_running",            ch.id(), ch.name(), is_running ? 1.0 : 0.0);
         emitChannelCounter(out, "liveqx_clip_changes_total", ch.id(), ch.name(), snap.clip_changes);
+        emitChannelCounter(out, "liveqx_boundary_drops_total", ch.id(), ch.name(), snap.boundary_drops);
         emitChannelGauge  (out, "liveqx_transition_active",  ch.id(), ch.name(), snap.transition_active ? 1.0 : 0.0);
         emitChannelGauge  (out, "liveqx_cache_files",        ch.id(), ch.name(), static_cast<double>(snap.cache_files_count));
         emitChannelGauge  (out, "liveqx_cache_size_bytes",   ch.id(), ch.name(), static_cast<double>(snap.cache_size_bytes));
@@ -654,6 +658,7 @@ nlohmann::json MetricsCollector::renderStatus(
             entry["target_fps"] = h_ptr->targetFps();
             entry["transition_active"] = snap.transition_active;
             entry["clip_changes_total"] = snap.clip_changes;
+            entry["boundary_drops_total"] = snap.boundary_drops;
             entry["last_tick_age_seconds"] =
                 snap.last_tick_ns > 0
                     ? static_cast<double>(now_ns - snap.last_tick_ns) / 1e9

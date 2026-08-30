@@ -34,6 +34,11 @@ struct ChannelMetricsSnapshot {
     // ── fix16 ────────────────────────────────────────────────────────────────
     uint64_t clip_changes      = 0;  // total active-clip transitions on this run
     bool     transition_active = false; // 1 iff render thread is mid-transition
+
+    // Boundary events dropped because the SPSC queue was full. If this stays
+    // 0 while ChannelInstance::onClipBoundary fires less often than Preloader
+    // reports slot-wraps, the loss is upstream of emitBoundary().
+    uint64_t boundary_drops    = 0;
 };
 
 // Shared between RenderLoop (writer/reader for render-side counters) and the
@@ -78,6 +83,11 @@ struct ChannelMetrics {
     std::atomic<uint64_t> clip_changes      {0};
     std::atomic<bool>     transition_active {false};
 
+    // Boundary events dropped because the SPSC queue was full. Written by
+    // RenderLoop::emitBoundary (single writer, render thread), read by
+    // MetricsCollector and the 60s render log.
+    std::atomic<uint64_t> boundary_drops    {0};
+
     // Reset transient render-side counters and rolling windows. Called by
     // ChannelInstance::play() so that a stop/play cycle does not bleed stale
     // cumulative values into the freshly-started RenderLoop's first fps
@@ -95,6 +105,7 @@ struct ChannelMetrics {
         actual_fps.store(0.0, std::memory_order_relaxed);
         clip_changes.store(0, std::memory_order_relaxed);
         transition_active.store(false, std::memory_order_relaxed);
+        boundary_drops.store(0, std::memory_order_relaxed);
         rolling_drops.reset();
         rolling_underruns.reset();
         rolling_loop_fallback.reset();
@@ -133,6 +144,7 @@ struct ChannelMetrics {
         s.last_share_ok_ns        = last_share_ok_ns.load(std::memory_order_relaxed);
         s.clip_changes            = clip_changes.load(std::memory_order_relaxed);
         s.transition_active       = transition_active.load(std::memory_order_relaxed);
+        s.boundary_drops          = boundary_drops.load(std::memory_order_relaxed);
         return s;
     }
 };

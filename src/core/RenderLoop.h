@@ -159,8 +159,7 @@ private:
     std::jthread          boundary_dispatcher_;
     BoundaryCb            boundary_cb_;
     mutable std::mutex    boundary_cb_mu_;
-    std::atomic<uint64_t> boundary_drops_{0};
 
     void boundaryDispatcherLoop(std::stop_token st);
-    void emitBoundary(ClipBoundaryEvent ev);
+    bool emitBoundary(ClipBoundaryEvent ev);
 };
