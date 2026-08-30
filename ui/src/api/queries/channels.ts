@@ -73,6 +73,17 @@ export const useStopChannel = () => {
   });
 };
 
+export const useRestartChannel = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.post<ChannelStatus>(`/api/channels/${id}/restart`),
+    onSuccess: (_, id) => {
+      qc.invalidateQueries({ queryKey: ['channels', id] });
+      qc.invalidateQueries({ queryKey: ['channels'] });
+    },
+  });
+};
+
 export const useNextClip = () =>
   useMutation({
     mutationFn: (id: number) => api.post<{ ok: boolean }>(`/api/channels/${id}/next`),

@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ChevronLeft, ChevronRight, Play, Square, SkipForward, MoreVertical, Pencil, Trash2, RotateCw, ChevronUp, ChevronDown, Radio, Camera } from 'lucide-react';
 import {
-  useChannel, usePlayChannel, useStopChannel, useNextClip, useDeleteChannel,
+  useChannel, usePlayChannel, useStopChannel, useRestartChannel, useNextClip, useDeleteChannel,
   useAddOutput, usePatchOutput, useDeleteOutput, useRestartOutput,
 } from '@/api/queries/channels';
 import { HealthBadge } from '@/components/HealthBadge';
@@ -79,6 +79,7 @@ export default function ChannelDetailPage() {
   const { data: ch, isLoading } = useChannel(chId);
   const { mutate: play, isPending: playing } = usePlayChannel();
   const { mutate: stop, isPending: stopping } = useStopChannel();
+  const { mutate: restart, isPending: restarting } = useRestartChannel();
   const { mutate: next, isPending: nexting }  = useNextClip();
   const { mutate: deleteCh, isPending: deletingCh } = useDeleteChannel();
   const [confirmDelete, setConfirmDelete] = React.useState(false);
@@ -129,6 +130,13 @@ export default function ChannelDetailPage() {
             )}
             {isRunning && (
               <>
+                <button disabled={restarting} onClick={() => restart(ch.id, {
+                    onSuccess: () => toast(t('channels.restarted'), 'success'),
+                    onError:   () => toast(t('channels.restartError'), 'danger'),
+                  })}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-[var(--border-subtle)] rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-50 transition-colors">
+                  <RotateCw size={14} /> {t('channels.restart')}
+                </button>
                 <button disabled={stopping} onClick={() => stop(ch.id, { onSuccess: () => toast('Channel stopped', 'info') })}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-[var(--border-subtle)] rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-50 transition-colors">
                   <Square size={14} /> {t('channels.stop')}

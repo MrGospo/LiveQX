@@ -72,6 +72,12 @@ public:
     Result remove(int id);
     Result play(int id);
     Result stop(int id);
+    // Atomic restart: tear the running pipeline down and start it back up
+    // in the same call so an operator can't race a stop/play sequence
+    // across two HTTP requests. On a stopped channel behaves as play().
+    // stop() is used (not pause()) so paused_intent_ is not persisted —
+    // the operator wants the channel to keep running after the bounce.
+    Result restart(int id);
     Result next(int id);
     Result updateConfig(int id, const nlohmann::json& patch);
 

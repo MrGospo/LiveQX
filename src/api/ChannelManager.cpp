@@ -269,6 +269,27 @@ Result ChannelManager::stop(int id) {
     return Result::Ok;
 }
 
+Result ChannelManager::restart(int id) {
+    ChannelInstance* ch = nullptr;
+    {
+        std::shared_lock lk(mu_);
+        ch = findLocked(id);
+        if (!ch) return Result::NotFound;
+    }
+    // Bring the pipeline down if it's up. stop() (not pause()) so the
+    // operator's persisted "paused" intent isn't flipped by a restart.
+    if (ch->isRunning()) {
+        if (sampler_) sampler_->unregisterChannel(std::to_string(id));
+        ch->stop();
+    }
+    if (!ch->play()) return Result::StartFailed;
+    if (sampler_) {
+        if (auto* prof = ch->profiler())
+            sampler_->registerChannel(std::to_string(id), prof);
+    }
+    return Result::Ok;
+}
+
 Result ChannelManager::next(int id) {
     std::shared_lock lk(mu_);
     auto* ch = findLocked(id);

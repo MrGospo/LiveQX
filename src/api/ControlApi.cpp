@@ -315,6 +315,8 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
                           rbacChan(RbacRole::Operator, RbacPerm::Operate));
     rbac.registerEndpoint("POST /api/channels/{id}/stop",
                           rbacChan(RbacRole::Operator, RbacPerm::Operate));
+    rbac.registerEndpoint("POST /api/channels/{id}/restart",
+                          rbacChan(RbacRole::Operator, RbacPerm::Operate));
     rbac.registerEndpoint("POST /api/channels/{id}/next",
                           rbacChan(RbacRole::Operator, RbacPerm::Operate));
     rbac.registerEndpoint("POST /api/channels/{id}/playlist",
@@ -1093,6 +1095,18 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         emitChannelAudit("channel.next", uid, uname, req.remote_addr,
                          {{"channel_id", id}});
         writeJson(res, 200, {{"ok", true}});
+    });
+
+    s.Post(R"(/api/channels/(\d+)/restart)",
+           [&mgr, channelActorOf, emitChannelAudit]
+           (const httplib::Request& req, httplib::Response& res) {
+        int id = 0; if (!parseId(req, res, id)) return;
+        const auto r = mgr.restart(id);
+        if (r != R::Ok) { writeError(res, r); return; }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("channel.restart", uid, uname, req.remote_addr,
+                         {{"channel_id", id}});
+        writeJson(res, 200, mgr.statusJson(id));
     });
 
     // ── Playlist endpoints ──────────────────────────────────────────────────
