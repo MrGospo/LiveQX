@@ -1091,6 +1091,8 @@ bool ChannelInstance::updateConfig(const json& patch) {
         else
             logger_->warn("patch crf={} out of range [0..51], ignored", cr);
     }
+    const bool defaults_touched =
+        patch.contains("default_photo_duration") || patch.contains("default_transition");
     if (patch.contains("default_photo_duration"))
         cfg_["default_photo_duration"] = patch["default_photo_duration"];
     if (patch.contains("default_transition"))
@@ -1201,6 +1203,28 @@ bool ChannelInstance::updateConfig(const json& patch) {
         // the patch take effect; rolling back to a stale on-disk state
         // would silently re-introduce the old config on next restart and
         // is worse than a logged disk error operators can investigate.
+    }
+    // default_photo_duration / default_transition are baked into IClip at
+    // construction (buildClipFromItem reads cfg_ once). Mutating cfg_ alone
+    // leaves the running Timeline holding stale clips — the operator would
+    // have to restart the process to see the change. Rebuild the regular
+    // playlist here so the swap takes effect immediately. Skipped when the
+    // channel is ContentSync-managed (playlist lives in the cache manager,
+    // not cfg_["playlist"]) or currently inside a schedule window (the swap
+    // back to regular happens at window exit and will pick up new defaults
+    // naturally from the already-updated cfg_).
+    if (defaults_touched && !managedByContentSync() && timeline_
+        && (!schedule_ctrl_ || !schedule_ctrl_->inScheduleMode())) {
+        try {
+            swapToRegularPlaylist();
+            if (logger_)
+                logger_->info("timeline rebuilt with new defaults "
+                              "(items={})", regular_playlist_items_.size());
+        } catch (const std::exception& e) {
+            if (logger_)
+                logger_->error("timeline rebuild after defaults patch failed: {}",
+                               e.what());
+        }
     }
     // fix17: schedule mutations or any other state-affecting patch should
     // refresh state.db so a hot-reload + crash doesn't lose schedule_active.
@@ -1846,6 +1870,7 @@ ChannelInstance::replacePlaylist(const json& items) {
     if (managedByContentSync()) return PlaylistResult::ManagedByContentSync;
     if (!items.is_array())      return PlaylistResult::BadJson;
 
+    std::lock_guard<std::mutex> lk(state_mu_);
     std::vector<std::unique_ptr<IClip>> clips;
     std::vector<TransitionConfig>       transitions;
     std::vector<std::string>            paths;
@@ -1870,6 +1895,15 @@ ChannelInstance::replacePlaylist(const json& items) {
 
     timeline_->setPlaylist(wrapClips(std::move(clips), graveyard_),
                            std::move(transitions), std::move(paths));
+    // Sync persistent regular playlist so swapToRegularPlaylist() rebuilds the
+    // current items on schedule-window exit, and so cfg_["playlist"] survives
+    // process restart. Persist under state_mu_ to serialise with updateConfig.
+    regular_playlist_items_ = items;
+    cfg_["playlist"]        = items;
+    try { persistConfig(); }
+    catch (const std::exception& e) {
+        if (logger_) logger_->error("persistConfig (replacePlaylist) failed: {}", e.what());
+    }
     logger_->info("playlist replaced ({} items)", items.size());
     requestStateSave();
     return PlaylistResult::Ok;
@@ -1880,9 +1914,14 @@ ChannelInstance::appendPlaylist(const json& items, int* out_first_idx) {
     if (managedByContentSync()) return PlaylistResult::ManagedByContentSync;
     if (!items.is_array())      return PlaylistResult::BadJson;
 
+    std::lock_guard<std::mutex> lk(state_mu_);
     int first = -1;
+    bool any_added = false;
+    PlaylistResult ret = PlaylistResult::Ok;
+    if (!cfg_.contains("playlist") || !cfg_["playlist"].is_array())
+        cfg_["playlist"] = json::array();
     for (const auto& item_json : items) {
-        if (!item_json.is_object()) return PlaylistResult::BadJson;
+        if (!item_json.is_object()) { ret = PlaylistResult::BadJson; break; }
         std::string path; TransitionConfig tc;
         try {
             auto clip = buildClipFromItem(item_json, path, tc);
@@ -1890,18 +1929,27 @@ ChannelInstance::appendPlaylist(const json& items, int* out_first_idx) {
             if (first < 0) first = idx;
             timeline_->appendClip(wrapClip(std::move(clip), graveyard_),
                                   tc, std::move(path));
+            regular_playlist_items_.push_back(item_json);
+            cfg_["playlist"].push_back(item_json);
+            any_added = true;
         } catch (const std::exception& e) {
             logger_->error("appendPlaylist failed for '{}': {}",
                            item_json.value("path", std::string{}), e.what());
             // Partial-append: leave already-added items, surface the error.
-            if (out_first_idx) *out_first_idx = first;
-            return PlaylistResult::ItemBuildFailed;
+            ret = PlaylistResult::ItemBuildFailed;
+            break;
+        }
+    }
+    if (any_added) {
+        try { persistConfig(); }
+        catch (const std::exception& e) {
+            if (logger_) logger_->error("persistConfig (appendPlaylist) failed: {}", e.what());
         }
     }
     if (out_first_idx) *out_first_idx = first;
     logger_->info("appended {} items (first idx={})", items.size(), first);
     requestStateSave();
-    return PlaylistResult::Ok;
+    return ret;
 }
 
 ChannelInstance::PlaylistResult
@@ -1910,27 +1958,44 @@ ChannelInstance::removeAt(int idx, bool* out_was_active) {
     if (!timeline_)             return PlaylistResult::IndexOutOfRange;
     if (idx < 0)                return PlaylistResult::IndexOutOfRange;
 
+    std::lock_guard<std::mutex> lk(state_mu_);
     const auto r = timeline_->removeAt(static_cast<std::size_t>(idx));
     if (out_was_active) *out_was_active = (r == Timeline::RemoveResult::MarkedActive);
-    switch (r) {
-        case Timeline::RemoveResult::NotFound:
-            return PlaylistResult::IndexOutOfRange;
-        case Timeline::RemoveResult::Removed:
-            logger_->info("playlist[{}] removed", idx);
-            requestStateSave();
-            return PlaylistResult::Ok;
-        case Timeline::RemoveResult::MarkedActive:
-            logger_->info("playlist[{}] marked pending (active)", idx);
-            requestStateSave();
-            return PlaylistResult::Ok;
+    if (r == Timeline::RemoveResult::NotFound)
+        return PlaylistResult::IndexOutOfRange;
+
+    // Mirror the operator's remove intent into the persistent playlist even
+    // when Timeline still holds the entry as pending_remove — otherwise a
+    // schedule-window exit rebuild via swapToRegularPlaylist() would resurrect
+    // the removed item.
+    if (idx < static_cast<int>(regular_playlist_items_.size()))
+        regular_playlist_items_.erase(regular_playlist_items_.begin() + idx);
+    if (cfg_.contains("playlist") && cfg_["playlist"].is_array()
+        && idx < static_cast<int>(cfg_["playlist"].size()))
+        cfg_["playlist"].erase(cfg_["playlist"].begin() + idx);
+    try { persistConfig(); }
+    catch (const std::exception& e) {
+        if (logger_) logger_->error("persistConfig (removeAt) failed: {}", e.what());
     }
+
+    logger_->info("playlist[{}] {}", idx,
+                  r == Timeline::RemoveResult::MarkedActive
+                    ? "marked pending (active)" : "removed");
+    requestStateSave();
     return PlaylistResult::Ok;
 }
 
 ChannelInstance::PlaylistResult ChannelInstance::clearPlaylist() {
     if (managedByContentSync()) return PlaylistResult::ManagedByContentSync;
     if (!timeline_)             return PlaylistResult::Ok;
+    std::lock_guard<std::mutex> lk(state_mu_);
     timeline_->setPlaylist(std::vector<std::shared_ptr<IClip>>{}, {}, {});
+    regular_playlist_items_ = json::array();
+    cfg_["playlist"]        = json::array();
+    try { persistConfig(); }
+    catch (const std::exception& e) {
+        if (logger_) logger_->error("persistConfig (clearPlaylist) failed: {}", e.what());
+    }
     logger_->info("playlist cleared (fallback only)");
     requestStateSave();
     return PlaylistResult::Ok;
@@ -1941,6 +2006,7 @@ ChannelInstance::notifyDeleted(const std::string& path) {
     if (path.empty())  return PlaylistResult::BadJson;
     if (!timeline_)    return PlaylistResult::NotFound;
 
+    std::lock_guard<std::mutex> lk(state_mu_);
     if (!timeline_->markForRemoval(path)) return PlaylistResult::NotFound;
 
     // Drain non-active matches immediately. The active match (if any) stays
@@ -1952,6 +2018,26 @@ ChannelInstance::notifyDeleted(const std::string& path) {
     if (active_idx >= 0 && static_cast<std::size_t>(active_idx) < snap->cache_paths.size())
         active_cache = snap->cache_paths[active_idx];
     auto evicted = timeline_->reapRemovable(active_cache);
+
+    // Purge every matching entry from the persistent regular playlist too —
+    // the underlying asset is gone, so the swap-back path must not rebuild
+    // against a stale path. Filter both mirrors and persist.
+    auto filter_out = [&](json& arr) {
+        if (!arr.is_array()) return;
+        json kept = json::array();
+        for (auto& it : arr) {
+            if (it.is_object() && it.value("path", std::string{}) == path) continue;
+            kept.push_back(std::move(it));
+        }
+        arr = std::move(kept);
+    };
+    filter_out(regular_playlist_items_);
+    if (cfg_.contains("playlist")) filter_out(cfg_["playlist"]);
+    try { persistConfig(); }
+    catch (const std::exception& e) {
+        if (logger_) logger_->error("persistConfig (notifyDeleted) failed: {}", e.what());
+    }
+
     logger_->info("notify-deleted '{}' — {} entries evicted now",
                   path, evicted.size());
     requestStateSave();
