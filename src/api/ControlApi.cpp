@@ -535,8 +535,23 @@ struct AuditReqCtx {
     std::string request_id;
     bool        is_mutation{false};
     bool        api_scope{false};
+    // Populated by the pre-handler on Allow so the post-handler doesn't
+    // need to re-verify the bearer token.
+    std::optional<std::int64_t> actor_user_id;
+    std::string                 actor_username;
+    std::string                 actor_role;
 };
 thread_local AuditReqCtx g_audit_ctx;
+
+// Login/refresh/logout stay reachable even when the audit backlog is
+// full — otherwise an operator locked out of the system could never
+// respond to an alert. Broken-glass writes bypass the async queue
+// entirely inside AuthService (logSyncBrokenGlass path).
+bool isBrokenGlassPath(std::string_view path) noexcept {
+    return path == "/api/auth/login"
+        || path == "/api/auth/refresh"
+        || path == "/api/auth/logout";
+}
 
 std::string generateAuditRequestId() {
     unsigned char b[8]{};
@@ -640,7 +655,16 @@ void installAuditPostHandler(httplib::Server& s,
             ev.request_id  = g_audit_ctx.request_id;
             ev.actor_ip    = req.remote_addr;
 
-            if (auth_svc && req.has_header("Authorization")) {
+            // Prefer the actor stamped by the pre-handler (RBAC already
+            // verified the bearer once). Fall back to a fresh verify only
+            // if the pre-handler didn't populate it — e.g. rate-limit /
+            // fail-closed rejections that bypass the domain handler still
+            // arrived here without actor.
+            if (g_audit_ctx.actor_user_id) {
+                ev.actor_user_id  = *g_audit_ctx.actor_user_id;
+                ev.actor_username = g_audit_ctx.actor_username;
+                ev.actor_role     = g_audit_ctx.actor_role;
+            } else if (auth_svc && req.has_header("Authorization")) {
                 const auto v = req.get_header_value("Authorization");
                 constexpr const char* kPrefix = "Bearer ";
                 if (v.rfind(kPrefix, 0) == 0) {
@@ -675,10 +699,12 @@ void installAuditPostHandler(httplib::Server& s,
 
 void installRbacPreHandler(httplib::Server& s,
                            liveqx::auth::RbacMiddleware& rbac,
-                           liveqx::audit::AuditLogger* audit) {
+                           liveqx::audit::AuditLogger* audit,
+                           liveqx::audit::AuditRateLimiter* audit_rate) {
     using Decision = liveqx::auth::RbacMiddleware::Decision;
     s.set_pre_routing_handler(
-        [&rbac, audit](const httplib::Request& req, httplib::Response& res) {
+        [&rbac, audit, audit_rate](const httplib::Request& req,
+                                   httplib::Response& res) {
             // Reset per-request audit context on every hit — pre-handler is
             // the first thing that runs, and thread_local persists across
             // requests handled on the same thread.
@@ -712,11 +738,46 @@ void installRbacPreHandler(httplib::Server& s,
 
             const auto channel_id = extractChannelIdFromPath(req.path);
             const auto bearer     = extractBearerToken(req);
+            liveqx::auth::RequestContext ctx{};
             const auto d = rbac.authorize(req.method, req.path, bearer,
-                                          channel_id, nullptr);
+                                          channel_id, &ctx);
             switch (d) {
-                case Decision::Allow:
+                case Decision::Allow: {
+                    // Populate audit actor so the post-handler can skip a
+                    // second bearer verification round-trip.
+                    if (ctx.user_id > 0) {
+                        g_audit_ctx.actor_user_id  = ctx.user_id;
+                        g_audit_ctx.actor_username = ctx.username;
+                        g_audit_ctx.actor_role     =
+                            liveqx::auth::roleName(ctx.role);
+                    }
+                    // Fail-closed: with the audit backlog wedged we refuse
+                    // fresh mutations rather than silently drop the trail.
+                    // Broken-glass endpoints (login/refresh/logout) stay
+                    // reachable because they use the sync audit path and
+                    // an operator locked out of the UI can't clear the
+                    // backlog by other means.
+                    if (audit && g_audit_ctx.is_mutation
+                        && !isBrokenGlassPath(req.path)
+                        && audit->shouldRejectMutation()) {
+                        writeJson(res, 503, {{"error", "audit_backlog"}});
+                        return httplib::Server::HandlerResponse::Handled;
+                    }
+                    // Per-actor rate limit on mutations: caps a runaway
+                    // admin script at ~300/min per user, keyed on user_id
+                    // when authenticated, on IP otherwise (login floods
+                    // hit the IP bucket even when unauthenticated).
+                    if (audit_rate && g_audit_ctx.is_mutation) {
+                        const bool ok = ctx.user_id > 0
+                            ? audit_rate->tryAcquireForUser(ctx.user_id)
+                            : audit_rate->tryAcquireForIp(req.remote_addr);
+                        if (!ok) {
+                            writeJson(res, 429, {{"error", "rate_limited"}});
+                            return httplib::Server::HandlerResponse::Handled;
+                        }
+                    }
                     return httplib::Server::HandlerResponse::Unhandled;
+                }
                 case Decision::NotConfigured:
                     writeJson(res, 500, {{"error", "rbac.misconfigured"}});
                     return httplib::Server::HandlerResponse::Handled;
@@ -4879,7 +4940,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     // токен. Open-правила выше это покрывают.
     if (auto* rbac = impl_->rbac) {
         registerRbacRules(*rbac);
-        installRbacPreHandler(s, *rbac, impl_->audit);
+        installRbacPreHandler(s, *rbac, impl_->audit, impl_->audit_rate);
     }
     if (impl_->audit) {
         installAuditPostHandler(s, impl_->auth, impl_->audit);
