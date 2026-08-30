@@ -48,6 +48,8 @@ extern "C" {
 #include "plugins/PluginManager.h"
 #include "mounts/MountManager.h"
 #include "mounts/MountSpec.h"
+#include "audit/AuditLogger.h"
+#include "audit/AuditRateLimiter.h"
 #include "metrics/ChannelMetrics.h"
 #include "metrics/HostMetrics.h"
 #include "utils/Log.h"
@@ -87,6 +89,8 @@ struct ControlApi::Impl {
     liveqx::auth::TimeConfigRepo*          time_repo;
     liveqx::auth::TimeSourceManager*       time_src;
     liveqx::auth::ISntpClient*             sntp;
+    liveqx::audit::AuditLogger*            audit;
+    liveqx::audit::AuditRateLimiter*       audit_rate;
     TlsBindings                                    tls_bindings;
     std::function<void()>                          on_tls_reload;
     std::mutex                                     metrics_token_mu;
@@ -106,12 +110,15 @@ struct ControlApi::Impl {
          liveqx::auth::TimeConfigRepo* tr,
          liveqx::auth::TimeSourceManager* ts,
          liveqx::auth::ISntpClient* sn,
+         liveqx::audit::AuditLogger* al,
+         liveqx::audit::AuditRateLimiter* arl,
          const TlsBindings& tls)
         : bind_addr(tls.bind.empty() ? std::string{"0.0.0.0"} : tls.bind),
           manager(m), metrics(mc), livez(lz), gateways(gw), auth(a),
           ldap_repo(lr), smtp_repo(sr), rbac(rb), events(ev), preview(pv),
           stress(st), plugins(pl), master_key(mk), mounts(mn),
           time_repo(tr), time_src(ts), sntp(sn),
+          audit(al), audit_rate(arl),
           tls_bindings(tls) {
         if (!tls.cert_path.empty() && !tls.key_path.empty()) {
             auto* ssl = new httplib::SSLServer(
@@ -584,11 +591,14 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
                        TlsBindings tls,
                        liveqx::auth::TimeConfigRepo* time_repo,
                        liveqx::auth::TimeSourceManager* time_src,
-                       liveqx::auth::ISntpClient* sntp)
+                       liveqx::auth::ISntpClient* sntp,
+                       liveqx::audit::AuditLogger* audit,
+                       liveqx::audit::AuditRateLimiter* audit_rate)
     : impl_(std::make_unique<Impl>(manager, metrics, livez, gateways, auth,
                                    ldap_repo, smtp_repo, rbac, events,
                                    preview, stress, plugins, master_key,
-                                   mounts, time_repo, time_src, sntp, tls)),
+                                   mounts, time_repo, time_src, sntp,
+                                   audit, audit_rate, tls)),
       port_(port) {
     auto* impl = impl_.get();
     auto& s    = *impl_->server;

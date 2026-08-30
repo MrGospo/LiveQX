@@ -16,6 +16,9 @@
 #include "api/ChannelManager.h"
 #include "api/ControlApi.h"
 #include "api/MetricsCollector.h"
+#include "audit/AuditDb.h"
+#include "audit/AuditLogger.h"
+#include "audit/AuditRateLimiter.h"
 #include "auth/AuthCli.h"
 #include "auth/AuthDb.h"
 #include "auth/AuthService.h"
@@ -722,6 +725,32 @@ int main(int argc, char* argv[]) {
 
         manager.setAuthLoaded(true);
 
+        // ── Audit-log stack ─────────────────────────────────────────────
+        //
+        // Separate DB from auth.db so retention/backup/vacuum on the
+        // append-only trail can not stall the login path. HMAC-chain is
+        // anchored to the master key so any offline row edit is
+        // detectable via AuditDb::verifyChain. AuditLogger owns an async
+        // writer thread + emergency JSONL fallback for DB outages; the
+        // rate-limiter caps mutations per actor to prevent trail-DoS
+        // (bulk-import loops, misbehaving admin scripts).
+        namespace sad = liveqx::audit;
+        sad::AuditDb audit_db(paths.auditDb(), &master_key);
+        if (!audit_db.open())
+            LOG_ERROR("Cannot open audit.db at {} — audit will emergency-spill",
+                      paths.auditDb().string());
+        sad::AuditLogger audit_logger(&audit_db, paths.auditEmergencyFile());
+        audit_logger.start();
+        sad::RateLimitConfig audit_rl_cfg;
+        if (cfg.contains("audit") && cfg["audit"].is_object()) {
+            const auto& ac = cfg["audit"];
+            audit_rl_cfg.tokens_per_minute =
+                ac.value("rate_tokens_per_minute", audit_rl_cfg.tokens_per_minute);
+            audit_rl_cfg.burst_capacity =
+                ac.value("rate_burst_capacity",    audit_rl_cfg.burst_capacity);
+        }
+        sad::AuditRateLimiter audit_rate(audit_rl_cfg);
+
         // fix23 — process-wide event bus for SSE fan-out and per-channel
         // WebRTC preview registry. Both are passed down to ControlApi
         // (REST surface) and event_bus is wired into ChannelManager so
@@ -1054,7 +1083,8 @@ int main(int argc, char* argv[]) {
                            &auth_svc, &ldap_repo, &smtp_repo, &rbac,
                            &event_bus, &preview, &stress_service, &plugins_mgr,
                            &master_key, &mounts_mgr, tls_bindings,
-                           &time_repo, &time_src, sntp_client.get());
+                           &time_repo, &time_src, sntp_client.get(),
+                           &audit_logger, &audit_rate);
             api.setOnTlsReload([&]() {
                 tls_reload_pending.store(true, std::memory_order_release);
                 g_running.store(false, std::memory_order_release);
@@ -1095,6 +1125,10 @@ int main(int argc, char* argv[]) {
         manager.setEventBus(nullptr);
         manager.setPreviewManager(nullptr);
         auth_svc.setEventBus(nullptr);
+        // Flush + join the audit writer thread before audit_db/master_key
+        // go out of scope. stop() is idempotent; ~AuditLogger would call
+        // it anyway, but doing it here keeps shutdown ordering explicit.
+        audit_logger.stop();
     }
 
     gateways.stopAll();

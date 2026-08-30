@@ -24,6 +24,10 @@ namespace liveqx::preview { class PreviewManager; }
 namespace liveqx::stress  { class StressService; }
 namespace liveqx::plugins { class PluginManager; }
 namespace liveqx::mounts  { class MountManager; }
+namespace liveqx::audit   {
+class AuditLogger;
+class AuditRateLimiter;
+}
 
 // fix16: liveness probe options. stuck_threshold_seconds is the max age,
 // in seconds, of a channel's last render tick before /livez calls it
@@ -109,7 +113,9 @@ public:
                TlsBindings                              tls       = {},
                liveqx::auth::TimeConfigRepo*    time_repo = nullptr,
                liveqx::auth::TimeSourceManager* time_src  = nullptr,
-               liveqx::auth::ISntpClient*       sntp      = nullptr);
+               liveqx::auth::ISntpClient*       sntp      = nullptr,
+               liveqx::audit::AuditLogger*      audit     = nullptr,
+               liveqx::audit::AuditRateLimiter* audit_rate = nullptr);
     ~ControlApi();
 
     // fix35 A3.5–A3.9 — mount static UI (index.html + /assets/*) and wire
