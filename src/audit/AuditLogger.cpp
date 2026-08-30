@@ -114,7 +114,11 @@ void AuditLogger::logSyncBrokenGlass(AuditEvent ev) {
         stat_db_failures_.fetch_add(1, std::memory_order_relaxed);
     }
     std::lock_guard<std::mutex> elk(emergency_mu_);
-    if (!writeEmergency(ev)) {
+    if (writeEmergency(ev)) {
+        stat_written_emerg_.fetch_add(1, std::memory_order_relaxed);
+        stat_last_write_ns_.store(nowMonotonicNs(),
+                                  std::memory_order_relaxed);
+    } else {
         stat_dropped_.fetch_add(1, std::memory_order_relaxed);
         LOG_ERROR("AuditLogger: broken-glass write dropped action={} — "
                   "DB unavailable and emergency file unwritable", ev.action);

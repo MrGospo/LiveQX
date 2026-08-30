@@ -51,6 +51,13 @@ add_executable(liveqx-tests
     test_gateway_loopback.cpp
     test_gateway_manager.cpp
     test_auth_db.cpp
+    test_audit_db.cpp
+    test_audit_logger.cpp
+    test_audit_rate_limiter.cpp
+    ../src/audit/AuditTypes.cpp
+    ../src/audit/AuditDb.cpp
+    ../src/audit/AuditLogger.cpp
+    ../src/audit/AuditRateLimiter.cpp
     test_password_hasher.cpp
     test_jwt_issuer.cpp
     test_auth_service.cpp
