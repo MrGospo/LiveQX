@@ -2384,13 +2384,20 @@ void ChannelInstance::startHardSwitchPoll() {
             const int64_t now_ns = duration_cast<nanoseconds>(
                 system_clock::now().time_since_epoch()).count();
             using Kind = liveqx::scheduling::ScheduleController::ActionKind;
-            std::lock_guard<std::mutex> lk(schedule_swap_mu_);
-            const auto a = schedule_ctrl_->tryHardSwitch(now_ns);
-            if (a.kind == Kind::EnterSchedule || a.kind == Kind::SwitchEntry) {
-                logger_->info("schedule[hard]: {} → '{}' ({} clips)",
-                              a.kind == Kind::EnterSchedule ? "ENTER" : "SWITCH",
-                              a.new_entry_id, a.playlist.size());
-                swapToSchedulePlaylist(a.playlist, a.transition);
+            // Critical section is only the check + swap. Sleeping under the
+            // lock would starve the boundary dispatcher (which competes for
+            // the same mutex via applyScheduleBoundary), causing clip-end
+            // events to pile up in the SPSC queue and flush in a burst only
+            // when stopHardSwitchPoll() finally releases the mutex.
+            {
+                std::lock_guard<std::mutex> lk(schedule_swap_mu_);
+                const auto a = schedule_ctrl_->tryHardSwitch(now_ns);
+                if (a.kind == Kind::EnterSchedule || a.kind == Kind::SwitchEntry) {
+                    logger_->info("schedule[hard]: {} → '{}' ({} clips)",
+                                  a.kind == Kind::EnterSchedule ? "ENTER" : "SWITCH",
+                                  a.new_entry_id, a.playlist.size());
+                    swapToSchedulePlaylist(a.playlist, a.transition);
+                }
             }
             // Sleep is interruptible via stop_token + flag; use a short
             // condition-friendly wait by chunking the period.
