@@ -525,11 +525,170 @@ std::string extractBearerToken(const httplib::Request& req) {
     return {};
 }
 
+// Per-request scratch for the audit middleware. Populated in the
+// pre-routing handler (start time, request-id, mutation flag), read in
+// the post-routing handler after the domain handler set res.status.
+// cpp-httplib serves each request on a single thread for its lifetime,
+// so thread_local is the right storage class.
+struct AuditReqCtx {
+    std::chrono::steady_clock::time_point start;
+    std::string request_id;
+    bool        is_mutation{false};
+    bool        api_scope{false};
+};
+thread_local AuditReqCtx g_audit_ctx;
+
+std::string generateAuditRequestId() {
+    unsigned char b[8]{};
+    RAND_bytes(b, sizeof(b));
+    char hex[17]{};
+    for (int i = 0; i < 8; ++i)
+        std::snprintf(hex + 2 * i, 3, "%02x", b[i]);
+    return {hex, 16};
+}
+
+bool isMutationMethod(const std::string& m) noexcept {
+    return m == "POST" || m == "PUT" || m == "PATCH" || m == "DELETE";
+}
+
+liveqx::audit::Category categoryForApiPath(std::string_view p) noexcept {
+    using C = liveqx::audit::Category;
+    if (p.rfind("/api/auth", 0) == 0)          return C::Auth;
+    if (p.rfind("/api/gateways", 0) == 0)      return C::Gateway;
+    if (p.rfind("/api/plugins", 0) == 0)       return C::Plugin;
+    if (p.rfind("/api/system/mounts", 0) == 0) return C::Mount;
+    if (p.rfind("/api/system", 0) == 0)        return C::System;
+    if (p.rfind("/api/channels", 0) == 0) {
+        return p.find("/outputs") != std::string_view::npos
+            ? C::Output : C::Channel;
+    }
+    return C::System;
+}
+
+// Collapse numeric ids so the action string groups by shape rather than
+// by specific target ("POST /api/channels/{}/play" not "…/42/play").
+// The exact id survives in target_id.
+std::string normaliseAuditPath(std::string_view raw) {
+    std::string out;
+    out.reserve(raw.size());
+    std::size_t i = 0;
+    while (i < raw.size()) {
+        if (raw[i] != '/') { out.push_back(raw[i]); ++i; continue; }
+        out.push_back('/');
+        std::size_t j = i + 1;
+        bool digits = j < raw.size() && raw[j] != '/';
+        while (j < raw.size() && raw[j] != '/') {
+            if (!std::isdigit(static_cast<unsigned char>(raw[j])))
+                digits = false;
+            ++j;
+        }
+        if (digits && j > i + 1)
+            out.append("{}");
+        else
+            out.append(raw.substr(i + 1, j - i - 1));
+        i = j;
+    }
+    return out;
+}
+
+// Best-effort target id — the last numeric path segment. Domain handlers
+// that know better (e.g. plugin name, mount unit) can override by
+// emitting their own audit event alongside; the middleware entry is a
+// baseline, not a source of truth.
+std::string extractAuditTargetId(std::string_view raw) {
+    std::size_t last_start = std::string_view::npos;
+    std::size_t last_len   = 0;
+    std::size_t j = 0;
+    while (j < raw.size()) {
+        if (raw[j] == '/') { ++j; continue; }
+        std::size_t k = j;
+        bool digits = true;
+        while (k < raw.size() && raw[k] != '/') {
+            if (!std::isdigit(static_cast<unsigned char>(raw[k])))
+                digits = false;
+            ++k;
+        }
+        if (digits && k > j) { last_start = j; last_len = k - j; }
+        j = k;
+    }
+    if (last_start == std::string_view::npos) return {};
+    return std::string{raw.substr(last_start, last_len)};
+}
+
+// Wire the post-routing side of the audit middleware. Requires audit; if
+// audit is null the caller skips this altogether. auth_svc is optional
+// (test setups pass nullptr) — without it we log actor_ip only, no user.
+void installAuditPostHandler(httplib::Server& s,
+                             liveqx::auth::AuthService* auth_svc,
+                             liveqx::audit::AuditLogger* audit) {
+    s.set_post_routing_handler(
+        [auth_svc, audit](const httplib::Request& req,
+                          const httplib::Response& res) {
+            if (!g_audit_ctx.api_scope || !g_audit_ctx.is_mutation) return;
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - g_audit_ctx.start).count();
+
+            liveqx::audit::AuditEvent ev;
+            ev.category    = categoryForApiPath(req.path);
+            ev.action      = req.method + " " + normaliseAuditPath(req.path);
+            ev.http_method = req.method;
+            ev.http_path   = req.path;
+            ev.http_status = res.status;
+            ev.elapsed_ms  = elapsed_ms;
+            ev.request_id  = g_audit_ctx.request_id;
+            ev.actor_ip    = req.remote_addr;
+
+            if (auth_svc && req.has_header("Authorization")) {
+                const auto v = req.get_header_value("Authorization");
+                constexpr const char* kPrefix = "Bearer ";
+                if (v.rfind(kPrefix, 0) == 0) {
+                    auto claims =
+                        auth_svc->verifyActiveAccess(v.substr(7));
+                    if (claims) {
+                        ev.actor_user_id  = claims->user_id;
+                        ev.actor_username = claims->username;
+                        ev.actor_role     =
+                            liveqx::auth::roleName(claims->role);
+                    }
+                }
+            }
+
+            auto target = extractAuditTargetId(req.path);
+            if (!target.empty()) {
+                ev.target_id = std::move(target);
+                using C = liveqx::audit::Category;
+                switch (ev.category) {
+                    case C::Channel: ev.target_type = "channel"; break;
+                    case C::Output:  ev.target_type = "output";  break;
+                    case C::Gateway: ev.target_type = "gateway"; break;
+                    case C::Mount:   ev.target_type = "mount";   break;
+                    case C::Plugin:  ev.target_type = "plugin";  break;
+                    default: break;
+                }
+            }
+            ev.summary = ev.action + " -> " + std::to_string(res.status);
+            audit->log(std::move(ev));
+        });
+}
+
 void installRbacPreHandler(httplib::Server& s,
-                           liveqx::auth::RbacMiddleware& rbac) {
+                           liveqx::auth::RbacMiddleware& rbac,
+                           liveqx::audit::AuditLogger* audit) {
     using Decision = liveqx::auth::RbacMiddleware::Decision;
     s.set_pre_routing_handler(
-        [&rbac](const httplib::Request& req, httplib::Response& res) {
+        [&rbac, audit](const httplib::Request& req, httplib::Response& res) {
+            // Reset per-request audit context on every hit — pre-handler is
+            // the first thing that runs, and thread_local persists across
+            // requests handled on the same thread.
+            g_audit_ctx = {};
+            if (audit) {
+                g_audit_ctx.start       = std::chrono::steady_clock::now();
+                g_audit_ctx.request_id  = generateAuditRequestId();
+                g_audit_ctx.is_mutation = isMutationMethod(req.method);
+            }
+
             // fix35 A3.5–A3.9 — static UI assets are public. Skip RBAC for
             // anything outside the API/probe namespaces; cpp-httplib's mount
             // point handler (and the SPA fallback in mountUi()) handles those.
@@ -543,6 +702,10 @@ void installRbacPreHandler(httplib::Server& s,
             for (auto p : api_prefixes) {
                 if (path.starts_with(p)) { is_api = true; break; }
             }
+            // Only the API/probe namespaces flow through audit — a static
+            // UI hit shouldn't spam the trail. Even if audit is off, the
+            // flag is harmless (the post-handler no-ops without a logger).
+            g_audit_ctx.api_scope = is_api;
             if (!is_api) {
                 return httplib::Server::HandlerResponse::Unhandled;
             }
@@ -4716,7 +4879,10 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     // токен. Open-правила выше это покрывают.
     if (auto* rbac = impl_->rbac) {
         registerRbacRules(*rbac);
-        installRbacPreHandler(s, *rbac);
+        installRbacPreHandler(s, *rbac, impl_->audit);
+    }
+    if (impl_->audit) {
+        installAuditPostHandler(s, impl_->auth, impl_->audit);
     }
 }
 

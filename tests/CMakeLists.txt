@@ -317,6 +317,10 @@ add_executable(liveqx-itests
     ../src/stress/StressService.cpp
     ../src/api/ControlApi.cpp
     ../src/api/SseFilter.cpp
+    ../src/audit/AuditTypes.cpp
+    ../src/audit/AuditDb.cpp
+    ../src/audit/AuditLogger.cpp
+    ../src/audit/AuditRateLimiter.cpp
     ../src/plugins/PluginManager.cpp
     ../src/events/EventBus.cpp
     ../src/auth/AuthTypes.cpp
