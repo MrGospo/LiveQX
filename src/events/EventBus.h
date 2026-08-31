@@ -46,6 +46,12 @@ enum class EventType {
     StressRunStarted,      // {started_at_ms, duration_sec, channels, scenarios}
     StressRunFinished,     // {pass, verdict, report_id, ended_at_ms}
     GatewayStateChange,    // {id, name, state}  fix33 D1
+    AuditEvent,            // enterprise audit trail — one row inserted:
+                           // {category, action, target_type, target_id,
+                           //  actor_username, http_method, http_path,
+                           //  http_status, request_id}. UI uses this
+                           // as an invalidation trigger — full row is
+                           // fetched via GET /api/audit/events.
 };
 
 const char* eventTypeName(EventType t) noexcept;

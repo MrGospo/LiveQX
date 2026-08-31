@@ -8,6 +8,7 @@ bool sseEventVisibleTo(const liveqx::auth::RequestContext& ctx,
     using Role      = liveqx::auth::Role;
     switch (e.type) {
         case EventType::AuthAudit:
+        case EventType::AuditEvent:
             return ctx.role == Role::Admin;
         case EventType::PluginStatusChange:
         case EventType::StressRunStarted:

@@ -352,6 +352,23 @@ void AuthService::emitAudit(std::string_view event,
         ae.summary      = e.event + " " + e.username;
         if (!e.details_json.empty()) ae.details_json = e.details_json;
         audit_logger_->logSyncBrokenGlass(std::move(ae));
+
+        // Also emit the SSE trail-signal so an open audit-trail view
+        // updates without polling. Distinct from the AuthAudit event
+        // above (which powers /observability/events) — the audit-trail
+        // page listens on `audit_event` and refetches on every hit.
+        if (event_bus_) {
+            nlohmann::json ap = {
+                {"category",       "auth"},
+                {"action",         e.event},
+                {"target_type",    "user"},
+                {"target_id",      e.username},
+                {"actor_username", e.username},
+                {"actor_ip",       e.ip},
+            };
+            event_bus_->publish(liveqx::events::EventType::AuditEvent,
+                                /*channel_id=*/-1, std::move(ap));
+        }
     }
 }
 

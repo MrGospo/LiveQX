@@ -645,10 +645,11 @@ std::string extractAuditTargetId(std::string_view raw) {
 // (test setups pass nullptr) — without it we log actor_ip only, no user.
 void installAuditPostHandler(httplib::Server& s,
                              liveqx::auth::AuthService* auth_svc,
-                             liveqx::audit::AuditLogger* audit) {
+                             liveqx::audit::AuditLogger* audit,
+                             liveqx::events::EventBus*   events) {
     s.set_post_routing_handler(
-        [auth_svc, audit](const httplib::Request& req,
-                          const httplib::Response& res) {
+        [auth_svc, audit, events](const httplib::Request& req,
+                                  const httplib::Response& res) {
             if (!g_audit_ctx.api_scope || !g_audit_ctx.is_mutation) return;
             // Auth broken-glass endpoints emit domain-specific events from
             // AuthService::emitAudit (login.ok/login.fail/refresh.*/logout).
@@ -708,6 +709,26 @@ void installAuditPostHandler(httplib::Server& s,
                 }
             }
             ev.summary = ev.action + " -> " + std::to_string(res.status);
+
+            // Publish an SSE hint so open audit-trail views can refetch
+            // without polling. Payload is a compact snapshot — id/mac
+            // aren't known here (assigned by the writer thread), and
+            // the client re-queries /api/audit/events for the full row.
+            if (events) {
+                nlohmann::json payload = {
+                    {"category",    liveqx::audit::categoryName(ev.category)},
+                    {"action",      ev.action},
+                    {"target_type", ev.target_type},
+                    {"target_id",   ev.target_id},
+                    {"http_method", ev.http_method},
+                    {"http_path",   ev.http_path},
+                    {"http_status", ev.http_status},
+                    {"request_id",  ev.request_id},
+                    {"actor_username", ev.actor_username},
+                };
+                events->publish(liveqx::events::EventType::AuditEvent,
+                                /*channel_id=*/-1, std::move(payload));
+            }
             audit->log(std::move(ev));
         });
 }
@@ -5140,7 +5161,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         installRbacPreHandler(s, *rbac, impl_->audit, impl_->audit_rate);
     }
     if (impl_->audit) {
-        installAuditPostHandler(s, impl_->auth, impl_->audit);
+        installAuditPostHandler(s, impl_->auth, impl_->audit, impl_->events);
     }
 }
 
