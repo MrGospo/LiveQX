@@ -349,6 +349,7 @@ set(SOURCES
     src/audit/AuditTypes.cpp
     src/audit/AuditDb.cpp
     src/audit/AuditLogger.cpp
+    src/audit/AuditPayload.cpp
     src/audit/AuditRateLimiter.cpp
     src/audit/AuditRetentionWorker.cpp
     src/auth/AuthTypes.cpp

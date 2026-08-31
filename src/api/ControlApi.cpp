@@ -50,6 +50,7 @@ extern "C" {
 #include "mounts/MountSpec.h"
 #include "audit/AuditDb.h"
 #include "audit/AuditLogger.h"
+#include "audit/AuditPayload.h"
 #include "audit/AuditRateLimiter.h"
 #include "audit/AuditTypes.h"
 #include "metrics/ChannelMetrics.h"
@@ -709,6 +710,15 @@ void installAuditPostHandler(httplib::Server& s,
                 }
             }
             ev.summary = ev.action + " -> " + std::to_string(res.status);
+
+            // Capture the sanitized request body so operators can see *what*
+            // changed, not just *that* something changed. For PATCH this is
+            // the diff the client asked for; for POST it's the new-entity
+            // payload. Redacts secret-shaped keys before storing.
+            ev.details_json = liveqx::audit::buildAuditDetailsFromBody(
+                req.body,
+                req.has_header("Content-Type")
+                    ? req.get_header_value("Content-Type") : std::string{});
 
             // Publish an SSE hint so open audit-trail views can refetch
             // without polling. Payload is a compact snapshot — id/mac

@@ -54,9 +54,11 @@ add_executable(liveqx-tests
     test_audit_db.cpp
     test_audit_logger.cpp
     test_audit_rate_limiter.cpp
+    test_audit_payload.cpp
     ../src/audit/AuditTypes.cpp
     ../src/audit/AuditDb.cpp
     ../src/audit/AuditLogger.cpp
+    ../src/audit/AuditPayload.cpp
     ../src/audit/AuditRateLimiter.cpp
     ../src/audit/AuditRetentionWorker.cpp
     test_password_hasher.cpp
@@ -321,6 +323,7 @@ add_executable(liveqx-itests
     ../src/audit/AuditTypes.cpp
     ../src/audit/AuditDb.cpp
     ../src/audit/AuditLogger.cpp
+    ../src/audit/AuditPayload.cpp
     ../src/audit/AuditRateLimiter.cpp
     ../src/audit/AuditRetentionWorker.cpp
     ../src/plugins/PluginManager.cpp
