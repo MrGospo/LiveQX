@@ -48,8 +48,10 @@ extern "C" {
 #include "plugins/PluginManager.h"
 #include "mounts/MountManager.h"
 #include "mounts/MountSpec.h"
+#include "audit/AuditDb.h"
 #include "audit/AuditLogger.h"
 #include "audit/AuditRateLimiter.h"
+#include "audit/AuditTypes.h"
 #include "metrics/ChannelMetrics.h"
 #include "metrics/HostMetrics.h"
 #include "utils/Log.h"
@@ -452,6 +454,14 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     rbac.registerEndpoint("GET /api/auth/audit",         rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("POST /api/auth/audit/purge",  rbacRole(RbacRole::Admin));
 
+    // Enterprise audit trail (state/audit.db) — separate from legacy
+    // auth-only audit above. Admin-only: rows include IPs, target ids
+    // and sanitised payloads that should never leak to operator/viewer.
+    rbac.registerEndpoint("GET /api/audit/events",       rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("GET /api/audit/verify",       rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("GET /api/audit/categories",   rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("GET /api/audit/stats",        rbacRole(RbacRole::Admin));
+
     rbac.registerEndpoint("GET /api/auth/ldap/config",   rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("PUT /api/auth/ldap/config",   rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("POST /api/auth/ldap/test",    rbacRole(RbacRole::Admin));
@@ -835,6 +845,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     auto* mc   = impl_->metrics;
     auto* gws  = impl_->gateways;
     auto* au   = impl_->auth;
+    auto* al   = impl_->audit;
     auto* lr   = impl_->ldap_repo;
     auto* sr   = impl_->smtp_repo;
     auto* ev   = impl_->events;
@@ -3574,6 +3585,187 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         au->emitAudit("audit.purged", actor_id, actor_name, req.remote_addr,
             json({{"older_than_days", days}, {"removed", removed}}).dump());
         writeJson(res, 200, {{"removed", removed}, {"older_than_days", days}});
+    });
+
+    // ── Enterprise audit trail REST ────────────────────────────────────
+    //
+    // state/audit.db read-side. Distinct from /api/auth/audit above
+    // (which reads the legacy auth_audit table in auth.db). Admin-only:
+    // rows here include IPs, target ids and sanitised payloads.
+    //
+    // GET /api/audit/events
+    //   ?from_ts=<ms>       — ts_unix_ms >= from
+    //   ?to_ts=<ms>         — ts_unix_ms <  to
+    //   ?category=<name>    — auth|channel|output|gateway|plugin|mount|system|access
+    //   ?action=<exact>     — e.g. channel.update
+    //   ?actor_user_id=<i>
+    //   ?actor_username=<s>
+    //   ?target_type=<s>
+    //   ?target_id=<s>
+    //   ?request_id=<s>
+    //   ?limit=100          — max 1000 (enforced by AuditDb::list)
+    //   ?offset=0
+    //   Response: { total, events: [ … ] }. total is the unfiltered-by-
+    //   pagination count so the UI can render "N of M" pagers.
+    //
+    // GET /api/audit/verify
+    //   Full-chain rescan. Response: { scanned, first_bad_id, reason }.
+    //   first_bad_id=0 iff the chain is intact. reason is empty then.
+    //
+    // GET /api/audit/categories
+    //   Static enumeration + default retention (days) for each. Lets the
+    //   UI render category dropdowns without hard-coding the list.
+    //
+    // GET /api/audit/stats
+    //   Runtime metrics from AuditLogger — queue depth, DB failures,
+    //   emergency-file writes, fail-closed flag. Ops uses this to alert
+    //   on audit degradation before it wedges mutations.
+    auto audit_unavailable = [](httplib::Response& res) {
+        writeJson(res, 503, {{"error", "audit_unavailable"}});
+    };
+    auto parseAuditFilter =
+        [](const httplib::Request& req,
+           liveqx::audit::AuditFilter& out,
+           std::string& err) -> bool {
+        using namespace liveqx::audit;
+        auto readI64 = [&](const char* key, std::optional<std::int64_t>& dst) {
+            if (!req.has_param(key)) return true;
+            try { dst = std::stoll(req.get_param_value(key)); return true; }
+            catch (...) { err = std::string("bad_") + key; return false; }
+        };
+        if (!readI64("from_ts",       out.from_ts_ms))    return false;
+        if (!readI64("to_ts",         out.to_ts_ms))      return false;
+        if (!readI64("actor_user_id", out.actor_user_id)) return false;
+        if (req.has_param("category")) {
+            auto c = categoryFromString(req.get_param_value("category"));
+            if (!c) { err = "bad_category"; return false; }
+            out.category = *c;
+        }
+        if (req.has_param("action"))         out.action         = req.get_param_value("action");
+        if (req.has_param("actor_username")) out.actor_username = req.get_param_value("actor_username");
+        if (req.has_param("target_type"))    out.target_type    = req.get_param_value("target_type");
+        if (req.has_param("target_id"))      out.target_id      = req.get_param_value("target_id");
+        if (req.has_param("request_id"))     out.request_id     = req.get_param_value("request_id");
+        if (req.has_param("limit")) {
+            try { out.limit = std::stoi(req.get_param_value("limit")); }
+            catch (...) { err = "bad_limit"; return false; }
+        }
+        if (req.has_param("offset")) {
+            try { out.offset = std::stoi(req.get_param_value("offset")); }
+            catch (...) { err = "bad_offset"; return false; }
+        }
+        return true;
+    };
+    auto macToHex = [](const std::vector<std::uint8_t>& mac) {
+        std::ostringstream oss;
+        oss << std::hex << std::setfill('0');
+        for (auto b : mac) oss << std::setw(2) << static_cast<int>(b);
+        return oss.str();
+    };
+    auto auditEventToJson =
+        [&macToHex](const liveqx::audit::AuditEvent& e) {
+        json one = {
+            {"id",         e.id},
+            {"ts_ms",      e.ts_unix_ms},
+            {"category",   liveqx::audit::categoryName(e.category)},
+            {"action",     e.action},
+            {"summary",    e.summary},
+            {"target_type",e.target_type},
+            {"target_id",  e.target_id},
+            {"http_method",e.http_method},
+            {"http_path",  e.http_path},
+            {"http_status",e.http_status},
+            {"elapsed_ms", e.elapsed_ms},
+            {"actor_username", e.actor_username},
+            {"actor_role", e.actor_role},
+            {"actor_ip",   e.actor_ip},
+            {"request_id", e.request_id},
+            {"key_fingerprint", e.key_fingerprint},
+            {"legacy",     e.legacy},
+        };
+        if (e.actor_user_id) one["actor_user_id"] = *e.actor_user_id;
+        else                 one["actor_user_id"] = nullptr;
+        if (!e.mac.empty())      one["mac"]      = macToHex(e.mac);
+        if (!e.prev_mac.empty()) one["prev_mac"] = macToHex(e.prev_mac);
+        if (!e.details_json.empty()) {
+            try {
+                one["details"] = json::parse(e.details_json);
+            } catch (...) {
+                one["details_raw"] = e.details_json;
+            }
+        }
+        return one;
+    };
+
+    s.Get("/api/audit/events",
+          [al, audit_unavailable, parseAuditFilter, auditEventToJson]
+          (const httplib::Request& req, httplib::Response& res) {
+        if (!al || !al->db() || !al->db()->ok()) { audit_unavailable(res); return; }
+        liveqx::audit::AuditFilter f;
+        std::string err;
+        if (!parseAuditFilter(req, f, err)) {
+            writeJson(res, 400, {{"error", err}});
+            return;
+        }
+        auto* db = al->db();
+        const auto total  = db->count(f);
+        auto       events = db->list(f);
+        json arr = json::array();
+        for (const auto& e : events) arr.push_back(auditEventToJson(e));
+        writeJson(res, 200, {
+            {"total",  total},
+            {"limit",  f.limit},
+            {"offset", f.offset},
+            {"events", std::move(arr)},
+        });
+    });
+
+    s.Get("/api/audit/verify",
+          [al, audit_unavailable]
+          (const httplib::Request&, httplib::Response& res) {
+        if (!al || !al->db() || !al->db()->ok()) { audit_unavailable(res); return; }
+        auto v = al->db()->verifyChain();
+        writeJson(res, 200, {
+            {"scanned",       v.scanned},
+            {"first_bad_id",  v.first_bad_id},
+            {"reason",        v.first_bad_reason},
+            {"ok",            v.first_bad_id == 0},
+        });
+    });
+
+    s.Get("/api/audit/categories",
+          [](const httplib::Request&, httplib::Response& res) {
+        using C = liveqx::audit::Category;
+        constexpr C kAll[] = {
+            C::Auth, C::Channel, C::Output, C::Gateway,
+            C::Plugin, C::Mount, C::System, C::Access,
+        };
+        json arr = json::array();
+        for (auto c : kAll) {
+            arr.push_back({
+                {"name",           liveqx::audit::categoryName(c)},
+                {"retention_days", liveqx::audit::defaultRetentionDays(c)},
+            });
+        }
+        writeJson(res, 200, {{"categories", std::move(arr)}});
+    });
+
+    s.Get("/api/audit/stats",
+          [al, audit_unavailable]
+          (const httplib::Request&, httplib::Response& res) {
+        if (!al) { audit_unavailable(res); return; }
+        auto st = al->stats();
+        writeJson(res, 200, {
+            {"enqueued",         st.enqueued},
+            {"written_db",       st.written_db},
+            {"written_emergency",st.written_emergency},
+            {"db_failures",      st.db_failures},
+            {"dropped_overflow", st.dropped_overflow},
+            {"queue_depth",      st.queue_depth},
+            {"last_write_ns",    st.last_write_ns},
+            {"fail_closed",      st.fail_closed},
+            {"db_ok",            al->db() && al->db()->ok()},
+        });
     });
 
     // ── fix22 commit 17/24 — LDAP config GET/PUT ───────────────────────

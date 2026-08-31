@@ -87,6 +87,11 @@ public:
     // every mutation is recorded.
     bool shouldRejectMutation() const noexcept;
 
+    // Read-side access for the REST layer. Nullable — /api/audit/*
+    // handlers respond 503 when the underlying DB is missing so the UI
+    // renders a proper empty state instead of a query error.
+    AuditDb* db() const noexcept { return db_; }
+
     AuditLoggerStats stats() const;
 
 private:
