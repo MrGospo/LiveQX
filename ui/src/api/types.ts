@@ -179,3 +179,80 @@ export interface SseEvent {
   // Consumers cast or narrow by `type` as needed.
   [key: string]: unknown;
 }
+
+// ─── Enterprise audit trail (state/audit.db) ─────────────────────────────
+// Distinct from AuditEvent above (legacy /api/auth/audit, auth-only).
+// Rows are hand-typed here because /api/audit/* is not (yet) in openapi.yaml.
+export type AuditCategory =
+  'auth' | 'channel' | 'output' | 'gateway' |
+  'plugin' | 'mount' | 'system' | 'access';
+
+export interface AuditTrailEvent {
+  id:              number;
+  ts_ms:           number;
+  category:        AuditCategory;
+  action:          string;
+  summary:         string;
+  target_type:     string;
+  target_id:       string;
+  http_method:     string;
+  http_path:       string;
+  http_status:     number;
+  elapsed_ms:      number;
+  actor_user_id:   number | null;
+  actor_username:  string;
+  actor_role:      string;
+  actor_ip:        string;
+  request_id:      string;
+  key_fingerprint: string;
+  legacy:          boolean;
+  mac?:            string;
+  prev_mac?:       string;
+  details?:        unknown;
+  details_raw?:    string;
+}
+
+export interface AuditTrailListResponse {
+  total:  number;
+  limit:  number;
+  offset: number;
+  events: AuditTrailEvent[];
+}
+
+export interface AuditTrailFilter {
+  from_ts?:        number;
+  to_ts?:          number;
+  category?:       AuditCategory;
+  action?:         string;
+  actor_user_id?:  number;
+  actor_username?: string;
+  target_type?:    string;
+  target_id?:      string;
+  request_id?:     string;
+  limit?:          number;
+  offset?:         number;
+}
+
+export interface AuditTrailVerify {
+  scanned:      number;
+  first_bad_id: number;
+  reason:       string;
+  ok:           boolean;
+}
+
+export interface AuditTrailCategory {
+  name:           AuditCategory;
+  retention_days: number;
+}
+
+export interface AuditTrailStats {
+  enqueued:          number;
+  written_db:        number;
+  written_emergency: number;
+  db_failures:       number;
+  dropped_overflow:  number;
+  queue_depth:       number;
+  last_write_ns:     number;
+  fail_closed:       boolean;
+  db_ok:             boolean;
+}

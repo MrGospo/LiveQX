@@ -143,6 +143,12 @@ export function EventBusProvider({ children }: { children: React.ReactNode }) {
           case 'auth_audit':
             qc.invalidateQueries({ queryKey: ['audit'] });
             break;
+          // Enterprise audit trail — one signal per row written to
+          // state/audit.db. Payload is a compact snapshot; the trail
+          // page refetches for the full row (mac, id, chain-position).
+          case 'audit_event':
+            qc.invalidateQueries({ queryKey: ['audit-trail'] });
+            break;
           // fix33 D1 — gateway lifecycle: invalidate gateway list and the
           // affected gateway's status. Payload carries `id` (not channel_id).
           case 'gateway_state_change': {
