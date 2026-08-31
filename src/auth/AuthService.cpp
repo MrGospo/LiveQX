@@ -34,6 +34,8 @@
 
 #include "auth/AuthDb.h"
 #include "auth/PasswordHasher.h"
+#include "audit/AuditLogger.h"
+#include "audit/AuditTypes.h"
 #include "events/EventBus.h"
 #include "utils/Log.h"
 
@@ -331,6 +333,25 @@ void AuthService::emitAudit(std::string_view event,
         }
         event_bus_->publish(liveqx::events::EventType::AuthAudit,
                             /*channel_id=*/-1, std::move(payload));
+    }
+
+    // Mirror into the enterprise audit trail (state/audit.db). Uses the
+    // sync broken-glass writer so a wedged async backlog can never lose
+    // an auth event — auth is the one category that stays reachable even
+    // when the trail is fail-closed to mutations.
+    if (audit_logger_) {
+        liveqx::audit::AuditEvent ae;
+        ae.ts_unix_ms   = e.ts * 1000;
+        ae.category     = liveqx::audit::Category::Auth;
+        ae.action       = e.event;
+        ae.actor_user_id  = e.user_id;
+        ae.actor_username = e.username;
+        ae.actor_ip     = e.ip;
+        ae.target_type  = "user";
+        ae.target_id    = e.username;
+        ae.summary      = e.event + " " + e.username;
+        if (!e.details_json.empty()) ae.details_json = e.details_json;
+        audit_logger_->logSyncBrokenGlass(std::move(ae));
     }
 }
 

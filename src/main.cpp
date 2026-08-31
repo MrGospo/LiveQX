@@ -750,6 +750,7 @@ int main(int argc, char* argv[]) {
                 ac.value("rate_burst_capacity",    audit_rl_cfg.burst_capacity);
         }
         sad::AuditRateLimiter audit_rate(audit_rl_cfg);
+        auth_svc.setAuditLogger(&audit_logger);
 
         // fix23 — process-wide event bus for SSE fan-out and per-channel
         // WebRTC preview registry. Both are passed down to ControlApi

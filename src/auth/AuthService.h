@@ -15,6 +15,7 @@
 #include "auth/JwtIssuer.h"
 
 namespace liveqx::events { class EventBus; }
+namespace liveqx::audit  { class AuditLogger; }
 
 namespace liveqx::auth {
 
@@ -361,6 +362,15 @@ public:
     // behaviour used by unit tests that don't want a live bus.
     void setEventBus(liveqx::events::EventBus* bus) noexcept { event_bus_ = bus; }
 
+    // Wire the enterprise AuditLogger. When set, every emitAudit() call
+    // also mirrors the event into state/audit.db under Category::Auth so
+    // login/logout/refresh/password lifecycle appears alongside all
+    // other server mutations on one timeline. Nullable — unit tests and
+    // legacy setups without an audit stack keep working unchanged.
+    void setAuditLogger(liveqx::audit::AuditLogger* al) noexcept {
+        audit_logger_ = al;
+    }
+
     // Снимает блокировку и обнуляет счётчик. Возвращает true если юзер
     // существует. Идемпотентно: повторный unlock «чистого» юзера тоже true.
     bool adminUnlockUser(std::int64_t id);
@@ -456,6 +466,12 @@ private:
     // Set via setEventBus(). nullptr in unit tests — emitAudit skips the
     // publish step then; DB insert happens regardless.
     liveqx::events::EventBus* event_bus_{nullptr};
+
+    // Set via setAuditLogger(). Optional — when non-null every emitAudit
+    // is mirrored into the enterprise audit trail (state/audit.db) under
+    // Category::Auth via the sync broken-glass path so a full async
+    // backlog can never lose a login record.
+    liveqx::audit::AuditLogger* audit_logger_{nullptr};
 
     // Issue + persist session row. Used by both login() and refresh().
     // grants_override: если указан, используется вместо grants_for_user_

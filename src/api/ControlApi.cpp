@@ -640,6 +640,11 @@ void installAuditPostHandler(httplib::Server& s,
         [auth_svc, audit](const httplib::Request& req,
                           const httplib::Response& res) {
             if (!g_audit_ctx.api_scope || !g_audit_ctx.is_mutation) return;
+            // Auth broken-glass endpoints emit domain-specific events from
+            // AuthService::emitAudit (login.ok/login.fail/refresh.*/logout).
+            // Skipping them here avoids a duplicate generic row for the
+            // same request.
+            if (isBrokenGlassPath(req.path)) return;
             const auto now = std::chrono::steady_clock::now();
             const auto elapsed_ms =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
