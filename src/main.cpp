@@ -19,6 +19,7 @@
 #include "audit/AuditDb.h"
 #include "audit/AuditLogger.h"
 #include "audit/AuditRateLimiter.h"
+#include "audit/AuditRetentionWorker.h"
 #include "auth/AuthCli.h"
 #include "auth/AuthDb.h"
 #include "auth/AuthService.h"
@@ -752,6 +753,20 @@ int main(int argc, char* argv[]) {
         sad::AuditRateLimiter audit_rate(audit_rl_cfg);
         auth_svc.setAuditLogger(&audit_logger);
 
+        // Retention janitor — hourly sweep, per-category cutoff from
+        // defaultRetentionDays(). Runs on its own thread so a heavy
+        // purge on a year-old install never blocks AuditLogger's writer.
+        std::chrono::minutes audit_retention_interval{60};
+        if (cfg.contains("audit") && cfg["audit"].is_object()) {
+            const auto& ac = cfg["audit"];
+            const int mins = ac.value("retention_interval_minutes", 60);
+            if (mins > 0)
+                audit_retention_interval = std::chrono::minutes{mins};
+        }
+        sad::AuditRetentionWorker audit_retention(&audit_db,
+                                                  audit_retention_interval);
+        audit_retention.start();
+
         // fix23 — process-wide event bus for SSE fan-out and per-channel
         // WebRTC preview registry. Both are passed down to ControlApi
         // (REST surface) and event_bus is wired into ChannelManager so
@@ -1129,6 +1144,7 @@ int main(int argc, char* argv[]) {
         // Flush + join the audit writer thread before audit_db/master_key
         // go out of scope. stop() is idempotent; ~AuditLogger would call
         // it anyway, but doing it here keeps shutdown ordering explicit.
+        audit_retention.stop();
         audit_logger.stop();
     }
 

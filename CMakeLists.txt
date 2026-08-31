@@ -350,6 +350,7 @@ set(SOURCES
     src/audit/AuditDb.cpp
     src/audit/AuditLogger.cpp
     src/audit/AuditRateLimiter.cpp
+    src/audit/AuditRetentionWorker.cpp
     src/auth/AuthTypes.cpp
     src/auth/AuthDb.cpp
     src/auth/PasswordHasher.cpp
