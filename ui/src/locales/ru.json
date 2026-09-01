@@ -905,7 +905,11 @@
     "statsWritten": "записано в БД: {{n}}",
     "statsEmergency": "аварийный файл: {{n}}",
     "statsFailClosed": "мутации заблокированы (fail-closed)",
-    "statsDbDown": "audit.db недоступна"
+    "statsDbDown": "audit.db недоступна",
+    "changesTitle": "Изменения",
+    "changesField": "Поле",
+    "changesBefore": "Было",
+    "changesAfter": "Стало"
   },
   "plugins": {
     "title": "Плагины",

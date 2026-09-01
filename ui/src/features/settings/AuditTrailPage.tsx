@@ -50,6 +50,58 @@ function statusClass(s: number): string {
   return 'text-[var(--text-primary)]';
 }
 
+// ── Diff table (Этап 7b) ────────────────────────────────────────────────
+// Backend writes changed keys to details.changes as a recursive tree where
+// each leaf is {"before": v, "after": v} (see AuditPayload::jsonDiff). We
+// flatten to a dot-path list so the drawer renders one row per changed
+// field — much easier to read than the raw JSON blob.
+type ChangeRow = { path: string; before: unknown; after: unknown };
+
+function isDiffLeaf(v: unknown): v is { before: unknown; after: unknown } {
+  return !!v
+    && typeof v === 'object'
+    && !Array.isArray(v)
+    && Object.keys(v as object).length === 2
+    && 'before' in (v as object)
+    && 'after'  in (v as object);
+}
+
+function flattenChanges(changes: unknown, prefix = ''): ChangeRow[] {
+  if (!changes || typeof changes !== 'object' || Array.isArray(changes)) return [];
+  const rows: ChangeRow[] = [];
+  for (const [k, v] of Object.entries(changes as Record<string, unknown>)) {
+    const path = prefix ? `${prefix}.${k}` : k;
+    if (isDiffLeaf(v)) {
+      rows.push({ path, before: v.before, after: v.after });
+    } else {
+      rows.push(...flattenChanges(v, path));
+    }
+  }
+  return rows;
+}
+
+// Render a single before/after value. null/undefined show as an em-dash
+// (a real "field removed" signal), primitives print as-is, objects and
+// arrays fall back to compact JSON so the row height stays bounded.
+function fmtDiffValue(v: unknown): string {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'string')  return v;
+  if (typeof v === 'number')  return String(v);
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  return JSON.stringify(v);
+}
+
+// Pulls the changes tree out of the event's details JSON. Backend puts
+// it under `details.changes` on PATCH channels/outputs/mounts; other
+// events don't have it and we render nothing.
+function extractChanges(ev: AuditTrailEvent): unknown {
+  const src = ev.details ?? (ev.details_raw
+    ? (() => { try { return JSON.parse(ev.details_raw!); } catch { return null; } })()
+    : null);
+  if (!src || typeof src !== 'object') return null;
+  return (src as Record<string, unknown>).changes ?? null;
+}
+
 export default function AuditTrailPage() {
   const { t } = useTranslation();
   const toast = useToast();
@@ -375,6 +427,49 @@ export default function AuditTrailPage() {
             {selected.summary && (
               <div className="text-sm text-[var(--text-primary)]">{selected.summary}</div>
             )}
+            {(() => {
+              const rows = flattenChanges(extractChanges(selected));
+              if (rows.length === 0) return null;
+              return (
+                <div className="flex flex-col gap-2">
+                  <div className="text-xs uppercase tracking-wider text-[var(--text-muted)]">
+                    {t('auditTrail.changesTitle')}
+                  </div>
+                  <div className="bg-canvas border border-[var(--border-subtle)] rounded overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-[var(--border-subtle)]">
+                          <th className="px-3 py-2 text-left font-semibold text-[var(--text-muted)]">
+                            {t('auditTrail.changesField')}
+                          </th>
+                          <th className="px-3 py-2 text-left font-semibold text-[var(--text-muted)]">
+                            {t('auditTrail.changesBefore')}
+                          </th>
+                          <th className="px-3 py-2 text-left font-semibold text-[var(--text-muted)]">
+                            {t('auditTrail.changesAfter')}
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map(r => (
+                          <tr key={r.path} className="border-b last:border-0 border-[var(--border-subtle)]">
+                            <td className="px-3 py-1.5 font-mono text-[var(--text-primary)] whitespace-nowrap">
+                              {r.path}
+                            </td>
+                            <td className="px-3 py-1.5 font-mono text-[var(--danger)] break-all">
+                              {fmtDiffValue(r.before)}
+                            </td>
+                            <td className="px-3 py-1.5 font-mono text-[var(--success)] break-all">
+                              {fmtDiffValue(r.after)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })()}
             {(selected.details || selected.details_raw) && (
               <pre className="text-xs bg-canvas border border-[var(--border-subtle)] rounded p-3 overflow-x-auto font-mono text-[var(--text-primary)]">
                 {selected.details_raw

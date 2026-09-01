@@ -905,7 +905,11 @@
     "statsWritten": "written to db: {{n}}",
     "statsEmergency": "emergency file: {{n}}",
     "statsFailClosed": "mutations blocked (fail-closed)",
-    "statsDbDown": "audit.db unavailable"
+    "statsDbDown": "audit.db unavailable",
+    "changesTitle": "Changes",
+    "changesField": "Field",
+    "changesBefore": "Before",
+    "changesAfter": "After"
   },
   "plugins": {
     "title": "Plugins",
