@@ -541,6 +541,14 @@ std::string extractBearerToken(const httplib::Request& req) {
 // the post-routing handler after the domain handler set res.status.
 // cpp-httplib serves each request on a single thread for its lifetime,
 // so thread_local is the right storage class.
+//
+// The *_override fields let domain handlers hand richer, semantic data
+// to the middleware (e.g. action="mounts.update" instead of the generic
+// "PUT /api/system/mounts/{}"). If the domain handler doesn't set them,
+// middleware falls back to method+path + body-sanitiser. This is how we
+// consolidate the legacy AuthService::emitAudit domain trail into the
+// HMAC-chained AuditDb — one row per HTTP request, richer where domain
+// knows better.
 struct AuditReqCtx {
     std::chrono::steady_clock::time_point start;
     std::string request_id;
@@ -551,8 +559,31 @@ struct AuditReqCtx {
     std::optional<std::int64_t> actor_user_id;
     std::string                 actor_username;
     std::string                 actor_role;
+    // Domain-supplied overrides for the audit row.
+    std::string action_override;
+    std::string details_override;
+    std::string target_type_override;
+    std::string target_id_override;
 };
 thread_local AuditReqCtx g_audit_ctx;
+
+// Domain-side entry point: attach a semantic event name and rich JSON
+// details to the current request's audit row. Secrets in `details` are
+// redacted before storage (belt-and-braces even for hand-built payloads).
+// Multiple calls within a single request overwrite each other — last
+// caller wins, which matches "the deepest handler had the final say".
+void setAuditContextOverride(std::string_view action,
+                             nlohmann::json details,
+                             std::string_view target_type = {},
+                             std::string_view target_id   = {}) {
+    liveqx::audit::redactSensitiveKeys(details);
+    g_audit_ctx.action_override  = std::string{action};
+    g_audit_ctx.details_override = details.dump();
+    if (!target_type.empty())
+        g_audit_ctx.target_type_override = std::string{target_type};
+    if (!target_id.empty())
+        g_audit_ctx.target_id_override = std::string{target_id};
+}
 
 // Login/refresh/logout stay reachable even when the audit backlog is
 // full — otherwise an operator locked out of the system could never
@@ -651,7 +682,12 @@ void installAuditPostHandler(httplib::Server& s,
     s.set_post_routing_handler(
         [auth_svc, audit, events](const httplib::Request& req,
                                   const httplib::Response& res) {
-            if (!g_audit_ctx.api_scope || !g_audit_ctx.is_mutation) return;
+            if (!g_audit_ctx.api_scope) return;
+            // Reads normally skip the trail — but a handler can opt in by
+            // setting an override (e.g. tls.ca_export logs the trust-anchor
+            // download even though it's a GET).
+            if (!g_audit_ctx.is_mutation
+                && g_audit_ctx.action_override.empty()) return;
             // Auth broken-glass endpoints emit domain-specific events from
             // AuthService::emitAudit (login.ok/login.fail/refresh.*/logout).
             // Skipping them here avoids a duplicate generic row for the
@@ -664,7 +700,9 @@ void installAuditPostHandler(httplib::Server& s,
 
             liveqx::audit::AuditEvent ev;
             ev.category    = categoryForApiPath(req.path);
-            ev.action      = req.method + " " + normaliseAuditPath(req.path);
+            ev.action      = !g_audit_ctx.action_override.empty()
+                             ? g_audit_ctx.action_override
+                             : (req.method + " " + normaliseAuditPath(req.path));
             ev.http_method = req.method;
             ev.http_path   = req.path;
             ev.http_status = res.status;
@@ -696,29 +734,38 @@ void installAuditPostHandler(httplib::Server& s,
                 }
             }
 
-            auto target = extractAuditTargetId(req.path);
-            if (!target.empty()) {
-                ev.target_id = std::move(target);
-                using C = liveqx::audit::Category;
-                switch (ev.category) {
-                    case C::Channel: ev.target_type = "channel"; break;
-                    case C::Output:  ev.target_type = "output";  break;
-                    case C::Gateway: ev.target_type = "gateway"; break;
-                    case C::Mount:   ev.target_type = "mount";   break;
-                    case C::Plugin:  ev.target_type = "plugin";  break;
-                    default: break;
+            if (!g_audit_ctx.target_id_override.empty()) {
+                ev.target_id   = g_audit_ctx.target_id_override;
+                ev.target_type = g_audit_ctx.target_type_override;
+            } else {
+                auto target = extractAuditTargetId(req.path);
+                if (!target.empty()) {
+                    ev.target_id = std::move(target);
+                    using C = liveqx::audit::Category;
+                    switch (ev.category) {
+                        case C::Channel: ev.target_type = "channel"; break;
+                        case C::Output:  ev.target_type = "output";  break;
+                        case C::Gateway: ev.target_type = "gateway"; break;
+                        case C::Mount:   ev.target_type = "mount";   break;
+                        case C::Plugin:  ev.target_type = "plugin";  break;
+                        default: break;
+                    }
                 }
             }
             ev.summary = ev.action + " -> " + std::to_string(res.status);
 
-            // Capture the sanitized request body so operators can see *what*
-            // changed, not just *that* something changed. For PATCH this is
-            // the diff the client asked for; for POST it's the new-entity
-            // payload. Redacts secret-shaped keys before storing.
-            ev.details_json = liveqx::audit::buildAuditDetailsFromBody(
-                req.body,
-                req.has_header("Content-Type")
-                    ? req.get_header_value("Content-Type") : std::string{});
+            // Prefer domain-supplied details (already sanitized in
+            // setAuditContextOverride). Otherwise fall back to the generic
+            // request-body sanitiser so at least the payload the client
+            // asked for is on record.
+            if (!g_audit_ctx.details_override.empty()) {
+                ev.details_json = g_audit_ctx.details_override;
+            } else {
+                ev.details_json = liveqx::audit::buildAuditDetailsFromBody(
+                    req.body,
+                    req.has_header("Content-Type")
+                        ? req.get_header_value("Content-Type") : std::string{});
+            }
 
             // Publish an SSE hint so open audit-trail views can refetch
             // without polling. Payload is a compact snapshot — id/mac
@@ -743,6 +790,43 @@ void installAuditPostHandler(httplib::Server& s,
         });
 }
 
+// Reset the per-request audit context and flag whether this path is one
+// of the API/probe namespaces the audit trail should cover. Called from
+// whichever pre-handler is installed (rbac-aware or audit-only) so the
+// post-handler always sees a fresh context.
+bool resetAuditContextForRequest(const httplib::Request& req,
+                                 liveqx::audit::AuditLogger* audit) {
+    g_audit_ctx = {};
+    if (audit) {
+        g_audit_ctx.start       = std::chrono::steady_clock::now();
+        g_audit_ctx.request_id  = generateAuditRequestId();
+        g_audit_ctx.is_mutation = isMutationMethod(req.method);
+    }
+    static constexpr std::array<std::string_view, 5> api_prefixes = {
+        "/api/", "/healthz", "/readyz", "/livez", "/metrics",
+    };
+    const std::string_view path{req.path};
+    bool is_api = false;
+    for (auto p : api_prefixes) {
+        if (path.starts_with(p)) { is_api = true; break; }
+    }
+    g_audit_ctx.api_scope = is_api;
+    return is_api;
+}
+
+// Audit-only pre-handler used when RBAC is not wired (tests, dev). Its
+// sole job is to populate g_audit_ctx so the post-handler can emit rows.
+// Never rejects a request — mutation gating happens in the RBAC path.
+void installAuditPreHandler(httplib::Server& s,
+                            liveqx::audit::AuditLogger* audit) {
+    s.set_pre_routing_handler(
+        [audit](const httplib::Request& req,
+                httplib::Response&) {
+            resetAuditContextForRequest(req, audit);
+            return httplib::Server::HandlerResponse::Unhandled;
+        });
+}
+
 void installRbacPreHandler(httplib::Server& s,
                            liveqx::auth::RbacMiddleware& rbac,
                            liveqx::audit::AuditLogger* audit,
@@ -751,33 +835,7 @@ void installRbacPreHandler(httplib::Server& s,
     s.set_pre_routing_handler(
         [&rbac, audit, audit_rate](const httplib::Request& req,
                                    httplib::Response& res) {
-            // Reset per-request audit context on every hit — pre-handler is
-            // the first thing that runs, and thread_local persists across
-            // requests handled on the same thread.
-            g_audit_ctx = {};
-            if (audit) {
-                g_audit_ctx.start       = std::chrono::steady_clock::now();
-                g_audit_ctx.request_id  = generateAuditRequestId();
-                g_audit_ctx.is_mutation = isMutationMethod(req.method);
-            }
-
-            // fix35 A3.5–A3.9 — static UI assets are public. Skip RBAC for
-            // anything outside the API/probe namespaces; cpp-httplib's mount
-            // point handler (and the SPA fallback in mountUi()) handles those.
-            // Without this bypass, /, /assets/*, /channels/42 would all hit
-            // Decision::NotConfigured and 500 with rbac.misconfigured.
-            static constexpr std::array<std::string_view, 5> api_prefixes = {
-                "/api/", "/healthz", "/readyz", "/livez", "/metrics",
-            };
-            const std::string_view path{req.path};
-            bool is_api = false;
-            for (auto p : api_prefixes) {
-                if (path.starts_with(p)) { is_api = true; break; }
-            }
-            // Only the API/probe namespaces flow through audit — a static
-            // UI hit shouldn't spam the trail. Even if audit is off, the
-            // flag is harmless (the post-handler no-ops without a logger).
-            g_audit_ctx.api_scope = is_api;
+            const bool is_api = resetAuditContextForRequest(req, audit);
             if (!is_api) {
                 return httplib::Server::HandlerResponse::Unhandled;
             }
@@ -1261,13 +1319,16 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         if (!claims) return {std::nullopt, ""};
         return {claims->user_id, claims->username};
     };
-    auto emitChannelAudit = [au](std::string_view event,
-                                 const std::optional<std::int64_t>& uid,
-                                 std::string_view username,
-                                 std::string_view ip,
-                                 const json& details) {
-        if (!au) return;
-        au->emitAudit(event, uid, username, ip, details.dump());
+    // See emitMountAudit comment — consolidated onto AuditDb via override.
+    auto emitChannelAudit = [](std::string_view event,
+                               const std::optional<std::int64_t>& /*uid*/,
+                               std::string_view /*username*/,
+                               std::string_view /*ip*/,
+                               const json& details) {
+        std::string target_id;
+        if (details.contains("id") && details["id"].is_number_integer())
+            target_id = std::to_string(details["id"].get<std::int64_t>());
+        setAuditContextOverride(event, details, "channel", target_id);
     };
 
     s.Get("/api/channels", [&mgr](const httplib::Request&, httplib::Response& res) {
@@ -2578,15 +2639,18 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     // username/ip — actor известен только REST-слою, поэтому audit
     // emission делается здесь, после mutation. event= "plugin.install" /
     // "plugin.uninstall" / "plugin.eula_accept".
-    auto emitPluginAudit = [au](std::string_view event,
-                                std::int64_t user_id,
-                                std::string_view username,
-                                std::string_view ip,
-                                const json& details) {
-        if (!au) return;
-        std::optional<std::int64_t> uid;
-        if (user_id >= 0) uid = user_id;
-        au->emitAudit(event, uid, username, ip, details.dump());
+    // See emitMountAudit comment — consolidated onto AuditDb via override.
+    // Plugin id key differs from mount/channel — payload uses "plugin_id"
+    // (string, not numeric) so extract it explicitly.
+    auto emitPluginAudit = [](std::string_view event,
+                              std::int64_t /*user_id*/,
+                              std::string_view /*username*/,
+                              std::string_view /*ip*/,
+                              const json& details) {
+        std::string target_id;
+        if (details.contains("plugin_id") && details["plugin_id"].is_string())
+            target_id = details["plugin_id"].get<std::string>();
+        setAuditContextOverride(event, details, "plugin", target_id);
     };
 
     s.Post(R"(/api/plugins/([a-zA-Z0-9_-]+)/install)",
@@ -2726,13 +2790,20 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         return 500;
     };
 
-    auto emitMountAudit = [au](std::string_view event,
-                               const std::optional<std::int64_t>& uid,
-                               std::string_view username,
-                               std::string_view ip,
-                               const json& details) {
-        if (!au) return;
-        au->emitAudit(event, uid, username, ip, details.dump());
+    // Consolidated onto the middleware AuditDb path via override — one
+    // HMAC-chained row per request, no legacy AuthDb.auth_events dup.
+    // Signature preserved so call sites don't need updating; uid/username/
+    // ip are ignored here (middleware already stamped them from the RBAC
+    // pre-handler). target id is best-effort from the details payload.
+    auto emitMountAudit = [](std::string_view event,
+                             const std::optional<std::int64_t>& /*uid*/,
+                             std::string_view /*username*/,
+                             std::string_view /*ip*/,
+                             const json& details) {
+        std::string target_id;
+        if (details.contains("id") && details["id"].is_number_integer())
+            target_id = std::to_string(details["id"].get<std::int64_t>());
+        setAuditContextOverride(event, details, "mount", target_id);
     };
 
     // Local actor extractor (mirrors actorContext from the auth block,
@@ -3118,10 +3189,11 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             return;
         }
         const auto& cu = std::get<liveqx::auth::AuthService::CreatedUser>(out);
-        au->emitAudit("admin.user.created", actor_id, actor_name, req.remote_addr,
+        setAuditContextOverride("admin.user.created",
             json({{"target_id", cu.user.id},
                   {"target_username", cu.user.username},
-                  {"role", liveqx::auth::roleName(cu.user.role)}}).dump());
+                  {"role", liveqx::auth::roleName(cu.user.role)}}),
+            "user", std::to_string(cu.user.id));
         json body_out = userJson(cu.user);
         if (!cu.plaintext_password.empty()) {
             // Auto-generated пароль — отдаём admin'у один раз.
@@ -3176,13 +3248,13 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             return;
         }
         const auto& nu = std::get<liveqx::auth::User>(out);
-        auto [actor_id, actor_name] = actorContext(req);
-        au->emitAudit("admin.user.updated", actor_id, actor_name, req.remote_addr,
+        setAuditContextOverride("admin.user.updated",
             json({{"target_id", nu.id},
                   {"old_role",  liveqx::auth::roleName(cur->role)},
                   {"new_role",  liveqx::auth::roleName(nu.role)},
                   {"old_email", cur->email},
-                  {"new_email", nu.email}}).dump());
+                  {"new_email", nu.email}}),
+            "user", std::to_string(nu.id));
         writeJson(res, 200, userJson(nu));
     });
 
@@ -3200,10 +3272,10 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             writeJson(res, 500, {{"error", "internal_error"}});
             return;
         }
-        auto [actor_id, actor_name] = actorContext(req);
-        au->emitAudit("admin.user.disabled", actor_id, actor_name, req.remote_addr,
+        setAuditContextOverride("admin.user.disabled",
             json({{"target_id", id},
-                  {"target_username", target->username}}).dump());
+                  {"target_username", target->username}}),
+            "user", std::to_string(id));
         writeJson(res, 200, {{"status", "disabled"}, {"id", id}});
     });
 
@@ -3221,10 +3293,10 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             writeJson(res, 500, {{"error", "internal_error"}});
             return;
         }
-        auto [actor_id, actor_name] = actorContext(req);
-        au->emitAudit("admin.user.enabled", actor_id, actor_name, req.remote_addr,
+        setAuditContextOverride("admin.user.enabled",
             json({{"target_id", id},
-                  {"target_username", target->username}}).dump());
+                  {"target_username", target->username}}),
+            "user", std::to_string(id));
         writeJson(res, 200, {{"status", "enabled"}, {"id", id}});
     });
 
@@ -3237,10 +3309,10 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         if (!target) { writeJson(res, 404, {{"error", "user_not_found"}}); return; }
         auto pw = au->adminResetPassword(id);
         if (!pw) { writeJson(res, 500, {{"error", "internal_error"}}); return; }
-        auto [actor_id, actor_name] = actorContext(req);
-        au->emitAudit("admin.user.password_reset", actor_id, actor_name, req.remote_addr,
+        setAuditContextOverride("admin.user.password_reset",
             json({{"target_id", id},
-                  {"target_username", target->username}}).dump());
+                  {"target_username", target->username}}),
+            "user", std::to_string(id));
         // Plaintext отдаётся ТОЛЬКО в этом ответе — больше нигде он не
         // материализуется. Admin обязан показать пользователю один раз.
         writeJson(res, 200, {
@@ -3263,11 +3335,11 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             writeJson(res, 500, {{"error", "internal_error"}});
             return;
         }
-        auto [actor_id, actor_name] = actorContext(req);
-        au->emitAudit("admin.user.unlocked", actor_id, actor_name, req.remote_addr,
+        setAuditContextOverride("admin.user.unlocked",
             json({{"target_id", id},
                   {"target_username", target->username},
-                  {"prev_failed_count", target->failed_login_count}}).dump());
+                  {"prev_failed_count", target->failed_login_count}}),
+            "user", std::to_string(id));
         writeJson(res, 200, {{"status", "unlocked"}, {"id", id}});
     });
 
@@ -3303,10 +3375,11 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             }
         }
         const auto& purged = std::get<liveqx::auth::AuthService::PurgedUser>(r);
-        au->emitAudit("admin.user.purged", actor_id, actor_name, req.remote_addr,
+        setAuditContextOverride("admin.user.purged",
             json({{"target_id", purged.id},
                   {"target_username", purged.username},
-                  {"target_email", purged.email}}).dump());
+                  {"target_email", purged.email}}),
+            "user", std::to_string(purged.id));
         writeJson(res, 200, {{"status", "purged"}, {"id", purged.id}});
     });
 
@@ -3612,9 +3685,8 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         }
         if (days <= 0) { writeJson(res, 400, {{"error", "missing_older_than_days"}}); return; }
         const int removed = au->purgeAuditOlderThanDays(days);
-        auto [actor_id, actor_name] = actorContext(req);
-        au->emitAudit("audit.purged", actor_id, actor_name, req.remote_addr,
-            json({{"older_than_days", days}, {"removed", removed}}).dump());
+        setAuditContextOverride("audit.purged",
+            json({{"older_than_days", days}, {"removed", removed}}));
         writeJson(res, 200, {{"removed", removed}, {"older_than_days", days}});
     });
 
@@ -3976,14 +4048,11 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             writeJson(res, 500, {{"error", "save_failed"}});
             return;
         }
-        if (au) {
-            au->emitAudit("admin.ldap.config_updated",
-                          actor_id, actor_name, req.remote_addr,
-                          json({{"enabled", cfg.enabled},
-                                {"server", cfg.server},
-                                {"tls_mode",
-                                 LdapConfigRepo::tlsModeToString(cfg.tls_mode)}}).dump());
-        }
+        setAuditContextOverride("admin.ldap.config_updated",
+                                json({{"enabled", cfg.enabled},
+                                      {"server", cfg.server},
+                                      {"tls_mode",
+                                       LdapConfigRepo::tlsModeToString(cfg.tls_mode)}}));
         // Возвращаем сохранённый конфиг (с маскированным паролем).
         json out = ldapConfigToJson(cfg);
         out["configured"] = true;
@@ -4188,16 +4257,13 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             }
         }
 
-        if (au) {
-            auto [actor_id, actor_name] = actorContext(req);
+        {
             json details = {
                 {"ping_ok",  p.ok},
                 {"ran_bind", ran_bind},
             };
             if (ran_bind) details["username"] = probed_username;
-            au->emitAudit("admin.ldap.test",
-                          actor_id, actor_name, req.remote_addr,
-                          details.dump());
+            setAuditContextOverride("admin.ldap.test", std::move(details));
         }
         writeJson(res, 200, out);
     });
@@ -4311,12 +4377,12 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
                       {{"error", channelAclErrName(*e)}});
             return;
         }
-        au->emitAudit("admin.user.channel_grant_set", actor_id, actor_name,
-                      req.remote_addr,
-                      json({{"target_id", user_id},
-                            {"channel_id", channel_id},
-                            {"permission",
-                             liveqx::auth::channelPermissionName(*perm)}}).dump());
+        setAuditContextOverride("admin.user.channel_grant_set",
+                                json({{"target_id", user_id},
+                                      {"channel_id", channel_id},
+                                      {"permission",
+                                       liveqx::auth::channelPermissionName(*perm)}}),
+                                "user", std::to_string(user_id));
         writeJson(res, 200, {
             {"user_id",    user_id},
             {"channel_id", channel_id},
@@ -4349,11 +4415,10 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             writeJson(res, 404, {{"error", "grant_not_found"}});
             return;
         }
-        auto [actor_id, actor_name] = actorContext(req);
-        au->emitAudit("admin.user.channel_grant_removed",
-                      actor_id, actor_name, req.remote_addr,
-                      json({{"target_id", user_id},
-                            {"channel_id", channel_id}}).dump());
+        setAuditContextOverride("admin.user.channel_grant_removed",
+                                json({{"target_id", user_id},
+                                      {"channel_id", channel_id}}),
+                                "user", std::to_string(user_id));
         writeJson(res, 200, {{"removed", true},
                               {"user_id", user_id},
                               {"channel_id", channel_id}});
@@ -4504,16 +4569,12 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             writeJson(res, 500, {{"error", "save_failed"}});
             return;
         }
-        if (au) {
-            auto [actor_id, actor_name] = actorContext(req);
-            au->emitAudit("admin.smtp.config_updated", actor_id, actor_name,
-                          req.remote_addr,
-                          json({{"server",     cfg.server},
-                                {"port",       cfg.port},
-                                {"security",
-                                  SmtpConfigRepo::securityToString(cfg.security)},
-                                {"enabled",    cfg.enabled}}).dump());
-        }
+        setAuditContextOverride("admin.smtp.config_updated",
+                                json({{"server",     cfg.server},
+                                      {"port",       cfg.port},
+                                      {"security",
+                                        SmtpConfigRepo::securityToString(cfg.security)},
+                                      {"enabled",    cfg.enabled}}));
         // Re-load чтобы вернуть persisted state (round-trip через БД).
         auto fresh = sr->load().value_or(cfg);
         writeJson(res, 200, smtpConfigToJson(fresh));
@@ -4612,14 +4673,10 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         out["latency_ms"] = r.latency_ms;
         if (!r.ok) out["error"] = r.error;
 
-        if (au) {
-            auto [actor_id, actor_name] = actorContext(req);
-            au->emitAudit("admin.smtp.test", actor_id, actor_name,
-                          req.remote_addr,
-                          json({{"to", to},
-                                {"ok", r.ok},
-                                {"server", cfg.server}}).dump());
-        }
+        setAuditContextOverride("admin.smtp.test",
+                                json({{"to", to},
+                                      {"ok", r.ok},
+                                      {"server", cfg.server}}));
         writeJson(res, 200, out);
     });
 
@@ -4756,15 +4813,11 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         // новую серверную TZ. Каналы с explicit channel_timezone игнорируют.
         mgr.notifyServerTimezoneChanged();
 
-        auto [actor_id, actor_name] = actorContext(req);
-        if (au) {
-            au->emitAudit("admin.system.time_updated",
-                          actor_id, actor_name, req.remote_addr,
-                          json({{"source",          timeSourceToString(cfg.source)},
-                                {"server_timezone", cfg.server_timezone},
-                                {"ntp_enabled",     cfg.ntp.enabled},
-                                {"manual_offset_ms",cfg.manual.offset_ms}}).dump());
-        }
+        setAuditContextOverride("admin.system.time_updated",
+                                json({{"source",          timeSourceToString(cfg.source)},
+                                      {"server_timezone", cfg.server_timezone},
+                                      {"ntp_enabled",     cfg.ntp.enabled},
+                                      {"manual_offset_ms",cfg.manual.offset_ms}}));
         json out;
         out["config"] = timeConfigToJson(cfg);
         writeJson(res, 200, out);
@@ -4922,10 +4975,16 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         }
         std::stringstream ss;
         ss << f.rdbuf();
+        const auto pem = ss.str();
         res.status = 200;
         res.set_header("Content-Disposition",
                        "attachment; filename=\"liveqx-ca.pem\"");
-        res.set_content(ss.str(), "application/x-pem-file");
+        // Log the CA-bundle download even though it's a GET — enterprise
+        // audit needs a trail of who pulled the trust anchor. Override
+        // opts this specific read path into the middleware.
+        setAuditContextOverride("tls.ca_export",
+                                json({{"bytes", pem.size()}}));
+        res.set_content(pem, "application/x-pem-file");
     });
 
     s.Post("/api/tls/regenerate-server",
@@ -4969,16 +5028,12 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         auto info = liveqx::tls::readCertInfo(srv.cert_path);
         if (!info.subject.empty()) out["server"] = certInfoToJson(info);
 
-        if (au) {
-            auto [actor_id, actor_name] = actorContext(req);
-            au->emitAudit("tls.regenerate", actor_id, actor_name,
-                          req.remote_addr,
-                          json({{"san_dns", sans.dns_names},
-                                {"san_ip_v4", sans.ip_v4},
-                                {"san_ip_v6", sans.ip_v6},
-                                {"fingerprint_sha256", srv.fingerprint_sha256},
-                                {"not_after_unix", srv.not_after_unix}}).dump());
-        }
+        setAuditContextOverride("tls.regenerate",
+                                json({{"san_dns", sans.dns_names},
+                                      {"san_ip_v4", sans.ip_v4},
+                                      {"san_ip_v6", sans.ip_v6},
+                                      {"fingerprint_sha256", srv.fingerprint_sha256},
+                                      {"not_after_unix", srv.not_after_unix}}));
 
         writeJson(res, 200, out);
 
@@ -5123,14 +5178,10 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             out["not_after_unix"]       = info.not_after_unix;
         }
 
-        if (au) {
-            auto [actor_id, actor_name] = actorContext(req);
-            au->emitAudit("tls.import", actor_id, actor_name,
-                          req.remote_addr,
-                          json({{"ca_imported", !ca_pem.empty()},
-                                {"fingerprint_sha256", info.fingerprint_sha256},
-                                {"not_after_unix", info.not_after_unix}}).dump());
-        }
+        setAuditContextOverride("tls.import",
+                                json({{"ca_imported", !ca_pem.empty()},
+                                      {"fingerprint_sha256", info.fingerprint_sha256},
+                                      {"not_after_unix", info.not_after_unix}}));
 
         writeJson(res, 200, out);
 
@@ -5142,23 +5193,6 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         }
     });
 
-    // Audit-only event for /api/tls/ca-bundle access. Emitted lazily via
-    // post_routing_handler so we don't clutter every endpoint above with
-    // duplicate audit calls. Only the CA-bundle GET is captured because
-    // /api/tls/info reads small metadata that is not by itself sensitive.
-    if (au) {
-        s.set_post_routing_handler(
-            [au, actorContext](const httplib::Request& req,
-                               const httplib::Response& res) {
-                if (req.method != "GET" || req.path != "/api/tls/ca-bundle") return;
-                if (res.status / 100 != 2) return;
-                auto [actor_id, actor_name] = actorContext(req);
-                au->emitAudit("tls.ca_export", actor_id, actor_name,
-                              req.remote_addr,
-                              json({{"bytes", res.body.size()}}).dump());
-            });
-    }
-
     // ── RBAC pre-handler (commit 24/24) ───────────────────────────────
     //
     // Если main.cpp передал rbac — регистрируем правила и ставим pre-
@@ -5169,6 +5203,10 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     if (auto* rbac = impl_->rbac) {
         registerRbacRules(*rbac);
         installRbacPreHandler(s, *rbac, impl_->audit, impl_->audit_rate);
+    } else if (impl_->audit) {
+        // No RBAC but audit is on — still need a pre-handler to reset
+        // g_audit_ctx per request so the post-handler can emit rows.
+        installAuditPreHandler(s, impl_->audit);
     }
     if (impl_->audit) {
         installAuditPostHandler(s, impl_->auth, impl_->audit, impl_->events);

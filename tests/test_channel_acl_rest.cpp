@@ -19,9 +19,13 @@
 
 #include "api/ChannelManager.h"
 #include "api/ControlApi.h"
+#include "audit/AuditDb.h"
+#include "audit/AuditLogger.h"
+#include "audit/AuditTypes.h"
 #include "auth/AuthDb.h"
 #include "auth/AuthService.h"
 #include "auth/JwtIssuer.h"
+#include "auth/MasterKey.h"
 #include "auth/PasswordHasher.h"
 
 namespace {
@@ -40,17 +44,30 @@ int nextPort() {
 
 struct AclRestFixture {
     std::filesystem::path                              dbpath;
+    std::filesystem::path                              keypath;
+    std::filesystem::path                              audit_dbpath;
+    std::filesystem::path                              audit_emerg_path;
     std::unique_ptr<liveqx::auth::AuthDb>      db;
     std::unique_ptr<liveqx::auth::JwtIssuer>   jwt;
     std::unique_ptr<liveqx::auth::AuthService> svc;
+    std::unique_ptr<liveqx::auth::MasterKey>   mk;
+    std::unique_ptr<liveqx::audit::AuditDb>    audit_db;
+    std::unique_ptr<liveqx::audit::AuditLogger> audit_logger;
     ChannelManager                                     manager;
     std::unique_ptr<ControlApi>                        api;
     int                                                port;
 
     explicit AclRestFixture(int p) : manager(nullptr), port(p) {
-        dbpath = std::filesystem::temp_directory_path() /
-            ("acl_rest_test_" + std::to_string(p) + ".db");
+        const auto base = std::filesystem::temp_directory_path() /
+            ("acl_rest_test_" + std::to_string(p));
+        dbpath           = base.string() + ".db";
+        keypath          = base.string() + ".key";
+        audit_dbpath     = base.string() + ".audit.db";
+        audit_emerg_path = base.string() + ".audit-emergency.jsonl";
         std::filesystem::remove(dbpath);
+        std::filesystem::remove(keypath);
+        std::filesystem::remove(audit_dbpath);
+        std::filesystem::remove(audit_emerg_path);
 
         db  = std::make_unique<liveqx::auth::AuthDb>(dbpath);
         EXPECT_TRUE(db->open());
@@ -62,11 +79,33 @@ struct AclRestFixture {
                 return std::vector<liveqx::auth::ChannelGrant>{};
             });
 
+        mk = std::make_unique<liveqx::auth::MasterKey>(keypath.string());
+        EXPECT_TRUE(mk->load());
+        audit_db = std::make_unique<liveqx::audit::AuditDb>(audit_dbpath, mk.get());
+        EXPECT_TRUE(audit_db->open());
+        audit_logger = std::make_unique<liveqx::audit::AuditLogger>(
+            audit_db.get(), audit_emerg_path);
+        audit_logger->start();
+
         api = std::make_unique<ControlApi>(
             port, manager,
             /*metrics=*/nullptr, LivezOptions{},
             /*gateways=*/nullptr,
-            svc.get());
+            svc.get(),
+            /*ldap_repo=*/nullptr,
+            /*smtp_repo=*/nullptr,
+            /*rbac=*/nullptr,
+            /*events=*/nullptr,
+            /*preview=*/nullptr,
+            /*stress=*/nullptr,
+            /*plugins=*/nullptr,
+            mk.get(),
+            /*mounts=*/nullptr,
+            TlsBindings{},
+            /*time_repo=*/nullptr,
+            /*time_src=*/nullptr,
+            /*sntp=*/nullptr,
+            audit_logger.get());
         api->start();
         waitListening(port);
     }
@@ -74,6 +113,10 @@ struct AclRestFixture {
     ~AclRestFixture() {
         api->stop();
         api.reset();
+        if (audit_logger) audit_logger->stop();
+        audit_logger.reset();
+        audit_db.reset();
+        mk.reset();
         svc.reset();
         jwt.reset();
         db.reset();
@@ -81,6 +124,11 @@ struct AclRestFixture {
         std::filesystem::remove(dbpath, ec);
         std::filesystem::remove(dbpath.string() + "-wal", ec);
         std::filesystem::remove(dbpath.string() + "-shm", ec);
+        std::filesystem::remove(keypath, ec);
+        std::filesystem::remove(audit_dbpath, ec);
+        std::filesystem::remove(audit_dbpath.string() + "-wal", ec);
+        std::filesystem::remove(audit_dbpath.string() + "-shm", ec);
+        std::filesystem::remove(audit_emerg_path, ec);
     }
 
     static void waitListening(int port) {
@@ -330,14 +378,15 @@ TEST(ChannelAclRest, AuditEventsForGrantSetAndRemoved) {
             json({{"permission","operate"}}).dump(), "application/json");
     cli.Delete(("/api/auth/users/" + std::to_string(uid) + "/channels/55").c_str());
 
-    liveqx::auth::AuditFilter af;
-    af.event = "admin.user.channel_grant_set";
-    af.limit = 16;
-    auto set_events = f.db->listAuditEvents(af);
+    f.audit_logger->flushForTesting();
+    liveqx::audit::AuditFilter af;
+    af.action = "admin.user.channel_grant_set";
+    af.limit  = 16;
+    auto set_events = f.audit_db->list(af);
     EXPECT_FALSE(set_events.empty());
 
-    af.event = "admin.user.channel_grant_removed";
-    auto rm_events = f.db->listAuditEvents(af);
+    af.action = "admin.user.channel_grant_removed";
+    auto rm_events = f.audit_db->list(af);
     EXPECT_FALSE(rm_events.empty());
 }
 

@@ -15,6 +15,9 @@
 
 #include "api/ChannelManager.h"
 #include "api/ControlApi.h"
+#include "audit/AuditDb.h"
+#include "audit/AuditLogger.h"
+#include "audit/AuditTypes.h"
 #include "auth/AuthDb.h"
 #include "auth/AuthService.h"
 #include "auth/JwtIssuer.h"
@@ -38,11 +41,15 @@ int nextPort() {
 struct LdapCfgRestFixture {
     std::filesystem::path                                  dbpath;
     std::filesystem::path                                  keypath;
+    std::filesystem::path                                  audit_dbpath;
+    std::filesystem::path                                  audit_emerg_path;
     std::unique_ptr<liveqx::auth::AuthDb>          db;
     std::unique_ptr<liveqx::auth::JwtIssuer>       jwt;
     std::unique_ptr<liveqx::auth::AuthService>     svc;
     std::unique_ptr<liveqx::auth::MasterKey>       mk;
     std::unique_ptr<liveqx::auth::LdapConfigRepo>  repo;
+    std::unique_ptr<liveqx::audit::AuditDb>        audit_db;
+    std::unique_ptr<liveqx::audit::AuditLogger>    audit_logger;
     ChannelManager                                         manager;
     std::unique_ptr<ControlApi>                            api;
     int                                                    port;
@@ -50,10 +57,14 @@ struct LdapCfgRestFixture {
     explicit LdapCfgRestFixture(int p) : manager(nullptr), port(p) {
         const auto base = std::filesystem::temp_directory_path() /
             ("ldap_cfg_rest_" + std::to_string(p));
-        dbpath  = base.string() + ".db";
-        keypath = base.string() + ".key";
+        dbpath          = base.string() + ".db";
+        keypath         = base.string() + ".key";
+        audit_dbpath    = base.string() + ".audit.db";
+        audit_emerg_path= base.string() + ".audit-emergency.jsonl";
         std::filesystem::remove(dbpath);
         std::filesystem::remove(keypath);
+        std::filesystem::remove(audit_dbpath);
+        std::filesystem::remove(audit_emerg_path);
 
         db  = std::make_unique<liveqx::auth::AuthDb>(dbpath);
         EXPECT_TRUE(db->open());
@@ -65,12 +76,31 @@ struct LdapCfgRestFixture {
         EXPECT_TRUE(mk->load());
         repo = std::make_unique<liveqx::auth::LdapConfigRepo>(*db, *mk);
 
+        audit_db = std::make_unique<liveqx::audit::AuditDb>(audit_dbpath, mk.get());
+        EXPECT_TRUE(audit_db->open());
+        audit_logger = std::make_unique<liveqx::audit::AuditLogger>(
+            audit_db.get(), audit_emerg_path);
+        audit_logger->start();
+
         api = std::make_unique<ControlApi>(
             port, manager,
             /*metrics=*/nullptr, LivezOptions{},
             /*gateways=*/nullptr,
             svc.get(),
-            repo.get());
+            repo.get(),
+            /*smtp_repo=*/nullptr,
+            /*rbac=*/nullptr,
+            /*events=*/nullptr,
+            /*preview=*/nullptr,
+            /*stress=*/nullptr,
+            /*plugins=*/nullptr,
+            mk.get(),
+            /*mounts=*/nullptr,
+            TlsBindings{},
+            /*time_repo=*/nullptr,
+            /*time_src=*/nullptr,
+            /*sntp=*/nullptr,
+            audit_logger.get());
         api->start();
         waitListening(port);
     }
@@ -78,6 +108,9 @@ struct LdapCfgRestFixture {
     ~LdapCfgRestFixture() {
         api->stop();
         api.reset();
+        if (audit_logger) audit_logger->stop();
+        audit_logger.reset();
+        audit_db.reset();
         repo.reset();
         mk.reset();
         svc.reset();
@@ -88,6 +121,10 @@ struct LdapCfgRestFixture {
         std::filesystem::remove(dbpath.string() + "-wal", ec);
         std::filesystem::remove(dbpath.string() + "-shm", ec);
         std::filesystem::remove(keypath, ec);
+        std::filesystem::remove(audit_dbpath, ec);
+        std::filesystem::remove(audit_dbpath.string() + "-wal", ec);
+        std::filesystem::remove(audit_dbpath.string() + "-shm", ec);
+        std::filesystem::remove(audit_emerg_path, ec);
     }
 
     static void waitListening(int port) {
@@ -531,10 +568,11 @@ TEST(LdapTestEndpoint, AuditEventEmitted) {
     ASSERT_TRUE(r);
     ASSERT_EQ(r->status, 200) << r->body;
 
-    liveqx::auth::AuditFilter af;
-    af.event = "admin.ldap.test";
-    af.limit = 16;
-    auto events = f.db->listAuditEvents(af);
+    f.audit_logger->flushForTesting();
+    liveqx::audit::AuditFilter af;
+    af.action = "admin.ldap.test";
+    af.limit  = 16;
+    auto events = f.audit_db->list(af);
     ASSERT_FALSE(events.empty());
     bool found = false;
     for (const auto& e : events) {

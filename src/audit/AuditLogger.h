@@ -94,6 +94,12 @@ public:
 
     AuditLoggerStats stats() const;
 
+    // Testing hook — synchronously drain the queue and wait for any
+    // in-flight batch to finish. Tests use this before asserting that an
+    // event landed in audit.db so they don't race the writer thread.
+    // Not for production code; production is fire-and-forget by design.
+    void flushForTesting();
+
 private:
     static constexpr std::size_t kBacklogSoftCap = 5000;
     static constexpr std::size_t kBacklogHardCap = 20000;
@@ -123,6 +129,10 @@ private:
     // reopened on error.
     std::mutex                emergency_mu_;
     std::ofstream             emergency_stream_;
+
+    // Bumped by the writer thread around drainBatch so flushForTesting
+    // can tell "queue empty" from "queue empty but batch still landing".
+    std::atomic<int>          in_flight_batches_{0};
 
     mutable std::atomic<std::uint64_t> stat_enqueued_        {0};
     mutable std::atomic<std::uint64_t> stat_written_db_      {0};

@@ -147,8 +147,27 @@ void AuditLogger::writerLoop() {
             }
         }
         if (batch.empty()) continue;
+        in_flight_batches_.fetch_add(1, std::memory_order_acq_rel);
         drainBatch(batch);
         batch.clear();
+        in_flight_batches_.fetch_sub(1, std::memory_order_acq_rel);
+    }
+}
+
+void AuditLogger::flushForTesting() {
+    using namespace std::chrono;
+    const auto deadline = steady_clock::now() + seconds(5);
+    while (steady_clock::now() < deadline) {
+        {
+            std::lock_guard<std::mutex> lk(queue_mu_);
+            queue_cv_.notify_one();
+        }
+        std::this_thread::sleep_for(milliseconds(10));
+        std::lock_guard<std::mutex> lk(queue_mu_);
+        if (queue_.empty() &&
+            in_flight_batches_.load(std::memory_order_acquire) == 0) {
+            return;
+        }
     }
 }
 
