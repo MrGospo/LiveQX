@@ -86,4 +86,71 @@ std::string buildAuditDetailsFromBody(const std::string& body,
     return dumped;
 }
 
+namespace {
+
+// True if either input is not an object — in that case jsonDiff should
+// wrap the pair as a leaf rather than recursing.
+bool bothAreObjects(const nlohmann::json& a, const nlohmann::json& b) {
+    return a.is_object() && b.is_object();
+}
+
+// Wrap a differing value pair as an audit-style leaf. Redacts values
+// under sensitive keys so a password change surfaces as an event but
+// the actual old/new values never touch the audit row.
+nlohmann::json makeLeaf(const std::string& key,
+                        const nlohmann::json& before,
+                        const nlohmann::json& after) {
+    nlohmann::json leaf = nlohmann::json::object();
+    if (isSensitiveKey(key)) {
+        leaf["before"] = "[REDACTED]";
+        leaf["after"]  = "[REDACTED]";
+    } else {
+        leaf["before"] = before;
+        leaf["after"]  = after;
+    }
+    return leaf;
+}
+
+nlohmann::json diffImpl(const nlohmann::json& before,
+                        const nlohmann::json& after,
+                        const std::unordered_set<std::string>& skip_keys) {
+    nlohmann::json out = nlohmann::json::object();
+    if (!bothAreObjects(before, after)) return out;
+
+    // Union of keys — a missing side is represented as JSON null so the
+    // caller sees a real add/remove instead of a silent skip.
+    for (auto it = before.begin(); it != before.end(); ++it) {
+        const std::string& k = it.key();
+        if (skip_keys.count(k)) continue;
+        const auto& b = it.value();
+        if (after.contains(k)) {
+            const auto& a = after.at(k);
+            if (bothAreObjects(b, a)) {
+                auto sub = diffImpl(b, a, skip_keys);
+                if (!sub.empty()) out[k] = std::move(sub);
+            } else if (b != a) {
+                out[k] = makeLeaf(k, b, a);
+            }
+        } else {
+            out[k] = makeLeaf(k, b, nlohmann::json());
+        }
+    }
+    for (auto it = after.begin(); it != after.end(); ++it) {
+        const std::string& k = it.key();
+        if (skip_keys.count(k)) continue;
+        if (!before.contains(k)) {
+            out[k] = makeLeaf(k, nlohmann::json(), it.value());
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+nlohmann::json jsonDiff(const nlohmann::json& before,
+                        const nlohmann::json& after,
+                        const std::unordered_set<std::string>& skip_keys) {
+    return diffImpl(before, after, skip_keys);
+}
+
 }  // namespace liveqx::audit

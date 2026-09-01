@@ -10,12 +10,14 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 
 #include "audit/AuditPayload.h"
 
 using liveqx::audit::buildAuditDetailsFromBody;
+using liveqx::audit::jsonDiff;
 using liveqx::audit::redactSensitiveKeys;
 using nlohmann::json;
 
@@ -112,4 +114,104 @@ TEST(AuditPayload, RedactInPlaceLeavesNonSecretUnchanged) {
     EXPECT_EQ(v["user"], "root");
     EXPECT_EQ(v["secret"], "[REDACTED]");
     EXPECT_EQ(v["nested"]["token"], "[REDACTED]");
+}
+
+// ── jsonDiff ──────────────────────────────────────────────────────────
+// Pins the shape audit rows will store for PATCH before/after snapshots.
+// Anything that "surprises the SIEM" here is a regression — the format
+// is what downstream detection rules match on.
+
+TEST(AuditPayload, DiffEqualObjectsReturnsEmpty) {
+    json a = {{"bitrate", 8000000}, {"preset", "veryfast"}};
+    EXPECT_TRUE(jsonDiff(a, a).empty());
+}
+
+TEST(AuditPayload, DiffScalarChangeWrapsAsBeforeAfter) {
+    json b = {{"bitrate", 8000000}, {"preset", "veryfast"}};
+    json a = {{"bitrate", 6000000}, {"preset", "veryfast"}};
+    auto d = jsonDiff(b, a);
+    EXPECT_EQ(d.size(), 1u);
+    EXPECT_EQ(d["bitrate"]["before"], 8000000);
+    EXPECT_EQ(d["bitrate"]["after"],  6000000);
+    EXPECT_FALSE(d.contains("preset"));
+}
+
+TEST(AuditPayload, DiffNestedObjectPreservesStructure) {
+    json b = {{"mpegts", {{"service_name","old"},{"service_id",1}}}};
+    json a = {{"mpegts", {{"service_name","new"},{"service_id",1}}}};
+    auto d = jsonDiff(b, a);
+    ASSERT_TRUE(d.contains("mpegts"));
+    EXPECT_EQ(d["mpegts"]["service_name"]["before"], "old");
+    EXPECT_EQ(d["mpegts"]["service_name"]["after"],  "new");
+    EXPECT_FALSE(d["mpegts"].contains("service_id"));
+}
+
+TEST(AuditPayload, DiffAddedAndRemovedKeysShowNullOnMissingSide) {
+    json b = {{"gone", "x"}};
+    json a = {{"added", 42}};
+    auto d = jsonDiff(b, a);
+    EXPECT_EQ(d["gone"]["before"], "x");
+    EXPECT_TRUE(d["gone"]["after"].is_null());
+    EXPECT_TRUE(d["added"]["before"].is_null());
+    EXPECT_EQ(d["added"]["after"], 42);
+}
+
+TEST(AuditPayload, DiffArraysComparedAsOpaqueValue) {
+    // Order matters — [1,2] and [2,1] must diff. Element-level shape
+    // is intentionally not surfaced because outputs[] order is meaningful.
+    json b = {{"outputs", {1, 2}}};
+    json a = {{"outputs", {2, 1}}};
+    auto d = jsonDiff(b, a);
+    EXPECT_EQ(d["outputs"]["before"], (json{1, 2}));
+    EXPECT_EQ(d["outputs"]["after"],  (json{2, 1}));
+}
+
+TEST(AuditPayload, DiffSkipKeysOmitsAtEveryDepth) {
+    json b = {
+        {"bitrate", 8000000},
+        {"state", "running"},
+        {"mpegts", {{"service_name","a"}, {"state","x"}}},
+    };
+    json a = {
+        {"bitrate", 6000000},
+        {"state", "stopped"},
+        {"mpegts", {{"service_name","b"}, {"state","y"}}},
+    };
+    std::unordered_set<std::string> skip{"state"};
+    auto d = jsonDiff(b, a, skip);
+    EXPECT_TRUE(d.contains("bitrate"));
+    EXPECT_FALSE(d.contains("state"));
+    ASSERT_TRUE(d.contains("mpegts"));
+    EXPECT_TRUE(d["mpegts"].contains("service_name"));
+    EXPECT_FALSE(d["mpegts"].contains("state"));
+}
+
+TEST(AuditPayload, DiffRedactsSensitiveKeys) {
+    // password/token/etc. must never surface their real before/after
+    // values — the change is auditable but the value stays hidden.
+    json b = {{"password", "hunter2"}, {"token", "t1"}};
+    json a = {{"password", "hunter3"}, {"token", "t2"}};
+    auto d = jsonDiff(b, a);
+    EXPECT_EQ(d["password"]["before"], "[REDACTED]");
+    EXPECT_EQ(d["password"]["after"],  "[REDACTED]");
+    EXPECT_EQ(d["token"]["before"],    "[REDACTED]");
+    EXPECT_EQ(d["token"]["after"],     "[REDACTED]");
+}
+
+TEST(AuditPayload, DiffOnNonObjectInputsReturnsEmpty) {
+    // Contract: top-level inputs are objects. Anything else is a
+    // programming bug — return {} instead of crashing.
+    EXPECT_TRUE(jsonDiff(json(42), json(43)).empty());
+    EXPECT_TRUE(jsonDiff(json::array(), json::array({1})).empty());
+    EXPECT_TRUE(jsonDiff(json(nullptr), json::object()).empty());
+}
+
+TEST(AuditPayload, DiffNestedObjectAllUnchangedDropsBranch) {
+    // If a nested object has no changed leaves, its key must be
+    // completely absent — not left as an empty {}.
+    json b = {{"mpegts", {{"service_name","a"}}}, {"preset","x"}};
+    json a = {{"mpegts", {{"service_name","a"}}}, {"preset","y"}};
+    auto d = jsonDiff(b, a);
+    EXPECT_FALSE(d.contains("mpegts"));
+    EXPECT_TRUE(d.contains("preset"));
 }

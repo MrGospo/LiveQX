@@ -16,6 +16,7 @@
 // AuditDb. Keep the sensitive-key list here canonical.
 
 #include <string>
+#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 
@@ -30,5 +31,21 @@ void redactSensitiveKeys(nlohmann::json& v);
 // Return value is a valid JSON string, never empty ("{}" if nothing to say).
 std::string buildAuditDetailsFromBody(const std::string& body,
                                       const std::string& content_type);
+
+// Recursive diff for PATCH-style audit details. Produces an object that
+// mirrors the input structure but only contains keys whose value differs.
+// Scalar/array leaves are wrapped as {"before": v, "after": v}. Nested
+// objects are recursed into so a deep change looks like
+//   {"mpegts": {"service_name": {"before":"a", "after":"b"}}}.
+// Arrays are compared as opaque values (no per-element diff) — good
+// enough for config lists like outputs[] where order carries meaning.
+// Keys whose name appears in skip_keys are omitted at every level; pass
+// runtime/status fields here so the diff only carries config drift.
+// Sensitive keys are redacted automatically — jsonDiff never leaks a
+// secret's before/after value into the audit trail.
+// Returns {} if nothing changed after skipping and redacting.
+nlohmann::json jsonDiff(const nlohmann::json& before,
+                        const nlohmann::json& after,
+                        const std::unordered_set<std::string>& skip_keys = {});
 
 }  // namespace liveqx::audit

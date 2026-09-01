@@ -1386,6 +1386,9 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
                 "name is immutable; recreate the channel to rename"}});
             return;
         }
+        // Before-snapshot for audit diff. Taken before the mutation so a
+        // failed updateConfig doesn't corrupt the paired after-snapshot.
+        json before = mgr.statusJson(id);
         const auto r = mgr.updateConfig(id, patch);
         if (r != R::Ok) { writeError(res, r); return; }
         auto [uid, uname] = channelActorOf(req);
@@ -1398,9 +1401,24 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             for (auto it = patch.begin(); it != patch.end(); ++it)
                 keys.push_back(it.key());
         }
+        json after = mgr.statusJson(id);
+        // Runtime-only fields from ChannelInstance::status(). If any of
+        // these ever "changes" in the audit trail it means the channel
+        // was momentarily busy, not that the operator reconfigured it.
+        static const std::unordered_set<std::string> kChannelVolatile = {
+            "state", "fps_actual", "frames_dropped", "frames_rendered",
+            "frame_pool_bytes", "srt_connected",
+            "current_clip_index", "current_clip_remaining_sec",
+            // outputs[] carries its own driver runtime (queue_drops,
+            // packets_sent) — audited separately via the outputs PATCH.
+            "outputs", "output",
+        };
+        json details = {{"channel_id", id}, {"fields", keys}};
+        json changes = liveqx::audit::jsonDiff(before, after, kChannelVolatile);
+        if (!changes.empty()) details["changes"] = std::move(changes);
         emitChannelAudit("channel.updated", uid, uname, req.remote_addr,
-                         {{"channel_id", id}, {"fields", keys}});
-        writeJson(res, 200, mgr.statusJson(id));
+                         details);
+        writeJson(res, 200, after);
     });
 
     s.Post(R"(/api/channels/(\d+)/play)",
@@ -1596,6 +1614,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         const std::string oid = req.matches[2];
         json body;
         if (!parseJsonBody(req, res, body)) return;
+        json before = mgr.outputStatusJson(id, oid);
         const auto r = mgr.patchOutput(id, oid, body);
         if (r != R::Ok) { writeError(res, r); return; }
         auto [uid, uname] = channelActorOf(req);
@@ -1605,10 +1624,22 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             for (auto it = body.begin(); it != body.end(); ++it)
                 keys.push_back(it.key());
         }
+        json after = mgr.outputStatusJson(id, oid);
+        // Per-driver runtime counters — these move on their own between
+        // any two calls to outputStatusJson and would drown the config
+        // diff in noise otherwise.
+        static const std::unordered_set<std::string> kOutputVolatile = {
+            "queue_drops", "packets_sent", "bytes_sent",
+            "connected", "healthy", "last_error", "last_error_at",
+            "rtt_ms", "bandwidth_bps", "connection_state",
+        };
+        json details = {{"channel_id", id},
+                        {"output_id", oid},
+                        {"fields", keys}};
+        json changes = liveqx::audit::jsonDiff(before, after, kOutputVolatile);
+        if (!changes.empty()) details["changes"] = std::move(changes);
         emitChannelAudit("output.updated", uid, uname, req.remote_addr,
-                         {{"channel_id", id},
-                          {"output_id", oid},
-                          {"fields", keys}});
+                         details);
         writeJson(res, 200, mgr.outputsJson(id));
     });
 
@@ -2900,6 +2931,11 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         }
         spec->id = id;
 
+        // Before-snapshot for audit diff. null if the id doesn't exist —
+        // updateMount will surface not_found and no diff will be emitted.
+        json before = nlohmann::json();
+        if (auto b = mn->getById(id)) before = mountPublicJson(*b);
+
         const auto [actor_id, actor_name] = mountActorOf(req);
         auto r = mn->updateMount(id, *spec);
         json details = {
@@ -2908,6 +2944,20 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             {"ok",      r.ok},
             {"error",   r.error},
         };
+        if (r.ok) {
+            if (auto a = mn->getById(id)) {
+                json after = mountPublicJson(*a);
+                // Timestamps and the helper's live state move on every
+                // successful updateMount even if the operator changed
+                // nothing meaningful — drop them from the diff.
+                static const std::unordered_set<std::string> kMountVolatile = {
+                    "updated_at", "last_status_at", "active_state",
+                };
+                json changes =
+                    liveqx::audit::jsonDiff(before, after, kMountVolatile);
+                if (!changes.empty()) details["changes"] = std::move(changes);
+            }
+        }
         emitMountAudit(r.ok ? "mounts.update" : "mounts.update_failed",
                        actor_id, actor_name, req.remote_addr, details);
 
