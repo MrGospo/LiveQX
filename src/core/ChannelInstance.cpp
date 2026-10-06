@@ -1388,23 +1388,12 @@ ChannelInstance::OutputResult ChannelInstance::addOutput(const nlohmann::json& b
 }
 
 ChannelInstance::OutputResult
-ChannelInstance::addOutputLocked(const nlohmann::json& body) {
+ChannelInstance::validateOutputBody(const nlohmann::json& body) const {
     if (!body.is_object()) return OutputResult::BadJson;
-
     const std::string oid  = body.value("id",   std::string{});
     const std::string type = body.value("type", std::string{});
     if (oid.empty() || type.empty()) return OutputResult::BadJson;
 
-    // Uniqueness check against current cfg_ outputs.
-    if (cfg_.contains("outputs") && cfg_["outputs"].is_array()) {
-        for (const auto& e : cfg_["outputs"]) {
-            if (e.is_object() && e.value("id", std::string{}) == oid)
-                return OutputResult::DuplicateId;
-        }
-    }
-
-    // Per-type parse validation surfaces shape problems before we touch
-    // the live OutputManager.
     try {
         if (type == "srt") {
             const int port = body.value("port", 9000);
@@ -1422,9 +1411,31 @@ ChannelInstance::addOutputLocked(const nlohmann::json& body) {
             return OutputResult::BadJson;
         }
     } catch (const std::exception& e) {
-        if (logger_) logger_->error("addOutput[id={}]: bad cfg: {}", oid, e.what());
+        if (logger_) logger_->error("output[id={}]: bad cfg: {}", oid, e.what());
         return OutputResult::BadJson;
     }
+    return OutputResult::Ok;
+}
+
+ChannelInstance::OutputResult
+ChannelInstance::addOutputLocked(const nlohmann::json& body, bool commit) {
+    if (!body.is_object()) return OutputResult::BadJson;
+
+    const std::string oid  = body.value("id",   std::string{});
+    const std::string type = body.value("type", std::string{});
+    if (oid.empty() || type.empty()) return OutputResult::BadJson;
+
+    // Uniqueness check against current cfg_ outputs.
+    if (cfg_.contains("outputs") && cfg_["outputs"].is_array()) {
+        for (const auto& e : cfg_["outputs"]) {
+            if (e.is_object() && e.value("id", std::string{}) == oid)
+                return OutputResult::DuplicateId;
+        }
+    }
+
+    // Per-type parse validation surfaces shape problems before we touch
+    // the live OutputManager.
+    if (const auto v = validateOutputBody(body); v != OutputResult::Ok) return v;
 
     // If the channel is running, build + start + register the driver now;
     // a stopped channel just stages the entry into cfg_ for next play().
@@ -1497,6 +1508,8 @@ ChannelInstance::addOutputLocked(const nlohmann::json& body) {
         cfg_["outputs"] = nlohmann::json::array();
     cfg_["outputs"].push_back(body);
 
+    if (!commit) return OutputResult::Ok;
+
     try { persistConfig(); }
     catch (const std::exception& e) {
         if (logger_) logger_->error("addOutput: persistConfig failed: {}", e.what());
@@ -1521,7 +1534,7 @@ ChannelInstance::removeOutput(const std::string& output_id) {
 }
 
 ChannelInstance::OutputResult
-ChannelInstance::removeOutputLocked(const std::string& output_id) {
+ChannelInstance::removeOutputLocked(const std::string& output_id, bool commit) {
     if (output_id.empty()) return OutputResult::NotFound;
 
     if (!cfg_.contains("outputs") || !cfg_["outputs"].is_array())
@@ -1570,6 +1583,8 @@ ChannelInstance::removeOutputLocked(const std::string& output_id) {
 
     arr.erase(arr.begin() + idx);
 
+    if (!commit) return OutputResult::Ok;
+
     try { persistConfig(); }
     catch (const std::exception& e) {
         if (logger_) logger_->error("removeOutput: persistConfig failed: {}", e.what());
@@ -1589,7 +1604,11 @@ ChannelInstance::removeOutputLocked(const std::string& output_id) {
 
 ChannelInstance::OutputResult
 ChannelInstance::patchOutput(const std::string& output_id,
-                              const nlohmann::json& body) {
+                              const nlohmann::json& body,
+                              PatchOutcome* outcome) {
+    const auto set_outcome = [&](PatchOutcome o) { if (outcome) *outcome = o; };
+    set_outcome(PatchOutcome::Rejected);
+
     if (output_id.empty())   return OutputResult::NotFound;
     if (!body.is_object())   return OutputResult::BadJson;
     // The URL id is authoritative — the body may either omit "id" or carry
@@ -1599,19 +1618,103 @@ ChannelInstance::patchOutput(const std::string& output_id,
 
     std::lock_guard<std::mutex> lk(state_mu_);
 
-    auto rm = removeOutputLocked(output_id);
-    if (rm != OutputResult::Ok) return rm;          // NotFound — nothing to patch
+    // Snapshot of the entry being replaced: the rollback source.
+    std::size_t idx = 0;
+    nlohmann::json old_entry;
+    bool found = false;
+    if (cfg_.contains("outputs") && cfg_["outputs"].is_array()) {
+        const auto& arr = cfg_["outputs"];
+        for (std::size_t i = 0; i < arr.size(); ++i) {
+            if (arr[i].is_object()
+                    && arr[i].value("id", std::string{}) == output_id) {
+                idx = i;
+                old_entry = arr[i];
+                found = true;
+                break;
+            }
+        }
+    }
+    if (!found) return OutputResult::NotFound;
 
     auto with_id = body;
     with_id["id"] = output_id;
-    auto add = addOutputLocked(with_id);
-    if (add != OutputResult::Ok && logger_) {
-        // The old driver is gone; the channel is left without that output.
-        // Caller must POST a fresh entry to recover.
-        logger_->warn("patchOutput[id={}]: rebuild failed (code {}); "
-                      "channel left without that output", output_id, int(add));
+
+    // Fast reject: a malformed body must never cost the operator a working
+    // output. Nothing has been touched yet.
+    if (const auto v = validateOutputBody(with_id); v != OutputResult::Ok)
+        return v;
+
+    const std::string old_type = old_entry.value("type", std::string{});
+    const std::string new_type = with_id.value("type", std::string{});
+
+    // Keep the entry at its original position in cfg_["outputs"]; add()
+    // appends, so the new (or restored) entry is rotated back into place.
+    const auto put_back_in_place = [&] {
+        auto* v = cfg_["outputs"].get_ptr<nlohmann::json::array_t*>();
+        if (v && idx < v->size())
+            std::rotate(v->begin() + static_cast<std::ptrdiff_t>(idx),
+                        v->end() - 1, v->end());
+    };
+    const auto publish = [&](const char* state, const std::string& type) {
+        if (!event_bus_) return;
+        event_bus_->publish(
+            liveqx::events::EventType::OutputStateChange, id_,
+            {{"channel_id", id_},
+             {"output_id",  output_id},
+             {"type",       type},
+             {"state",      state}});
+    };
+
+    // The old driver has to release its socket before the new one can bind
+    // (same port / group), so make-before-break is impossible here. The
+    // rollback below is what makes remove+add safe instead.
+    removeOutputLocked(output_id, /*commit=*/false);
+    const auto add = addOutputLocked(with_id, /*commit=*/false);
+
+    if (add == OutputResult::Ok) {
+        put_back_in_place();
+        try { persistConfig(); }
+        catch (const std::exception& e) {
+            if (logger_) logger_->error("patchOutput: persistConfig failed: {}", e.what());
+        }
+        if (logger_) logger_->info("output[id={}] updated (type={})", output_id, new_type);
+        requestStateSave();
+        publish("updated", new_type);
+        set_outcome(PatchOutcome::Applied);
+        return OutputResult::Ok;
     }
-    return add;
+
+    if (logger_) {
+        logger_->error("patchOutput[id={}]: rebuild failed (code {}); "
+                       "restoring the previous output", output_id, int(add));
+    }
+    const auto rb = addOutputLocked(old_entry, /*commit=*/false);
+    if (rb == OutputResult::Ok) {
+        put_back_in_place();
+        // cfg_ is back to its pre-call content and config.json was never
+        // rewritten, so there is nothing to persist.
+        if (logger_) logger_->warn("patchOutput[id={}]: rolled back to the previous output", output_id);
+        publish("update_failed_rolled_back", old_type);
+        set_outcome(PatchOutcome::RolledBack);
+        return add;
+    }
+
+    // The previous output cannot be brought back (its port or interface is
+    // gone). Keep its config entry — config.json still holds it, so a channel
+    // restart rebuilds it — and make the failure loud.
+    auto* v = cfg_["outputs"].get_ptr<nlohmann::json::array_t*>();
+    if (v) {
+        const auto pos = std::min<std::size_t>(idx, v->size());
+        v->insert(v->begin() + static_cast<std::ptrdiff_t>(pos), old_entry);
+    }
+    if (logger_) {
+        logger_->error("patchOutput[id={}]: ROLLBACK FAILED (code {}); the output is "
+                       "down until the channel is restarted", output_id, int(rb));
+    }
+    requestStateSave();
+    publish("update_failed_rollback_failed", old_type);
+    set_outcome(PatchOutcome::RollbackFailed);
+    return OutputResult::RollbackFailed;
 }
 
 OutputHealthSummary ChannelInstance::outputsHealth() const {

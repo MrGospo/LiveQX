@@ -181,6 +181,18 @@ public:
         BuildFailed,     // numa-bound driver instantiation threw
         StartFailed,     // driver->start() returned false on a running channel
         NotFound,        // referenced output id absent (DELETE/PATCH)
+        RollbackFailed,  // PATCH failed AND the previous output could not be
+                         // restored (e.g. its port was taken meanwhile)
+    };
+
+    // How a patchOutput() call ended, for callers that need to report more
+    // than the result code (audit trail, REST error body).
+    enum class PatchOutcome {
+        Applied,         // new output built, started and persisted
+        Rejected,        // body refused up front; nothing was touched
+        RolledBack,      // rebuild failed; the previous output is running again
+        RollbackFailed,  // rebuild failed and the previous output could not be
+                         // restored; its config entry is kept, driver is down
     };
 
     // Add a new output (fix12 c4). Body must be an object {id, type, …}.
@@ -196,14 +208,21 @@ public:
     // success. NotFound when no output with that id is registered.
     OutputResult removeOutput(const std::string& output_id);
 
-    // Replace an output by id (fix12 c6). Implemented as remove+add under
-    // the same lock: the existing driver is evicted and stopped, then a new
-    // driver is built from `body`. URL id wins — body["id"] may be absent
-    // or must match. If the rebuild step fails (BuildFailed/StartFailed),
-    // the channel is left without that output and the caller must POST a
-    // fresh entry to recover.
+    // Replace an output by id (fix12 c6). The new driver is built from
+    // `body` alone, so `type` must be present. URL id wins — body["id"] may
+    // be absent or must match.
+    //
+    // Transactional: the body is validated before anything is touched; the
+    // old driver is then stopped (its port must be released before the new
+    // one can bind) and the new one built and started. If that fails, the
+    // previous output is restored from its saved config entry and the
+    // original error is returned (outcome == RolledBack). Only if the
+    // restore fails too is the output left down (outcome == RollbackFailed,
+    // result RollbackFailed): its config entry stays in cfg_/config.json, so
+    // a channel restart brings it back. Persists once, on success.
     OutputResult patchOutput(const std::string& output_id,
-                              const nlohmann::json& body);
+                              const nlohmann::json& body,
+                              PatchOutcome* outcome = nullptr);
 
     // Snapshot of the current outputs (status()["outputs"] subtree). Always
     // an array; empty when the channel has no outputs yet.
@@ -329,8 +348,13 @@ private:
 
     // Lock-free internals shared by addOutput / removeOutput / patchOutput.
     // Caller must hold state_mu_.
-    OutputResult addOutputLocked(const nlohmann::json& body);
-    OutputResult removeOutputLocked(const std::string& output_id);
+    // `commit == false` suppresses persistence, state-save and events so that
+    // patchOutput() can run remove+add (and a rollback) as one transaction
+    // and publish a single outcome at the end.
+    OutputResult addOutputLocked(const nlohmann::json& body, bool commit = true);
+    OutputResult removeOutputLocked(const std::string& output_id, bool commit = true);
+    // Shape/parser validation of an output body; touches no state.
+    OutputResult validateOutputBody(const nlohmann::json& body) const;
 
     int                   id_   = 0;
     std::string           name_;

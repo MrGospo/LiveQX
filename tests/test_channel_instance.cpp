@@ -1139,18 +1139,120 @@ TEST(ChannelInstancePatchOutput, PatchChangesType) {
     EXPECT_EQ(outs[0]["address"], "239.0.5.6");
 }
 
-TEST(ChannelInstancePatchOutput, PatchWithBadCfgLeavesChannelWithoutOutput) {
-    // Patch validates the new body via the same parser as POST. A bad
-    // body fails with BadJson AFTER the old entry is already removed —
-    // by design the channel is left without that output (caller must
-    // re-POST to recover).
+TEST(ChannelInstancePatchOutput, PatchWithBadBodyKeepsPreviousOutput) {
+    // A body that fails validation is refused before anything is touched:
+    // the existing output must survive untouched (it used to be deleted).
     auto cfg = minimalCfg();
     auto ch = ChannelInstance::build(cfg);
+    ASSERT_TRUE(ch);
+    const auto before = ch->outputsJson();
+    ASSERT_EQ(before.size(), 1u);
+
+    ChannelInstance::PatchOutcome outcome = ChannelInstance::PatchOutcome::Applied;
     ASSERT_EQ(OR::BadJson, ch->patchOutput("default", json{
         // missing "type"
         {"port", 19306}
+    }, &outcome));
+    EXPECT_EQ(outcome, ChannelInstance::PatchOutcome::Rejected);
+    EXPECT_EQ(ch->outputsJson(), before);
+}
+
+TEST(ChannelInstancePatchOutput, PatchWithUnparsableCfgKeepsPreviousOutput) {
+    // Passes the envelope checks but fails the per-type parser (multicast
+    // needs an address). Same guarantee: the old output stays.
+    auto cfg = minimalCfg();
+    auto ch = ChannelInstance::build(cfg);
+    ASSERT_TRUE(ch);
+    const auto before = ch->outputsJson();
+
+    ChannelInstance::PatchOutcome outcome = ChannelInstance::PatchOutcome::Applied;
+    EXPECT_EQ(OR::BadJson, ch->patchOutput("default", json{
+        {"type", "multicast"}, {"port", 6301}
+    }, &outcome));
+    EXPECT_EQ(outcome, ChannelInstance::PatchOutcome::Rejected);
+    EXPECT_EQ(ch->outputsJson(), before);
+}
+
+TEST(ChannelInstancePatchOutput, PatchKeepsOutputPosition) {
+    auto cfg = minimalCfg();
+    cfg["outputs"] = json::array({
+        json{{"id", "a"}, {"type", "srt"}, {"port", 19311}},
+        json{{"id", "b"}, {"type", "srt"}, {"port", 19312}},
+        json{{"id", "c"}, {"type", "srt"}, {"port", 19313}},
+    });
+    auto ch = ChannelInstance::build(cfg);
+    ASSERT_TRUE(ch);
+
+    ChannelInstance::PatchOutcome outcome = ChannelInstance::PatchOutcome::Rejected;
+    ASSERT_EQ(OR::Ok, ch->patchOutput("b", json{
+        {"type", "srt"}, {"port", 19399}
+    }, &outcome));
+    EXPECT_EQ(outcome, ChannelInstance::PatchOutcome::Applied);
+
+    const auto outs = ch->outputsJson();
+    ASSERT_EQ(outs.size(), 3u);
+    EXPECT_EQ(outs[0]["id"], "a");
+    EXPECT_EQ(outs[1]["id"], "b");
+    EXPECT_EQ(outs[1]["port"], 19399);
+    EXPECT_EQ(outs[2]["id"], "c");
+}
+
+TEST(ChannelInstancePatchOutput, RejectedPatchDoesNotRewriteConfigJson) {
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() /
+        ("ch_patchrej_" + std::to_string(::getpid()));
+    fs::remove_all(root);
+    fs::create_directories(root);
+
+    auto cfg = minimalCfg(78);
+    cfg["name"] = "PatchRej";
+    const auto channel_dir = root / "ch78-PatchRej";
+    auto ch = ChannelInstance::build(cfg, channel_dir);
+    ASSERT_TRUE(ch);
+    ASSERT_EQ(OR::Ok, ch->patchOutput("default", json{
+        {"type", "srt"}, {"port", 19410}
     }));
-    EXPECT_TRUE(ch->outputsJson().empty());
+    const auto cfg_path = channel_dir / "config.json";
+    json before = json::parse(std::ifstream(cfg_path));
+
+    EXPECT_EQ(OR::BadJson, ch->patchOutput("default", json{{"port", 19411}}));
+
+    json after = json::parse(std::ifstream(cfg_path));
+    EXPECT_EQ(before, after);
+    EXPECT_EQ(after["outputs"].size(), 1u);
+    EXPECT_EQ(after["outputs"][0]["port"], 19410);
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}
+
+TEST(ChannelInstancePatchOutput, RunningChannelRollsBackWhenNewOutputFailsToStart) {
+    // Running channel: the replacement multicast output cannot start (the
+    // bind address is not an IPv4 literal), so the previous SRT output has
+    // to come back and keep serving.
+    auto cfg = minimalCfg(77);
+    cfg["outputs"] = json::array({
+        json{{"id", "main"}, {"type", "srt"}, {"port", 19577}},
+    });
+    auto ch = ChannelInstance::build(cfg);
+    ASSERT_TRUE(ch);
+    ASSERT_TRUE(ch->play());
+
+    ChannelInstance::PatchOutcome outcome = ChannelInstance::PatchOutcome::Applied;
+    const auto r = ch->patchOutput("main", json{
+        {"type", "multicast"}, {"address", "239.0.5.7"}, {"port", 6302},
+        {"bind_address", "not-an-ip"}
+    }, &outcome);
+    EXPECT_EQ(r, OR::StartFailed);
+    EXPECT_EQ(outcome, ChannelInstance::PatchOutcome::RolledBack);
+
+    const auto outs = ch->outputsJson();
+    ASSERT_EQ(outs.size(), 1u);
+    EXPECT_EQ(outs[0]["id"], "main");
+    EXPECT_EQ(outs[0]["transport"], "srt");
+    EXPECT_EQ(outs[0]["port"], 19577);
+
+    ch->stop();
 }
 
 TEST(ChannelInstancePatchOutput, PatchPersistsConfigJson) {

@@ -36,6 +36,7 @@ const char* channelManagerResultName(Result r) noexcept {
         case Result::OutputBuildFailed: return "output_build_failed";
         case Result::OutputStartFailed: return "output_start_failed";
         case Result::OutputNotFound:    return "output_not_found";
+        case Result::OutputRollbackFailed: return "output_rollback_failed";
     }
     return "unknown";
 }
@@ -63,6 +64,7 @@ ChannelManager::Result mapOutput(OR r) {
         case OR::BuildFailed:  return ChannelManager::Result::OutputBuildFailed;
         case OR::StartFailed:  return ChannelManager::Result::OutputStartFailed;
         case OR::NotFound:     return ChannelManager::Result::OutputNotFound;
+        case OR::RollbackFailed: return ChannelManager::Result::OutputRollbackFailed;
     }
     return ChannelManager::Result::BadJson;
 }
@@ -383,11 +385,12 @@ Result ChannelManager::removeOutput(int id, const std::string& output_id) {
 }
 
 Result ChannelManager::patchOutput(int id, const std::string& output_id,
-                                    const json& body) {
+                                    const json& body,
+                                    ChannelInstance::PatchOutcome* outcome) {
     std::shared_lock lk(mu_);
     auto* ch = findLocked(id);
     if (!ch) return Result::NotFound;
-    return mapOutput(ch->patchOutput(output_id, body));
+    return mapOutput(ch->patchOutput(output_id, body, outcome));
 }
 
 json ChannelManager::scheduleJson(int id) const {

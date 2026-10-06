@@ -1837,21 +1837,32 @@ paths:
                 $ref: '#/components/schemas/Error'
     patch:
       tags: [Outputs]
-      summary: Hot-patch output (safe-subset only)
+      summary: Replace output (transactional rebuild)
       description: |
-        Patch только safe-subset полей (зависит от типа). Например:
+        Пересоздаёт выход из тела запроса. Это **замена**, а не частичный
+        patch: драйвер собирается только из переданных полей, поэтому `type`
+        обязателен (и должен быть полным набором полей выхода). `id` в теле
+        либо отсутствует, либо совпадает с `{output_id}`. Позиция выхода в
+        списке сохраняется.
 
-        - **srt**: `latency_ms`, `passphrase` (rotation), `stream_id`.
-          Сменить `address`/`port`/`mode` нельзя — нужен delete+add.
-        - **multicast**: `ttl`, `interface`. Сменить `address` — delete+add.
-        - **rtmp**: `reconnect`, `max_b_frames`, `drop_after_disconnect_sec`.
-          Сменить `url` — delete+add.
-        - **hls**: `segment_duration_sec`, `list_size`, `allow_cache`.
-          Сменить `dir` — delete+add.
-        - **ndi**: `source_name`, `group`, `audio`.
+        Старый драйвер приходится остановить до запуска нового (порт или
+        группа должны освободиться), поэтому поток на этом выходе прерывается
+        на секунды. Операция транзакционная:
 
-        Попытка hot-patch unsafe поля → 400 с указанием поля. Полный
-        список mutable полей — docs/MULTI_OUTPUT.md.
+        1. тело проверяется до любых изменений — при ошибке (`bad_json`)
+           старый выход не затрагивается, `outcome = "rejected"`;
+        2. если новый выход не удалось собрать или запустить
+           (`output_build_failed` / `output_start_failed`), прежний выход
+           восстанавливается из сохранённой конфигурации,
+           `outcome = "rolled_back"`; конфигурация на диске не меняется;
+        3. если восстановить прежний выход тоже не удалось
+           (`output_rollback_failed`, `outcome = "rollback_failed"`), его
+           запись остаётся в конфигурации, драйвер не работает до перезапуска
+           канала; публикуется событие `output_state_change` со state
+           `update_failed_rollback_failed`.
+
+        Каждый отказ пишется в журнал действий как `output.update_failed` с
+        полем `outcome`.
       requestBody:
         required: true
         content:

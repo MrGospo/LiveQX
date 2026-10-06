@@ -169,6 +169,7 @@ int statusFor(R r) {
         case R::OutputBuildFailed: return 400;
         case R::OutputStartFailed: return 500;
         case R::OutputNotFound:    return 404;
+        case R::OutputRollbackFailed: return 500;
     }
     return 500;
 }
@@ -1615,8 +1616,27 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         json body;
         if (!parseJsonBody(req, res, body)) return;
         json before = mgr.outputStatusJson(id, oid);
-        const auto r = mgr.patchOutput(id, oid, body);
-        if (r != R::Ok) { writeError(res, r); return; }
+        ChannelInstance::PatchOutcome outcome = ChannelInstance::PatchOutcome::Rejected;
+        const auto r = mgr.patchOutput(id, oid, body, &outcome);
+        if (r != R::Ok) {
+            // A failed update is audited with its outcome: "rolled_back"
+            // means the previous output is running again, "rollback_failed"
+            // means it is down and needs operator attention.
+            using PO = ChannelInstance::PatchOutcome;
+            const char* state = outcome == PO::RolledBack     ? "rolled_back"
+                              : outcome == PO::RollbackFailed ? "rollback_failed"
+                                                              : "rejected";
+            auto [fuid, funame] = channelActorOf(req);
+            emitChannelAudit("output.update_failed", fuid, funame, req.remote_addr,
+                             {{"channel_id", id},
+                              {"output_id",  oid},
+                              {"error",      channelManagerResultName(r)},
+                              {"outcome",    state}});
+            writeJson(res, statusFor(r),
+                      {{"error",   channelManagerResultName(r)},
+                       {"outcome", state}});
+            return;
+        }
         auto [uid, uname] = channelActorOf(req);
         std::vector<std::string> keys;
         if (body.is_object()) {

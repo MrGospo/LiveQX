@@ -11,9 +11,9 @@
 #include <vector>
 #include <nlohmann/json.hpp>
 
+#include "core/ChannelInstance.h"   // ChannelInstance::PatchOutcome (nested enum)
 #include "metrics/ChannelProfiler.h"
 
-class ChannelInstance;
 class Watchdog;
 namespace liveqx::logging { class SqlitePlaybackSink; }
 namespace liveqx::events  { class EventBus; }
@@ -46,6 +46,7 @@ public:
         OutputBuildFailed,      // 400 — driver instantiation/parse threw
         OutputStartFailed,      // 500 — driver->start() returned false
         OutputNotFound,         // 404 — referenced output id absent
+        OutputRollbackFailed,   // 500 — PATCH failed and the old output could not be restored
     };
 
     // channel_root: optional directory under which per-channel folders
@@ -187,8 +188,11 @@ public:
     // Patch (replace) an output (fix12 c6). Body is the new full output cfg.
     // Result mapping: Ok / NotFound (channel) / OutputNotFound /
     // BadJson / OutputBuildFailed / OutputStartFailed.
+    // `outcome` (optional) reports whether a failed PATCH was rolled back;
+    // see ChannelInstance::PatchOutcome.
     Result patchOutput(int id, const std::string& output_id,
-                       const nlohmann::json& body);
+                       const nlohmann::json& body,
+                       ChannelInstance::PatchOutcome* outcome = nullptr);
 
     // ── Watcher (ContentSync) proxies ────────────────────────────────────────
     // Returns null if channel not found OR has no ContentSync.
