@@ -1053,9 +1053,10 @@ function OutputsTab({ ch }: { ch: ChannelStatus }) {
         await addOutput(payload);
         toast(t('outputs.added'), 'success');
       } else if (modalState?.mode === 'edit') {
-        const { id, type: _type, ...patch } = payload;
-        void id; void _type;
-        await patchOutput({ outputId: modalState.out.id, body: patch });
+        // Backend PATCH rebuilds the output from the body alone (remove +
+        // add), so `type` must stay in it — without it the rebuild fails
+        // with bad_json after the old output is already gone.
+        await patchOutput({ outputId: modalState.out.id, body: payload });
         toast(t('outputs.updated'), 'success');
       }
       setModalState(null);
