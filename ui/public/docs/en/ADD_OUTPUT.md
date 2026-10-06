@@ -74,8 +74,12 @@ The web interface form has no NDI type. The server supports the NDI output: it c
 
 In the output's row on the **Outputs** tab:
 
-- **Edit** — opens the same form. On saving, the output is **recreated**: the stream on that output is interrupted for a few seconds. If the new parameters are invalid and the output cannot be rebuilt, the output disappears and you will need to add it again.
-- **Restart** — brings the output up again without changing its settings.
+- **Edit** — opens the same form. On saving, the output is recreated:
+  - **Multicast** is replaced **without a gap in the stream**: the new output starts before the old one stops. If the new one fails to start, the previous one keeps running as before.
+  - **SRT, RTMP, HLS, NDI** hold a port, directory, stream key or name that cannot be used twice, so the stream on that output is interrupted for a few seconds. If the new parameters do not work, the server **restores the previous output** and shows the reason for the error.
+
+  In both cases the settings are not lost. If the previous output cannot be restored (for example, another process has taken its port), the output stays in the configuration and is shown as not working ("Output is down…"), and the event is recorded in the Audit Trail and in the events. Bring it back with the **Restart** button or by restarting the channel.
+- **Restart** — rebuilds the output from its stored configuration. Use it to bring up an output that is not working once the cause is fixed. Multicast without a gap, other types with an interruption of a few seconds.
 - **Delete** — the output is stopped and removed; the action is irreversible.
 
 ## Checking that it works
