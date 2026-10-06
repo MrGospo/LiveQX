@@ -2750,6 +2750,81 @@ export interface paths {
         };
         trace?: never;
     };
+    "/api/channels/{id}/outputs/{output_id}/restart": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Numeric channel id. */
+                id: components["parameters"]["ChannelId"];
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restart output from its stored config
+         * @description Пересобирает выход из сохранённой конфигурации — тот же
+         *     транзакционный путь, что и PATCH (проверка, откат при ошибке,
+         *     запись в журнал действий `output.restarted` / `output.restart_failed`).
+         *     Для multicast замена идёт без перерыва в потоке (новый драйвер
+         *     запускается до остановки старого); для остальных типов поток на
+         *     выходе прерывается на секунды.
+         *
+         *     Это также способ вернуть выход, который остался в конфигурации без
+         *     работающего драйвера после неудачного отката (в списке выходов он
+         *     виден как `state: "down"`).
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Numeric channel id. */
+                    id: components["parameters"]["ChannelId"];
+                    output_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Updated outputs list. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["OutputList"];
+                    };
+                };
+                /** @description Сохранённая конфигурация не прошла проверку или выход не удалось собрать. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+                /** @description Выход не запустился (`output_start_failed`) или не удалось восстановить прежнее состояние (`output_rollback_failed`). Поле `outcome` — `rolled_back` или `rollback_failed`. */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/channels/{id}/outputs/{output_id}/status": {
         parameters: {
             query?: never;

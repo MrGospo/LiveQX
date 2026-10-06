@@ -348,6 +348,8 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
                           rbacChan(RbacRole::Operator, RbacPerm::Operate));
     rbac.registerEndpoint("PATCH /api/channels/{id}/outputs/{oid}",
                           rbacChan(RbacRole::Operator, RbacPerm::Operate));
+    rbac.registerEndpoint("POST /api/channels/{id}/outputs/{oid}/restart",
+                          rbacChan(RbacRole::Operator, RbacPerm::Operate));
     rbac.registerEndpoint("PUT /api/channels/{id}/schedule",
                           rbacChan(RbacRole::Operator, RbacPerm::Operate));
     rbac.registerEndpoint("POST /api/channels/{id}/watcher/rescan",
@@ -1332,6 +1334,29 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         setAuditContextOverride(event, details, "channel", target_id);
     };
 
+    // Shared failure path for output PATCH / restart: audits the attempt with
+    // its outcome ("rejected" — nothing touched, "rolled_back" — the previous
+    // state is intact, "rollback_failed" — the output is down and needs
+    // attention) and answers with the same outcome.
+    auto reportOutputFailure = [channelActorOf, emitChannelAudit]
+        (const httplib::Request& req, httplib::Response& res, int id,
+         const std::string& oid, R r, ChannelInstance::PatchOutcome outcome,
+         std::string_view audit_event) {
+        using PO = ChannelInstance::PatchOutcome;
+        const char* state = outcome == PO::RolledBack     ? "rolled_back"
+                          : outcome == PO::RollbackFailed ? "rollback_failed"
+                                                          : "rejected";
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit(audit_event, uid, uname, req.remote_addr,
+                         {{"channel_id", id},
+                          {"output_id",  oid},
+                          {"error",      channelManagerResultName(r)},
+                          {"outcome",    state}});
+        writeJson(res, statusFor(r),
+                  {{"error",   channelManagerResultName(r)},
+                   {"outcome", state}});
+    };
+
     s.Get("/api/channels", [&mgr](const httplib::Request&, httplib::Response& res) {
         writeJson(res, 200, mgr.listJson());
     });
@@ -1609,7 +1634,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Patch(R"(/api/channels/(\d+)/outputs/([^/]+))",
-            [&mgr, channelActorOf, emitChannelAudit]
+            [&mgr, channelActorOf, emitChannelAudit, reportOutputFailure]
             (const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
         const std::string oid = req.matches[2];
@@ -1619,22 +1644,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         ChannelInstance::PatchOutcome outcome = ChannelInstance::PatchOutcome::Rejected;
         const auto r = mgr.patchOutput(id, oid, body, &outcome);
         if (r != R::Ok) {
-            // A failed update is audited with its outcome: "rolled_back"
-            // means the previous output is running again, "rollback_failed"
-            // means it is down and needs operator attention.
-            using PO = ChannelInstance::PatchOutcome;
-            const char* state = outcome == PO::RolledBack     ? "rolled_back"
-                              : outcome == PO::RollbackFailed ? "rollback_failed"
-                                                              : "rejected";
-            auto [fuid, funame] = channelActorOf(req);
-            emitChannelAudit("output.update_failed", fuid, funame, req.remote_addr,
-                             {{"channel_id", id},
-                              {"output_id",  oid},
-                              {"error",      channelManagerResultName(r)},
-                              {"outcome",    state}});
-            writeJson(res, statusFor(r),
-                      {{"error",   channelManagerResultName(r)},
-                       {"outcome", state}});
+            reportOutputFailure(req, res, id, oid, r, outcome, "output.update_failed");
             return;
         }
         auto [uid, uname] = channelActorOf(req);
@@ -1660,6 +1670,23 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         if (!changes.empty()) details["changes"] = std::move(changes);
         emitChannelAudit("output.updated", uid, uname, req.remote_addr,
                          details);
+        writeJson(res, 200, mgr.outputsJson(id));
+    });
+
+    s.Post(R"(/api/channels/(\d+)/outputs/([^/]+)/restart)",
+           [&mgr, channelActorOf, emitChannelAudit, reportOutputFailure]
+           (const httplib::Request& req, httplib::Response& res) {
+        int id = 0; if (!parseId(req, res, id)) return;
+        const std::string oid = req.matches[2];
+        ChannelInstance::PatchOutcome outcome = ChannelInstance::PatchOutcome::Rejected;
+        const auto r = mgr.restartOutput(id, oid, &outcome);
+        if (r != R::Ok) {
+            reportOutputFailure(req, res, id, oid, r, outcome, "output.restart_failed");
+            return;
+        }
+        auto [uid, uname] = channelActorOf(req);
+        emitChannelAudit("output.restarted", uid, uname, req.remote_addr,
+                         {{"channel_id", id}, {"output_id", oid}});
         writeJson(res, 200, mgr.outputsJson(id));
     });
 

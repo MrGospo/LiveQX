@@ -393,6 +393,14 @@ Result ChannelManager::patchOutput(int id, const std::string& output_id,
     return mapOutput(ch->patchOutput(output_id, body, outcome));
 }
 
+Result ChannelManager::restartOutput(int id, const std::string& output_id,
+                                      ChannelInstance::PatchOutcome* outcome) {
+    std::shared_lock lk(mu_);
+    auto* ch = findLocked(id);
+    if (!ch) return Result::NotFound;
+    return mapOutput(ch->restartOutput(output_id, outcome));
+}
+
 json ChannelManager::scheduleJson(int id) const {
     std::shared_lock lk(mu_);
     auto* ch = findLocked(id);

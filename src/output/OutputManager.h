@@ -49,6 +49,16 @@ public:
     // driver itself stays with the caller.
     bool removeDriver(const std::string& id);
 
+    // Atomically swaps the driver registered under `id` for `driver`: there is
+    // no instant at which the id is missing, so a concurrent send() never
+    // skips the output. The old entry's pump is joined before returning and
+    // its driver is handed back (null if `id` was not registered, in which
+    // case this behaves like addDriver). The caller must stop() the returned
+    // driver to release its socket. `driver` must already be started.
+    std::shared_ptr<IOutput> replaceDriver(
+        const std::string& id, std::shared_ptr<IOutput> driver,
+        std::uint64_t queue_bytes_limit = kDefaultQueueBytesLimit);
+
     // Lookup, returns nullptr if unknown. Used to fetch the driver back
     // for transport-specific hooks (e.g. SrtOutput::onClientConnected).
     std::shared_ptr<IOutput> getDriver(const std::string& id) const;

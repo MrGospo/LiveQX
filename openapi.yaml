@@ -1743,6 +1743,59 @@ paths:
                 $ref: '#/components/schemas/PlaybackLogResponse'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          description: |
+            Новый выход не запустился (`output_start_failed`) либо не удалось
+            ни применить изменение, ни восстановить прежний выход
+            (`output_rollback_failed`). Поле `outcome` — `rolled_back` или
+            `rollback_failed`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/channels/{id}/outputs/{output_id}/restart:
+    parameters:
+      - $ref: '#/components/parameters/ChannelId'
+      - name: output_id
+        in: path
+        required: true
+        schema: {type: string}
+    post:
+      tags: [Outputs]
+      summary: Restart output from its stored config
+      description: |
+        Пересобирает выход из сохранённой конфигурации — тот же
+        транзакционный путь, что и PATCH (проверка, откат при ошибке,
+        запись в журнал действий `output.restarted` / `output.restart_failed`).
+        Для multicast замена идёт без перерыва в потоке (новый драйвер
+        запускается до остановки старого); для остальных типов поток на
+        выходе прерывается на секунды.
+
+        Это также способ вернуть выход, который остался в конфигурации без
+        работающего драйвера после неудачного отката (в списке выходов он
+        виден как `state: "down"`).
+      responses:
+        '200':
+          description: Updated outputs list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutputList'
+        '400':
+          description: Сохранённая конфигурация не прошла проверку или выход не удалось собрать.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          description: Выход не запустился (`output_start_failed`) или не удалось восстановить прежнее состояние (`output_rollback_failed`). Поле `outcome` — `rolled_back` или `rollback_failed`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   # ──────────────────────────────────────────────────────────────────────────
   # Outputs

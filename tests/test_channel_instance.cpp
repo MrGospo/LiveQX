@@ -2,11 +2,17 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <atomic>
+#include <mutex>
+#include <vector>
+#include <string>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 
 #include "core/ChannelInstance.h"
+#include "output/IOutput.h"
 #include "core/ScheduleEntry.h"
 #include "core/Scheduler.h"
 #include "core/Timeline.h"
@@ -1282,6 +1288,157 @@ TEST(ChannelInstancePatchOutput, PatchPersistsConfigJson) {
 
     std::error_code ec;
     fs::remove_all(root, ec);
+}
+
+
+// Driver whose start() outcome and lifecycle calls are observable. Lets the
+// tests drive the failure branches (rebuild fails, rollback fails) that real
+// sockets cannot reproduce deterministically.
+struct FakeOutput : IOutput {
+    FakeOutput(int n, bool start_ok, std::vector<std::string>* log, std::mutex* mu)
+        : n_(n), ok_(start_ok), log_(log), mu_(mu) {}
+    bool start() override { note("start:" + std::to_string(n_)); return ok_; }
+    void stop() override  { note("stop:"  + std::to_string(n_)); }
+    void send(const Packet&) override {}
+    bool isHealthy() const override { return ok_; }
+    OutputStats getStats() const override { return {}; }
+private:
+    void note(const std::string& e) {
+        std::lock_guard<std::mutex> lk(*mu_);
+        log_->push_back(e);
+    }
+    int n_; bool ok_;
+    std::vector<std::string>* log_;
+    std::mutex*               mu_;
+};
+
+// Hands out FakeOutputs numbered in creation order. `ok` is consulted at
+// creation time, so a test can flip it between calls.
+struct FakeFactory {
+    std::vector<std::string> log;
+    std::mutex               mu;
+    std::atomic<int>         made{0};
+    std::atomic<bool>        ok{true};
+
+    ChannelInstance::OutputDriverFactory fn() {
+        return [this](const std::string&, const json&) -> std::shared_ptr<IOutput> {
+            return std::make_shared<FakeOutput>(made.fetch_add(1), ok.load(), &log, &mu);
+        };
+    }
+    std::vector<std::string> snapshot() {
+        std::lock_guard<std::mutex> lk(mu);
+        return log;
+    }
+};
+
+TEST(ChannelInstancePatchOutput, MulticastChangeStartsNewDriverBeforeStoppingOld) {
+    // Make-before-break: the replacement multicast driver must be running
+    // before the old one is released, so the stream has no gap.
+    FakeFactory f;
+    auto cfg = minimalCfg(70);
+    cfg["outputs"] = json::array({
+        json{{"id", "main"}, {"type", "multicast"},
+             {"address", "239.0.5.10"}, {"port", 6310}},
+    });
+    auto ch = ChannelInstance::build(cfg);
+    ASSERT_TRUE(ch);
+    ch->setOutputDriverFactory(f.fn());
+    ASSERT_TRUE(ch->play());
+
+    ChannelInstance::PatchOutcome outcome = ChannelInstance::PatchOutcome::Rejected;
+    ASSERT_EQ(OR::Ok, ch->patchOutput("main", json{
+        {"type", "multicast"}, {"address", "239.0.5.10"}, {"port", 6310},
+        {"bind_address", "10.0.0.5"}
+    }, &outcome));
+    EXPECT_EQ(outcome, ChannelInstance::PatchOutcome::Applied);
+
+    const auto log = f.snapshot();
+    const auto pos = [&](const std::string& e) {
+        return std::find(log.begin(), log.end(), e) - log.begin();
+    };
+    ASSERT_NE(pos("start:1"), static_cast<std::ptrdiff_t>(log.size()));
+    ASSERT_NE(pos("stop:0"),  static_cast<std::ptrdiff_t>(log.size()));
+    EXPECT_LT(pos("start:1"), pos("stop:0"));
+
+    const auto outs = ch->outputsJson();
+    ASSERT_EQ(outs.size(), 1u);
+    EXPECT_EQ(outs[0]["id"], "main");
+    ch->stop();
+}
+
+TEST(ChannelInstancePatchOutput, MulticastNewDriverFailureLeavesOldRunning) {
+    FakeFactory f;
+    auto cfg = minimalCfg(71);
+    cfg["outputs"] = json::array({
+        json{{"id", "main"}, {"type", "multicast"},
+             {"address", "239.0.5.11"}, {"port", 6311}},
+    });
+    auto ch = ChannelInstance::build(cfg);
+    ASSERT_TRUE(ch);
+    ch->setOutputDriverFactory(f.fn());
+    ASSERT_TRUE(ch->play());
+
+    f.ok = false;   // the replacement cannot start
+    ChannelInstance::PatchOutcome outcome = ChannelInstance::PatchOutcome::Applied;
+    EXPECT_EQ(OR::StartFailed, ch->patchOutput("main", json{
+        {"type", "multicast"}, {"address", "239.0.5.11"}, {"port", 6311},
+        {"bind_address", "10.0.0.6"}
+    }, &outcome));
+    EXPECT_EQ(outcome, ChannelInstance::PatchOutcome::RolledBack);
+
+    // The original driver was never stopped.
+    const auto log = f.snapshot();
+    EXPECT_EQ(std::count(log.begin(), log.end(), std::string("stop:0")), 0);
+    const auto outs = ch->outputsJson();
+    ASSERT_EQ(outs.size(), 1u);
+    EXPECT_TRUE(outs[0]["healthy"].get<bool>());
+    ch->stop();
+}
+
+TEST(ChannelInstancePatchOutput, FailedRollbackKeepsOutputVisibleAndRestartRecoversIt) {
+    // SRT holds its port, so the old driver is stopped first. Here both the
+    // rebuild and the rollback fail: the entry must stay in the config, show
+    // up as "down", and come back through restartOutput() once the cause is gone.
+    FakeFactory f;
+    auto cfg = minimalCfg(72);
+    cfg["outputs"] = json::array({
+        json{{"id", "main"}, {"type", "srt"}, {"port", 19572}},
+    });
+    auto ch = ChannelInstance::build(cfg);
+    ASSERT_TRUE(ch);
+    ch->setOutputDriverFactory(f.fn());
+    ASSERT_TRUE(ch->play());
+
+    f.ok = false;
+    ChannelInstance::PatchOutcome outcome = ChannelInstance::PatchOutcome::Applied;
+    EXPECT_EQ(OR::RollbackFailed, ch->patchOutput("main", json{
+        {"type", "srt"}, {"port", 19573}
+    }, &outcome));
+    EXPECT_EQ(outcome, ChannelInstance::PatchOutcome::RollbackFailed);
+
+    auto outs = ch->outputsJson();
+    ASSERT_EQ(outs.size(), 1u);
+    EXPECT_EQ(outs[0]["id"], "main");
+    EXPECT_EQ(outs[0]["state"], "down");
+    EXPECT_FALSE(outs[0]["healthy"].get<bool>());
+    EXPECT_EQ(outs[0]["port"], 19572);       // the OLD config is what is kept
+
+    f.ok = true;     // cause removed
+    EXPECT_EQ(OR::Ok, ch->restartOutput("main", &outcome));
+    EXPECT_EQ(outcome, ChannelInstance::PatchOutcome::Applied);
+    outs = ch->outputsJson();
+    ASSERT_EQ(outs.size(), 1u);
+    EXPECT_EQ(outs[0]["id"], "main");
+    EXPECT_FALSE(outs[0].contains("state"));
+    EXPECT_TRUE(outs[0]["healthy"].get<bool>());
+    ch->stop();
+}
+
+TEST(ChannelInstancePatchOutput, RestartUnknownOutputIsNotFound) {
+    auto ch = ChannelInstance::build(minimalCfg());
+    ASSERT_TRUE(ch);
+    EXPECT_EQ(OR::NotFound, ch->restartOutput("ghost"));
+    EXPECT_EQ(OR::NotFound, ch->restartOutput(""));
 }
 
 } // namespace ChannelInstancePatchOutput

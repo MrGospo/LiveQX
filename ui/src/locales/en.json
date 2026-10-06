@@ -91,6 +91,7 @@
     "stop": "Stop",
     "restart": "Restart",
     "restarted": "Channel restarted",
+    "down": "Output is down: the previous output could not be restored after a failed update. Click Restart (or restart the channel) once the cause is fixed.",
     "restartError": "Failed to restart channel",
     "next": "Next clip",
     "open": "Open",

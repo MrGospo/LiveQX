@@ -815,30 +815,9 @@ bool ChannelInstance::buildRuntime() {
         const std::string type = oc.value("type", std::string("srt"));
         std::shared_ptr<IOutput> drv;
         try {
-            numa::runOnNode(numa_node_, [&] {
-                if (type == "srt") {
-                    const int port    = oc.value("port",       9000);
-                    const int latency = oc.value("latency_ms", 200);
-                    auto srt = std::make_shared<SrtOutput>(
-                        port, latency,
-                        oc.value("bind_address", std::string{}));
-                    if (!srt_out_) srt_out_ = srt.get();
-                    drv = std::move(srt);
-                } else if (type == "multicast") {
-                    auto mc = liveqx::multicast::parseOutputCfg(oc);
-                    drv = std::make_shared<MulticastOutput>(std::move(mc));
-                } else if (type == "rtmp") {
-                    auto rc = liveqx::rtmp::parseOutputCfg(oc);
-                    drv = std::make_shared<liveqx::rtmp::RtmpOutput>(
-                              std::move(rc));
-                } else if (type == "hls") {
-                    auto hc = liveqx::hls::parseOutputCfg(oc);
-                    drv = std::make_shared<liveqx::hls::HlsOutput>(std::move(hc));
-                } else if (type == "ndi") {
-                    auto nc = liveqx::ndi::parseOutputCfg(oc);
-                    drv = std::make_shared<liveqx::ndi::NdiOutput>(std::move(nc));
-                }
-            });
+            drv = makeOutputDriver(type, oc);
+            if (auto* s = dynamic_cast<SrtOutput*>(drv.get()); s && !srt_out_)
+                srt_out_ = s;
         } catch (const std::exception& e) {
             logger_->error("outputs[id={}]: build failed: {} — skipped",
                            oid, e.what());
@@ -862,8 +841,8 @@ bool ChannelInstance::buildRuntime() {
             // Attach AFTER addDriver — start() ran inside startAll() later,
             // but the encoder hook only fires once frames are pushed, by
             // which time start() has either succeeded or marked us !running_.
-            auto nd = std::static_pointer_cast<liveqx::ndi::NdiOutput>(drv);
-            nd->attachEncoder(encoder_.get(), fps_);
+            if (auto nd = std::dynamic_pointer_cast<liveqx::ndi::NdiOutput>(drv))
+                nd->attachEncoder(encoder_.get(), fps_);
         }
     }
 
@@ -1387,6 +1366,93 @@ ChannelInstance::OutputResult ChannelInstance::addOutput(const nlohmann::json& b
     return addOutputLocked(body);
 }
 
+void ChannelInstance::setOutputDriverFactory(OutputDriverFactory factory) {
+    std::lock_guard<std::mutex> lk(state_mu_);
+    output_factory_ = std::move(factory);
+}
+
+std::shared_ptr<IOutput>
+ChannelInstance::makeOutputDriver(const std::string& type,
+                                  const nlohmann::json& body) {
+    if (output_factory_) return output_factory_(type, body);
+
+    std::shared_ptr<IOutput> drv;
+    numa::runOnNode(numa_node_, [&] {
+        if (type == "srt") {
+            const int port    = body.value("port",       9000);
+            const int latency = body.value("latency_ms", 200);
+            drv = std::make_shared<SrtOutput>(
+                port, latency, body.value("bind_address", std::string{}));
+        } else if (type == "multicast") {
+            auto mc = liveqx::multicast::parseOutputCfg(body);
+            drv = std::make_shared<MulticastOutput>(std::move(mc));
+        } else if (type == "rtmp") {
+            auto rc = liveqx::rtmp::parseOutputCfg(body);
+            drv = std::make_shared<liveqx::rtmp::RtmpOutput>(std::move(rc));
+        } else if (type == "hls") {
+            auto hc = liveqx::hls::parseOutputCfg(body);
+            drv = std::make_shared<liveqx::hls::HlsOutput>(std::move(hc));
+        } else if (type == "ndi") {
+            auto nc = liveqx::ndi::parseOutputCfg(body);
+            drv = std::make_shared<liveqx::ndi::NdiOutput>(std::move(nc));
+        }
+    });
+    return drv;
+}
+
+ChannelInstance::OutputResult
+ChannelInstance::swapRunningDriverLocked(const std::string& output_id,
+                                         const nlohmann::json& body) {
+    const std::string type = body.value("type", std::string{});
+    std::shared_ptr<IOutput> drv;
+    try {
+        drv = makeOutputDriver(type, body);
+    } catch (const std::exception& e) {
+        if (logger_) logger_->error("swapOutput[id={}]: build threw: {}", output_id, e.what());
+        return OutputResult::BuildFailed;
+    }
+    if (!drv) return OutputResult::BuildFailed;
+
+    drv->setNumaNode(numa_node_);
+    drv->setLogger(logger_);
+    drv->setChannelId(std::to_string(id_));
+    if (!drv->start()) {
+        if (logger_) logger_->error("swapOutput[id={}]: new driver failed to start; "
+                                    "the running output is untouched", output_id);
+        drv->stop();
+        return OutputResult::StartFailed;
+    }
+    const std::uint64_t qlim = body.value("queue_bytes_limit",
+                                          OutputManager::kDefaultQueueBytesLimit);
+    // From here on the new driver is already receiving packets; the old one
+    // is drained and released afterwards. No instant without this output.
+    if (auto old = out_mgr_->replaceDriver(output_id, drv, qlim)) old->stop();
+    return OutputResult::Ok;
+}
+
+ChannelInstance::OutputResult
+ChannelInstance::restartOutput(const std::string& output_id,
+                               PatchOutcome* outcome) {
+    if (outcome) *outcome = PatchOutcome::Rejected;
+    if (output_id.empty()) return OutputResult::NotFound;
+    nlohmann::json entry;
+    {
+        std::lock_guard<std::mutex> lk(state_mu_);
+        bool found = false;
+        if (cfg_.contains("outputs") && cfg_["outputs"].is_array()) {
+            for (const auto& e : cfg_["outputs"]) {
+                if (e.is_object() && e.value("id", std::string{}) == output_id) {
+                    entry = e;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) return OutputResult::NotFound;
+    }
+    return patchOutput(output_id, entry, outcome);
+}
+
 ChannelInstance::OutputResult
 ChannelInstance::validateOutputBody(const nlohmann::json& body) const {
     if (!body.is_object()) return OutputResult::BadJson;
@@ -1442,28 +1508,7 @@ ChannelInstance::addOutputLocked(const nlohmann::json& body, bool commit) {
     if (running_.load(std::memory_order_acquire) && out_mgr_) {
         std::shared_ptr<IOutput> drv;
         try {
-            numa::runOnNode(numa_node_, [&] {
-                if (type == "srt") {
-                    const int port    = body.value("port",       9000);
-                    const int latency = body.value("latency_ms", 200);
-                    drv = std::make_shared<SrtOutput>(
-                        port, latency,
-                        body.value("bind_address", std::string{}));
-                } else if (type == "multicast") {
-                    auto mc = liveqx::multicast::parseOutputCfg(body);
-                    drv = std::make_shared<MulticastOutput>(std::move(mc));
-                } else if (type == "rtmp") {
-                    auto rc = liveqx::rtmp::parseOutputCfg(body);
-                    drv = std::make_shared<liveqx::rtmp::RtmpOutput>(
-                              std::move(rc));
-                } else if (type == "hls") {
-                    auto hc = liveqx::hls::parseOutputCfg(body);
-                    drv = std::make_shared<liveqx::hls::HlsOutput>(std::move(hc));
-                } else if (type == "ndi") {
-                    auto nc = liveqx::ndi::parseOutputCfg(body);
-                    drv = std::make_shared<liveqx::ndi::NdiOutput>(std::move(nc));
-                }
-            });
+            drv = makeOutputDriver(type, body);
         } catch (const std::exception& e) {
             logger_->error("addOutput[id={}]: build threw: {}", oid, e.what());
             return OutputResult::BuildFailed;
@@ -1481,16 +1526,15 @@ ChannelInstance::addOutputLocked(const nlohmann::json& body, bool commit) {
         // Wire SRT-specific keyframe-reset hook for the new driver. Multiple
         // SRT outputs each call resetOnReconnect — encoder treats it as
         // idempotent so a second SRT receiver tuning in still gets a fresh I.
-        if (type == "srt") {
-            auto* srt_ptr = static_cast<SrtOutput*>(drv.get());
+        if (auto* srt_ptr = dynamic_cast<SrtOutput*>(drv.get())) {
             if (!srt_out_) srt_out_ = srt_ptr;
             if (encoder_) {
                 srt_ptr->onClientConnected(
                     [enc = encoder_.get()] { enc->resetOnReconnect(); });
             }
-        } else if (type == "ndi" && encoder_) {
-            auto nd = std::static_pointer_cast<liveqx::ndi::NdiOutput>(drv);
-            nd->attachEncoder(encoder_.get(), fps_);
+        } else if (encoder_) {
+            if (auto nd = std::dynamic_pointer_cast<liveqx::ndi::NdiOutput>(drv))
+                nd->attachEncoder(encoder_.get(), fps_);
         }
         const std::uint64_t qlim = body.value("queue_bytes_limit",
                                               OutputManager::kDefaultQueueBytesLimit);
@@ -1574,7 +1618,7 @@ ChannelInstance::removeOutputLocked(const std::string& output_id, bool commit) {
                 if (e.value("type", std::string{}) != "srt") continue;
                 auto next = out_mgr_->getDriver(e.value("id", std::string{}));
                 if (next) {
-                    srt_out_ = static_cast<SrtOutput*>(next.get());
+                    srt_out_ = dynamic_cast<SrtOutput*>(next.get());
                     break;
                 }
             }
@@ -1665,8 +1709,35 @@ ChannelInstance::patchOutput(const std::string& output_id,
              {"state",      state}});
     };
 
-    // The old driver has to release its socket before the new one can bind
-    // (same port / group), so make-before-break is impossible here. The
+    // Multicast senders do not claim the group port, so the new driver can
+    // run alongside the old one: build and start it first, swap atomically,
+    // then release the old. No gap in the stream, and a failure leaves the
+    // running output untouched (nothing to roll back).
+    if (running_.load(std::memory_order_acquire) && out_mgr_
+            && old_type == "multicast" && new_type == "multicast") {
+        const auto r = swapRunningDriverLocked(output_id, with_id);
+        if (r != OutputResult::Ok) {
+            if (logger_) logger_->warn("patchOutput[id={}]: new driver failed (code {}); "
+                                       "output left as it was", output_id, int(r));
+            publish("update_failed_rolled_back", old_type);
+            set_outcome(PatchOutcome::RolledBack);
+            return r;
+        }
+        cfg_["outputs"][idx] = with_id;
+        try { persistConfig(); }
+        catch (const std::exception& e) {
+            if (logger_) logger_->error("patchOutput: persistConfig failed: {}", e.what());
+        }
+        if (logger_) logger_->info("output[id={}] updated without interruption (type=multicast)", output_id);
+        requestStateSave();
+        publish("updated", new_type);
+        set_outcome(PatchOutcome::Applied);
+        return OutputResult::Ok;
+    }
+
+    // Other transports hold exclusive resources (listening port, output
+    // directory, publish key, NDI name): the old driver has to release them
+    // before the new one can bind, so make-before-break is impossible. The
     // rollback below is what makes remove+add safe instead.
     removeOutputLocked(output_id, /*commit=*/false);
     const auto add = addOutputLocked(with_id, /*commit=*/false);
@@ -1745,7 +1816,32 @@ ChannelInstance::outputStatusJson(const std::string& output_id) const {
 }
 
 nlohmann::json ChannelInstance::outputsJson() const {
-    if (out_mgr_) return out_mgr_->statusJson();
+    if (out_mgr_) {
+        auto arr = out_mgr_->statusJson();
+        // Outputs that are in the config but have no live driver (a failed
+        // rollback leaves one) must stay visible, otherwise the operator
+        // cannot see them, let alone restart them.
+        std::lock_guard<std::mutex> lk(state_mu_);
+        if (arr.is_array() && cfg_.contains("outputs") && cfg_["outputs"].is_array()) {
+            for (const auto& e : cfg_["outputs"]) {
+                if (!e.is_object()) continue;
+                const auto id = e.value("id", std::string{});
+                bool live = false;
+                for (const auto& a : arr)
+                    if (a.is_object() && a.value("id", std::string{}) == id) { live = true; break; }
+                if (live || id.empty()) continue;
+                auto d = e;
+                const auto t = e.value("type", std::string{});
+                d["transport"]  = t;
+                d["healthy"]    = false;
+                d["connected"]  = false;
+                d["state"]      = "down";
+                d["last_error"] = "driver is not running (a failed update could not be rolled back); restart the output";
+                arr.push_back(std::move(d));
+            }
+        }
+        return arr;
+    }
     std::lock_guard<std::mutex> lk(state_mu_);
     if (!cfg_.contains("outputs") || !cfg_["outputs"].is_array())
         return nlohmann::json::array();

@@ -1135,6 +1135,9 @@ function OutputsTab({ ch }: { ch: ChannelStatus }) {
                 </div>
               </div>
 
+              {(out as { state?: string }).state === 'down' && (
+                <p role="alert" className="mt-3 text-xs text-[var(--danger)]">{t('outputs.down')}</p>
+              )}
               <div className="mt-3 pt-3 border-t border-[var(--border-subtle)] grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-3 text-xs">
                 <Counter label={t('outputs.bitrate')}     value={out.bitrate_bps != null ? `${(out.bitrate_bps / 1000).toFixed(0)} kbps` : '—'} />
                 <Counter label={t('outputs.bytesSent')}    value={out.bytes_sent != null ? fmtBytes(out.bytes_sent) : '—'} />

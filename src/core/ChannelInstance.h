@@ -224,6 +224,23 @@ public:
                               const nlohmann::json& body,
                               PatchOutcome* outcome = nullptr);
 
+    // Rebuilds an output from its stored config entry (same transactional
+    // path as patchOutput). Also the recovery action for an output left down
+    // by a failed rollback: such an entry is still in cfg_ but has no driver.
+    // NotFound when the id is not in the channel config.
+    OutputResult restartOutput(const std::string& output_id,
+                               PatchOutcome* outcome = nullptr);
+
+    // Injection point for output drivers. When set, it is consulted for every
+    // driver the channel builds (initial build, add, patch, restart) instead
+    // of the built-in SRT/multicast/RTMP/HLS/NDI constructors; returning null
+    // means "build failed". Intended for tests that need drivers whose
+    // start() can be made to fail on demand; production code never sets it.
+    // Must be called before play().
+    using OutputDriverFactory = std::function<std::shared_ptr<IOutput>(
+        const std::string& type, const nlohmann::json& body)>;
+    void setOutputDriverFactory(OutputDriverFactory factory);
+
     // Snapshot of the current outputs (status()["outputs"] subtree). Always
     // an array; empty when the channel has no outputs yet.
     nlohmann::json outputsJson() const;
@@ -355,6 +372,15 @@ private:
     OutputResult removeOutputLocked(const std::string& output_id, bool commit = true);
     // Shape/parser validation of an output body; touches no state.
     OutputResult validateOutputBody(const nlohmann::json& body) const;
+    // Constructs (does not start) the driver for `type`; consults
+    // output_factory_ first. Null on unknown type or construction failure.
+    std::shared_ptr<IOutput> makeOutputDriver(const std::string& type,
+                                              const nlohmann::json& body);
+    // Make-before-break replacement of a running driver: the new one is built
+    // and started first, then swapped in atomically. On failure nothing has
+    // been touched and the old driver keeps running. Caller holds state_mu_.
+    OutputResult swapRunningDriverLocked(const std::string& output_id,
+                                         const nlohmann::json& body);
 
     int                   id_   = 0;
     std::string           name_;
@@ -411,6 +437,7 @@ private:
     // hook — they all share the same encoder so a single keyframe reset
     // covers every SRT receiver anyway.
     SrtOutput*                      srt_out_ = nullptr;
+    OutputDriverFactory             output_factory_;
     std::unique_ptr<OutputManager>  out_mgr_;
     std::unique_ptr<RenderLoop>     loop_;
     std::unique_ptr<ContentSync>    content_sync_;

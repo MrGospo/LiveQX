@@ -147,8 +147,14 @@ export const useDeleteOutput = (channelId: number) => {
   });
 };
 
-export const useRestartOutput = (channelId: number) =>
-  useMutation({
+export const useRestartOutput = (channelId: number) => {
+  const qc = useQueryClient();
+  return useMutation({
     mutationFn: (outputId: string) =>
       api.post(`/api/channels/${channelId}/outputs/${outputId}/restart`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['channels', channelId, 'outputs'] });
+      qc.invalidateQueries({ queryKey: ['channels', channelId] });
+    },
   });
+};

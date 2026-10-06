@@ -193,6 +193,9 @@ public:
     Result patchOutput(int id, const std::string& output_id,
                        const nlohmann::json& body,
                        ChannelInstance::PatchOutcome* outcome = nullptr);
+    // Rebuilds an output from its stored config (see ChannelInstance::restartOutput).
+    Result restartOutput(int id, const std::string& output_id,
+                         ChannelInstance::PatchOutcome* outcome = nullptr);
 
     // ── Watcher (ContentSync) proxies ────────────────────────────────────────
     // Returns null if channel not found OR has no ContentSync.

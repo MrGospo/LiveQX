@@ -41,6 +41,36 @@ bool OutputManager::removeDriver(const std::string& id) {
     return true;
 }
 
+std::shared_ptr<IOutput> OutputManager::replaceDriver(
+        const std::string& id, std::shared_ptr<IOutput> driver,
+        std::uint64_t queue_bytes_limit) {
+    if (!driver) return nullptr;
+    auto entry               = std::make_unique<Entry>();
+    entry->id                = id;
+    entry->driver            = std::move(driver);
+    entry->queue_bytes_limit = queue_bytes_limit ? queue_bytes_limit
+                                                  : kDefaultQueueBytesLimit;
+    auto* raw                = entry.get();
+    entry->pump              = std::jthread(
+        [this, raw](std::stop_token st) { pumpLoop(raw, st); });
+
+    std::unique_ptr<Entry> old;
+    {
+        std::unique_lock lk(mu_);
+        const auto it = std::find_if(entries_.begin(), entries_.end(),
+            [&](const std::unique_ptr<Entry>& e) { return e->id == id; });
+        if (it == entries_.end()) {
+            entries_.push_back(std::move(entry));
+        } else {
+            old  = std::move(*it);
+            *it  = std::move(entry);
+        }
+    }
+    if (!old) return nullptr;
+    stopAndJoin(*old);          // outside the lock, like removeDriver()
+    return old->driver;
+}
+
 std::shared_ptr<IOutput> OutputManager::getDriver(const std::string& id) const {
     std::shared_lock lk(mu_);
     const auto it = std::find_if(entries_.begin(), entries_.end(),
