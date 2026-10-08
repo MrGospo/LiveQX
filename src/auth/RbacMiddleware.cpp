@@ -155,7 +155,19 @@ RbacMiddleware::authorize(std::string_view method,
     auto sess = db_.findSessionByJwtId(claims->jti);
     if (!sess || sess->revoked_at.has_value()) return Decision::Unauthorized;
 
-    if (claims->must_change_password) {
+    // The must_change_password claim is frozen into the access token when it
+    // is issued (up to kAccessTtl ago). A self-service password change clears
+    // the flag in the database but cannot re-issue the token the client holds,
+    // so trusting the claim alone locks the user out until the token expires.
+    // The database is authoritative; it is consulted only for tokens that
+    // carry the flag, so ordinary requests pay nothing.
+    bool must_change = claims->must_change_password;
+    if (must_change) {
+        if (const auto user = db_.findUserById(claims->user_id))
+            must_change = user->must_change_password;
+    }
+
+    if (must_change) {
         // Читаем ровно один key — POST /api/auth/me/password — иначе блок.
         std::string key;
         key.reserve(method.size() + 1 + path.size());
@@ -188,7 +200,7 @@ RbacMiddleware::authorize(std::string_view method,
         out_ctx->user_id              = claims->user_id;
         out_ctx->username             = claims->username;
         out_ctx->role                 = claims->role;
-        out_ctx->must_change_password = claims->must_change_password;
+        out_ctx->must_change_password = must_change;
         out_ctx->channel_grants       = claims->channel_grants;
     }
     return Decision::Allow;

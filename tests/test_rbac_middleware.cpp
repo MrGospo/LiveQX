@@ -255,6 +255,27 @@ TEST_F(RbacTest, MustChangePasswordBlocksOtherEndpoints) {
               sa::RbacMiddleware::Decision::PasswordChangeRequired);
 }
 
+TEST_F(RbacTest, MustChangeClaimStopsBlockingOnceDatabaseFlagIsCleared) {
+    // The token was issued while the flag was set; the user then changed the
+    // password (flag cleared in the db) but still holds the old token. The
+    // database is authoritative, so the old token must work again at once.
+    const auto uid = makeUser("alice", sa::Role::Operator, /*mcp=*/true);
+    auto tok = loginToken("alice");
+
+    mw_->registerEndpoint("GET /api/channels",
+        {sa::Role::Operator, false, sa::ChannelPermission::View, false});
+    ASSERT_EQ(mw_->authorize("GET", "/api/channels", tok, -1, nullptr),
+              sa::RbacMiddleware::Decision::PasswordChangeRequired);
+
+    ASSERT_TRUE(db_->updatePasswordHash(uid, "$argon2id$new", 1700000000,
+                                        /*clear_must_change=*/true));
+
+    sa::RequestContext ctx;
+    EXPECT_EQ(mw_->authorize("GET", "/api/channels", tok, -1, &ctx),
+              sa::RbacMiddleware::Decision::Allow);
+    EXPECT_FALSE(ctx.must_change_password);
+}
+
 TEST_F(RbacTest, MustChangePasswordAllowsSelfPasswordEndpoint) {
     makeUser("alice", sa::Role::Operator, /*mcp=*/true);
     auto tok = loginToken("alice");
