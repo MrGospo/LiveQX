@@ -1,8 +1,7 @@
 #pragma once
 
-// Enterprise audit trail. Distinct from the legacy auth-only auth_audit
-// table (see AuthTypes.h::AuditEvent) — this record captures every
-// mutating server action: user/channel/output/gateway/plugin/system.
+// Enterprise audit trail. Captures every mutating server action:
+// user/channel/output/gateway/plugin/system.
 //
 // Storage lives in state/audit.db, owned by AuditDb. Rows are append-only;
 // each carries an HMAC-SHA256 tag chained to the previous row, keyed on

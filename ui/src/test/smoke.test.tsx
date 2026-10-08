@@ -55,14 +55,12 @@ vi.mock('@/api/queries/channels', () => ({
 
 vi.mock('@/api/queries/auth', () => ({
   useUsers:      () => ({ data: [], isLoading: false }),
-  useAuditEvents:() => ({ data: [], isLoading: false }),
   useLdapConfig: () => ({ data: null, isLoading: false }),
   useSmtpConfig: () => ({ data: null, isLoading: false }),
   useSaveLdapConfig: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useSaveSmtpConfig: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useTestLdap:   () => ({ mutateAsync: vi.fn(), isPending: false }),
   useTestSmtp:   () => ({ mutateAsync: vi.fn(), isPending: false }),
-  usePurgeAudit: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useDeleteUser: () => ({ mutate: vi.fn() }),
   useEnableUser: () => ({ mutate: vi.fn() }),
   useUnlockUser: () => ({ mutate: vi.fn() }),
@@ -171,16 +169,6 @@ describe('LdapPage', () => {
     // "LDAP" appears in both the SubNav item and the page header, so use
     // getAllByText and just assert at least one match exists.
     expect(screen.getAllByText('LDAP').length).toBeGreaterThan(0);
-  });
-});
-
-describe('AuditPage', () => {
-  // AuditPage does not render `audit.title` anywhere — the page relies on
-  // SubNav for identification. Assert against a stable action button instead.
-  it('renders without crashing', async () => {
-    const { default: AuditPage } = await import('@/features/settings/AuditPage');
-    render(wrap(<AuditPage />));
-    expect(screen.getByText('Export CSV')).toBeDefined();
   });
 });
 

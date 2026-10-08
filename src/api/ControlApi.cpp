@@ -455,12 +455,9 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     rbac.registerEndpoint("POST /api/auth/users/{uid}/unlock",         rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("POST /api/auth/users/{uid}/purge",          rbacRole(RbacRole::Admin));
 
-    rbac.registerEndpoint("GET /api/auth/audit",         rbacRole(RbacRole::Admin));
-    rbac.registerEndpoint("POST /api/auth/audit/purge",  rbacRole(RbacRole::Admin));
-
-    // Enterprise audit trail (state/audit.db) — separate from legacy
-    // auth-only audit above. Admin-only: rows include IPs, target ids
-    // and sanitised payloads that should never leak to operator/viewer.
+    // Enterprise audit trail (state/audit.db). Admin-only: rows include
+    // IPs, target ids and sanitised payloads that should never leak to
+    // operator/viewer.
     rbac.registerEndpoint("GET /api/audit/events",       rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("GET /api/audit/verify",       rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("GET /api/audit/categories",   rbacRole(RbacRole::Admin));
@@ -2713,7 +2710,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         return {claims->user_id, claims->username};
     };
 
-    // c5: write into auth_audit. PluginManager не имеет доступа к
+    // c5: emit plugin audit rows. PluginManager не имеет доступа к
     // username/ip — actor известен только REST-слою, поэтому audit
     // emission делается здесь, после mutation. event= "plugin.install" /
     // "plugin.uninstall" / "plugin.eula_accept".
@@ -3444,7 +3441,8 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     // (soft-disable), эта ручка физически удаляет users-row + sessions +
     // channel_permissions + password_resets и NULL'ит self-FK в
     // users.created_by, ldap_config.updated_by, smtp_config.updated_by.
-    // auth_audit-записи остаются (там username хранится snapshot'ом).
+    // Enterprise-аудит хранит username snapshot'ом — записи о purge'нутом
+    // юзере в state/audit.db остаются.
     // 409: cannot_delete_self / last_admin — guards в AuthService.
     s.Post(R"(/api/auth/users/(\d+)/purge)",
            [au, auth_unavailable, actorContext]
@@ -3700,98 +3698,10 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         writeJson(res, 200, out);
     });
 
-    // ─── Audit log REST (fix22 c12/24) ──────────────────────────────────
-    //
-    // GET /api/auth/audit
-    //   ?from_ts=...        — unix-sec, ts >= from_ts
-    //   ?to_ts=...          — unix-sec, ts <  to_ts
-    //   ?user_id=...
-    //   ?username=...
-    //   ?event=login.ok|login.fail|...
-    //   ?limit=100          — max 1000
-    //   ?offset=0
-    //
-    // RBAC c24/24 закрепит admin-only. Без RBAC отдаётся всем — но в
-    // production deployment route в любом случае идёт через middleware,
-    // который сначала фильтрует по роли.
-    //
-    // POST /api/auth/audit/purge?older_than_days=N
-    //   удаляет записи старше N*86400 секунд. Возвращает {removed: N}.
-    s.Get("/api/auth/audit",
-          [au, auth_unavailable]
-          (const httplib::Request& req, httplib::Response& res) {
-        if (!au) { auth_unavailable(res); return; }
-
-        liveqx::auth::AuditFilter f;
-        if (req.has_param("from_ts")) {
-            try { f.from_ts = std::stoll(req.get_param_value("from_ts")); }
-            catch (...) { writeJson(res, 400, {{"error", "bad_from_ts"}}); return; }
-        }
-        if (req.has_param("to_ts")) {
-            try { f.to_ts = std::stoll(req.get_param_value("to_ts")); }
-            catch (...) { writeJson(res, 400, {{"error", "bad_to_ts"}}); return; }
-        }
-        if (req.has_param("user_id")) {
-            try { f.user_id = std::stoll(req.get_param_value("user_id")); }
-            catch (...) { writeJson(res, 400, {{"error", "bad_user_id"}}); return; }
-        }
-        if (req.has_param("username")) f.username = req.get_param_value("username");
-        if (req.has_param("event"))    f.event    = req.get_param_value("event");
-        if (req.has_param("limit")) {
-            try { f.limit = std::stoi(req.get_param_value("limit")); }
-            catch (...) { writeJson(res, 400, {{"error", "bad_limit"}}); return; }
-        }
-        if (req.has_param("offset")) {
-            try { f.offset = std::stoi(req.get_param_value("offset")); }
-            catch (...) { writeJson(res, 400, {{"error", "bad_offset"}}); return; }
-        }
-
-        auto events = au->listAuditEvents(f);
-        json arr = json::array();
-        for (const auto& e : events) {
-            json one = {
-                {"id",    e.id},
-                {"ts",    e.ts},
-                {"event", e.event},
-            };
-            if (e.user_id)             one["user_id"]  = *e.user_id;
-            if (!e.username.empty())   one["username"] = e.username;
-            if (!e.ip.empty())         one["ip"]       = e.ip;
-            if (!e.details_json.empty()) {
-                // details — уже строка JSON; парсим обратно, чтобы клиент
-                // получал структурированный объект, а не escaped string.
-                try {
-                    one["details"] = json::parse(e.details_json);
-                } catch (...) {
-                    one["details_raw"] = e.details_json;
-                }
-            }
-            arr.push_back(std::move(one));
-        }
-        writeJson(res, 200, {{"events", std::move(arr)}});
-    });
-
-    s.Post("/api/auth/audit/purge",
-           [au, auth_unavailable, actorContext]
-           (const httplib::Request& req, httplib::Response& res) {
-        if (!au) { auth_unavailable(res); return; }
-        int days = 0;
-        if (req.has_param("older_than_days")) {
-            try { days = std::stoi(req.get_param_value("older_than_days")); }
-            catch (...) { writeJson(res, 400, {{"error", "bad_older_than_days"}}); return; }
-        }
-        if (days <= 0) { writeJson(res, 400, {{"error", "missing_older_than_days"}}); return; }
-        const int removed = au->purgeAuditOlderThanDays(days);
-        setAuditContextOverride("audit.purged",
-            json({{"older_than_days", days}, {"removed", removed}}));
-        writeJson(res, 200, {{"removed", removed}, {"older_than_days", days}});
-    });
-
     // ── Enterprise audit trail REST ────────────────────────────────────
     //
-    // state/audit.db read-side. Distinct from /api/auth/audit above
-    // (which reads the legacy auth_audit table in auth.db). Admin-only:
-    // rows here include IPs, target ids and sanitised payloads.
+    // state/audit.db read-side. Admin-only: rows here include IPs, target
+    // ids and sanitised payloads.
     //
     // GET /api/audit/events
     //   ?from_ts=<ms>       — ts_unix_ms >= from

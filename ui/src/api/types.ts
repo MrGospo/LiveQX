@@ -22,7 +22,6 @@ export type User           = components['schemas']['User'];
 export type UserDetail     = components['schemas']['UserDetail'];
 export type TokenPair      = components['schemas']['TokenPair'];
 export type LoginResponse  = components['schemas']['LoginResponse'];
-export type AuditEvent     = components['schemas']['AuditEvent'];
 export type ChannelPermissionRow = components['schemas']['ChannelPermissionRow'];
 export type OwnSession      = components['schemas']['OwnSession'];
 export type MasterKeyInfo   = components['schemas']['MasterKeyInfo'];
@@ -181,7 +180,6 @@ export interface SseEvent {
 }
 
 // ─── Enterprise audit trail (state/audit.db) ─────────────────────────────
-// Distinct from AuditEvent above (legacy /api/auth/audit, auth-only).
 // Rows are hand-typed here because /api/audit/* is not (yet) in openapi.yaml.
 export type AuditCategory =
   'auth' | 'channel' | 'output' | 'gateway' |

@@ -273,7 +273,6 @@ add_executable(liveqx-itests
     test_stream_probe_rest.cpp
     test_auth_rest.cpp
     test_admin_users_rest.cpp
-    test_audit_rest.cpp
     test_ldap_config_rest.cpp
     test_channel_acl_rest.cpp
     test_smtp_config_rest.cpp

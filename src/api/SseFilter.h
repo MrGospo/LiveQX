@@ -15,7 +15,6 @@ namespace liveqx::api {
 // True if a Subject (resolved by RBAC pre-handler) is allowed to see the
 // given event on its SSE stream. Visibility matrix:
 //
-//   AuthAudit              — Admin only
 //   AuditEvent             — Admin only (enterprise audit trail signal)
 //   PluginStatusChange     — Admin + Operator
 //   ChannelStateChange,

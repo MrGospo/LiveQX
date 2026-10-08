@@ -41,7 +41,6 @@ const CreateUserPage           = React.lazy(() => import('@/features/settings/Cr
 const UserDetailPage           = React.lazy(() => import('@/features/settings/UserDetailPage'));
 const LdapPage                 = React.lazy(() => import('@/features/settings/LdapPage'));
 const SmtpPage                 = React.lazy(() => import('@/features/settings/SmtpPage'));
-const AuditPage                = React.lazy(() => import('@/features/settings/AuditPage'));
 const AuditTrailPage           = React.lazy(() => import('@/features/settings/AuditTrailPage'));
 const MasterKeyPage            = React.lazy(() => import('@/features/settings/MasterKeyPage'));
 const TlsPage                  = React.lazy(() => import('@/features/settings/TlsPage'));
@@ -131,7 +130,6 @@ export function AppRoutes() {
           <Route path="/settings/users/:id"  element={<RequireRole minRole="admin"><UserDetailPage /></RequireRole>} />
           <Route path="/settings/ldap"       element={<RequireRole minRole="admin"><LdapPage /></RequireRole>} />
           <Route path="/settings/smtp"       element={<RequireRole minRole="admin"><SmtpPage /></RequireRole>} />
-          <Route path="/settings/audit"       element={<RequireRole minRole="admin"><AuditPage /></RequireRole>} />
           <Route path="/settings/audit-trail" element={<RequireRole minRole="admin"><AuditTrailPage /></RequireRole>} />
           <Route path="/settings/master-key" element={<RequireRole minRole="admin"><MasterKeyPage /></RequireRole>} />
           <Route path="/settings/tls"        element={<RequireRole minRole="admin"><TlsPage /></RequireRole>} />

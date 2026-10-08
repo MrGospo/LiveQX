@@ -63,9 +63,127 @@ TEST_F(AuthDbTest, OpenCreatesFileAndAppliesSchema) {
     ASSERT_EQ(sqlite3_prepare_v2(raw, "PRAGMA user_version;", -1, &st, nullptr),
               SQLITE_OK);
     ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
-    EXPECT_EQ(sqlite3_column_int(st, 0), 7);
+    EXPECT_EQ(sqlite3_column_int(st, 0), 8);
     sqlite3_finalize(st);
     sqlite3_close(raw);
+}
+
+// ── schema v8: legacy auth_audit is archived, not dropped ──────────────────
+
+namespace {
+
+void rawExec(const fs::path& db_path, const char* sql) {
+    sqlite3* raw = nullptr;
+    ASSERT_EQ(sqlite3_open(db_path.string().c_str(), &raw), SQLITE_OK);
+    char* err = nullptr;
+    ASSERT_EQ(sqlite3_exec(raw, sql, nullptr, nullptr, &err), SQLITE_OK)
+        << (err ? err : "");
+    sqlite3_free(err);
+    sqlite3_close(raw);
+}
+
+// First column of the first row, or -1 when the query fails / returns nothing.
+int rawScalar(const fs::path& db_path, const char* sql) {
+    sqlite3* raw = nullptr;
+    if (sqlite3_open(db_path.string().c_str(), &raw) != SQLITE_OK) return -1;
+    sqlite3_stmt* st = nullptr;
+    int v = -1;
+    if (sqlite3_prepare_v2(raw, sql, -1, &st, nullptr) == SQLITE_OK
+            && sqlite3_step(st) == SQLITE_ROW) {
+        v = sqlite3_column_int(st, 0);
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+    return v;
+}
+
+constexpr const char* kLegacyAuditDdl =
+    "CREATE TABLE IF NOT EXISTS auth_audit ("
+    " id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, event TEXT NOT NULL,"
+    " user_id INTEGER, username TEXT, ip TEXT, details_json TEXT);"
+    "CREATE INDEX IF NOT EXISTS idx_audit_ts ON auth_audit(ts);"
+    "CREATE INDEX IF NOT EXISTS idx_audit_user ON auth_audit(user_id);";
+
+}  // namespace
+
+TEST_F(AuthDbTest, UpgradeFromV7ArchivesLegacyAuditAndKeepsUsers) {
+    {   // A user that must survive the upgrade.
+        sa::AuthDb db(dbPath());
+        ASSERT_TRUE(db.open());
+        ASSERT_TRUE(db.insertUser(makeAdmin("keeper")).has_value());
+    }
+    // Turn the file into what a v7 install looks like: a populated
+    // auth_audit table and user_version = 7.
+    rawExec(dbPath(), kLegacyAuditDdl);
+    rawExec(dbPath(),
+        "INSERT INTO auth_audit(ts,event,username,ip) VALUES"
+        " (1700000001,'login.ok','keeper','10.0.0.1'),"
+        " (1700000002,'login.fail','keeper','10.0.0.2');"
+        "PRAGMA user_version=7;");
+
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+
+    EXPECT_EQ(rawScalar(dbPath(),
+        "SELECT count(*) FROM sqlite_master WHERE name='auth_audit'"), 0);
+    EXPECT_EQ(rawScalar(dbPath(), "SELECT count(*) FROM auth_audit_archived"), 2);
+    EXPECT_EQ(rawScalar(dbPath(), "PRAGMA user_version"), 8);
+    EXPECT_EQ(rawScalar(dbPath(),
+        "SELECT count(*) FROM sqlite_master WHERE name LIKE 'idx_audit_%'"), 0);
+    ASSERT_TRUE(db.findUserByUsername("keeper").has_value());
+}
+
+TEST_F(AuthDbTest, ReopenAfterUpgradeDoesNotTouchArchive) {
+    {
+        sa::AuthDb db(dbPath());
+        ASSERT_TRUE(db.open());
+    }
+    rawExec(dbPath(), kLegacyAuditDdl);
+    rawExec(dbPath(),
+        "INSERT INTO auth_audit(ts,event) VALUES (1,'login.ok');"
+        "PRAGMA user_version=7;");
+    {
+        sa::AuthDb db(dbPath());
+        ASSERT_TRUE(db.open());
+    }
+    {
+        sa::AuthDb db(dbPath());
+        ASSERT_TRUE(db.open());
+    }
+    EXPECT_EQ(rawScalar(dbPath(), "SELECT count(*) FROM auth_audit_archived"), 1);
+    EXPECT_EQ(rawScalar(dbPath(), "PRAGMA user_version"), 8);
+}
+
+TEST_F(AuthDbTest, UpgradeKeepsBothWhenArchiveNameIsTaken) {
+    // An earlier archive must never be overwritten or merged away.
+    {
+        sa::AuthDb db(dbPath());
+        ASSERT_TRUE(db.open());
+    }
+    rawExec(dbPath(), kLegacyAuditDdl);
+    rawExec(dbPath(),
+        "INSERT INTO auth_audit(ts,event) VALUES (1,'a'),(2,'b');"
+        "CREATE TABLE auth_audit_archived (id INTEGER PRIMARY KEY, ts INTEGER);"
+        "INSERT INTO auth_audit_archived(ts) VALUES (99);"
+        "PRAGMA user_version=7;");
+
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+
+    EXPECT_EQ(rawScalar(dbPath(), "SELECT count(*) FROM auth_audit_archived"), 1);
+    EXPECT_EQ(rawScalar(dbPath(),
+        "SELECT count(*) FROM sqlite_master"
+        " WHERE type='table' AND name LIKE 'auth_audit_archived_%'"), 1);
+    EXPECT_EQ(rawScalar(dbPath(),
+        "SELECT count(*) FROM sqlite_master WHERE name='auth_audit'"), 0);
+}
+
+TEST_F(AuthDbTest, FreshDbHasNoLegacyAuditTables) {
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    EXPECT_EQ(rawScalar(dbPath(),
+        "SELECT count(*) FROM sqlite_master WHERE name LIKE 'auth_audit%'"), 0);
+    EXPECT_EQ(rawScalar(dbPath(), "PRAGMA user_version"), 8);
 }
 
 TEST_F(AuthDbTest, FreshDbHasNoAdmin) {
@@ -250,134 +368,6 @@ TEST_F(AuthDbTest, RoleNameRoundTrip) {
     EXPECT_EQ(sa::roleFromString("operator"), sa::Role::Operator);
     EXPECT_EQ(sa::roleFromString("viewer"),   sa::Role::Viewer);
     EXPECT_FALSE(sa::roleFromString("root").has_value());
-}
-
-// ─── Audit log (commit 12/24) ─────────────────────────────────────────
-
-TEST_F(AuthDbTest, InsertAuditEventRoundTrip) {
-    sa::AuthDb db(dbPath());
-    ASSERT_TRUE(db.open());
-
-    sa::AuditEvent e;
-    e.ts           = 1'700'000'000;
-    e.event        = "login.ok";
-    e.user_id      = 42;
-    e.username     = "alice";
-    e.ip           = "10.0.0.1";
-    e.details_json = R"({"jti":"abc"})";
-    ASSERT_TRUE(db.insertAuditEvent(e));
-
-    sa::AuditFilter f;
-    auto rows = db.listAuditEvents(f);
-    ASSERT_EQ(rows.size(), 1u);
-    EXPECT_EQ(rows[0].event, "login.ok");
-    ASSERT_TRUE(rows[0].user_id.has_value());
-    EXPECT_EQ(*rows[0].user_id, 42);
-    EXPECT_EQ(rows[0].username, "alice");
-    EXPECT_EQ(rows[0].ip, "10.0.0.1");
-    EXPECT_EQ(rows[0].details_json, R"({"jti":"abc"})");
-    EXPECT_GT(rows[0].id, 0);
-    EXPECT_EQ(rows[0].ts, 1'700'000'000);
-}
-
-TEST_F(AuthDbTest, ListAuditEventsOrderByTsDesc) {
-    sa::AuthDb db(dbPath());
-    ASSERT_TRUE(db.open());
-
-    for (int i = 0; i < 5; ++i) {
-        sa::AuditEvent e;
-        e.ts    = 1'700'000'000 + i;
-        e.event = "login.ok";
-        ASSERT_TRUE(db.insertAuditEvent(e));
-    }
-
-    sa::AuditFilter f;
-    auto rows = db.listAuditEvents(f);
-    ASSERT_EQ(rows.size(), 5u);
-    // DESC по ts: первый — самый поздний.
-    EXPECT_EQ(rows.front().ts, 1'700'000'004);
-    EXPECT_EQ(rows.back().ts,  1'700'000'000);
-}
-
-TEST_F(AuthDbTest, ListAuditEventsFilters) {
-    sa::AuthDb db(dbPath());
-    ASSERT_TRUE(db.open());
-
-    auto put = [&](std::int64_t ts, const std::string& event,
-                   std::optional<std::int64_t> uid,
-                   const std::string& uname) {
-        sa::AuditEvent e;
-        e.ts = ts; e.event = event; e.user_id = uid; e.username = uname;
-        ASSERT_TRUE(db.insertAuditEvent(e));
-    };
-    put(100, "login.ok",   1, "a");
-    put(200, "login.fail", 2, "b");
-    put(300, "logout",     1, "a");
-    put(400, "login.ok",   3, "c");
-
-    sa::AuditFilter f;
-    f.event = "login.ok";
-    auto rows = db.listAuditEvents(f);
-    ASSERT_EQ(rows.size(), 2u);
-    for (const auto& r : rows) EXPECT_EQ(r.event, "login.ok");
-
-    sa::AuditFilter f2;
-    f2.user_id = 1;
-    auto rows2 = db.listAuditEvents(f2);
-    ASSERT_EQ(rows2.size(), 2u);
-
-    sa::AuditFilter f3;
-    f3.from_ts = 200; f3.to_ts = 400;
-    auto rows3 = db.listAuditEvents(f3);
-    ASSERT_EQ(rows3.size(), 2u);
-    EXPECT_EQ(rows3[0].ts, 300);
-    EXPECT_EQ(rows3[1].ts, 200);
-}
-
-TEST_F(AuthDbTest, ListAuditEventsLimitOffset) {
-    sa::AuthDb db(dbPath());
-    ASSERT_TRUE(db.open());
-
-    for (int i = 0; i < 10; ++i) {
-        sa::AuditEvent e;
-        e.ts = 1'700'000'000 + i; e.event = "x";
-        ASSERT_TRUE(db.insertAuditEvent(e));
-    }
-
-    sa::AuditFilter f;
-    f.limit = 3; f.offset = 0;
-    auto a = db.listAuditEvents(f);
-    EXPECT_EQ(a.size(), 3u);
-
-    f.offset = 3;
-    auto b = db.listAuditEvents(f);
-    EXPECT_EQ(b.size(), 3u);
-    EXPECT_NE(a[0].id, b[0].id);
-
-    // Cap 1000 — даже если попросили 99999, не должно крэшнуться.
-    f.limit = 99999; f.offset = 0;
-    auto c = db.listAuditEvents(f);
-    EXPECT_EQ(c.size(), 10u);
-}
-
-TEST_F(AuthDbTest, PurgeAuditOlderThan) {
-    sa::AuthDb db(dbPath());
-    ASSERT_TRUE(db.open());
-
-    for (int i = 0; i < 5; ++i) {
-        sa::AuditEvent e;
-        e.ts = 100 + i * 100; e.event = "x";
-        ASSERT_TRUE(db.insertAuditEvent(e));
-    }
-    // Purge всё с ts < 250 — это записи на ts=100 и ts=200.
-    EXPECT_EQ(db.purgeAuditOlderThan(250), 2);
-    sa::AuditFilter f;
-    auto rows = db.listAuditEvents(f);
-    EXPECT_EQ(rows.size(), 3u);
-    for (const auto& r : rows) EXPECT_GE(r.ts, 250);
-
-    // Idempotent: повторный purge с тем же cutoff ничего не удаляет.
-    EXPECT_EQ(db.purgeAuditOlderThan(250), 0);
 }
 
 // ── Brute-force lockout (commit 13/24) ───────────────────────────────────

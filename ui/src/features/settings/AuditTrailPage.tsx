@@ -1,11 +1,10 @@
 /**
  * AuditTrailPage — /settings/audit-trail
  *
- * Enterprise audit trail (state/audit.db). Distinct from /settings/audit,
- * which reads the legacy auth-only auth_audit table. This page shows
- * every server mutation (channels/outputs/gateways/plugins/mounts/system)
- * plus mirrored auth events, with HMAC-chain verification and live SSE
- * updates via the `audit_event` bus signal.
+ * Enterprise audit trail (state/audit.db). Shows every server mutation
+ * (channels/outputs/gateways/plugins/mounts/system) plus mirrored auth
+ * events, with HMAC-chain verification and live SSE updates via the
+ * `audit_event` bus signal.
  *
  * Admin-only — enforced by RequireRole in routes.tsx (matches backend
  * RBAC rule `GET /api/audit/events → Admin`).

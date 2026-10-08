@@ -1,6 +1,6 @@
 import { http, HttpResponse, delay } from 'msw';
 import type {
-  ChannelStatus, User, AuditEvent, GatewayStatus,
+  ChannelStatus, User, GatewayStatus,
   PluginListing, StressStatus, StressReportSummary,
   LdapConfig, SmtpConfig, VersionInfo, SystemStatus,
   ProfileSnapshot, WatcherStatus, NetworkInterface, GpuInfo,
@@ -100,16 +100,6 @@ const USERS: User[] = [
   { id: 3, username: 'bob.viewer',     email: '',                 role: 'viewer',   source: 'ldap',  disabled: false, must_change_password: false, failed_login_count: 0, created_at: 1743638400, last_login_at: Math.floor(Date.now()/1000) - 10800, last_login_ip: '10.0.1.5' },
   { id: 4, username: 'carol.locked',   email: 'carol@corp.local', role: 'operator', source: 'local', disabled: false, must_change_password: false, failed_login_count: 5, locked_until: Math.floor(Date.now()/1000) + 600, created_at: 1743724800, last_login_at: Math.floor(Date.now()/1000) - 7200, last_login_ip: '192.168.1.22' },
   { id: 5, username: 'dave.disabled',  email: 'dave@corp.local',  role: 'viewer',   source: 'local', disabled: true,  must_change_password: false, failed_login_count: 0, created_at: 1743811200 },
-];
-
-// AuditEvent.details (parsed) или details_raw (fallback) — НЕ details_json.
-const AUDIT: AuditEvent[] = [
-  { id: 1, ts: Math.floor(Date.now()/1000) - 30,    event: 'login.ok',        username: 'admin',          ip: '10.0.0.5',  details: { source: 'local' } },
-  { id: 2, ts: Math.floor(Date.now()/1000) - 120,   event: 'login.fail',      username: 'unknown',        ip: '10.0.0.99', details: { reason: 'bad_password' } },
-  { id: 3, ts: Math.floor(Date.now()/1000) - 300,   event: 'user.create',     username: 'admin',          ip: '10.0.0.5',  details: { target: 'alice.operator' } },
-  { id: 4, ts: Math.floor(Date.now()/1000) - 3600,  event: 'plugin.install',  username: 'admin',          ip: '10.0.0.5',  details: { name: 'ndi', sha256: '0a1b2c3d...' } },
-  { id: 5, ts: Math.floor(Date.now()/1000) - 7200,  event: 'password.change', username: 'alice.operator', ip: '10.0.0.12' },
-  { id: 6, ts: Math.floor(Date.now()/1000) - 86400, event: 'ldap.bind',       username: 'admin',          ip: '10.0.0.5',  details: { ok: true, latency_ms: 43 } },
 ];
 
 // GatewayStatus per backend Gateway.cpp:334 — running/pkt_in/pkt_out/etc.
@@ -317,17 +307,6 @@ export const handlers = [
   http.get('/api/auth/users/:id/channels', async () => {
     await delay(D);
     return HttpResponse.json({ items: [] });
-  }),
-
-  // Audit
-  http.get('/api/auth/audit', async () => {
-    await delay(D);
-    return HttpResponse.json({ events: AUDIT });
-  }),
-
-  http.post('/api/auth/audit/purge', async () => {
-    await delay(D);
-    return HttpResponse.json({ removed: 42, older_than_days: 90 });
   }),
 
   // LDAP

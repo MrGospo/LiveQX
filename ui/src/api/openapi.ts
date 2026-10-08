@@ -904,8 +904,8 @@ export interface paths {
          * @description Физически удаляет users-row + дочерние записи (sessions,
          *     channel_permissions, password_resets). Self-FK в users.created_by /
          *     ldap_config.updated_by / smtp_config.updated_by обнуляются.
-         *     auth_audit-записи СОХРАНЯЮТСЯ (там username хранится snapshot'ом),
-         *     включая запись `admin.user.purged` об этом действии.
+         *     Enterprise-аудит (state/audit.db) сохраняет запись
+         *     `admin.user.purged` об этом действии.
          *
          *     Отказы:
          *       * 409 `cannot_delete_self` — нельзя удалить собственную учётку
@@ -1099,115 +1099,6 @@ export interface paths {
                 };
             };
         };
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/auth/audit": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List audit events
-         * @description Admin-only. Поддерживает фильтры (date range, user_id, username
-         *     exact, event exact) и пагинацию (limit max 1000, offset).
-         *
-         *     `details` — структурированный объект (бэкенд парсит хранящийся
-         *     JSON-string обратно перед отдачей). При невалидном JSON — `details_raw`
-         *     со строкой.
-         */
-        get: {
-            parameters: {
-                query?: {
-                    /** @description Unix timestamp (sec). Включительно. */
-                    from_ts?: number;
-                    /** @description Unix timestamp (sec). Эксклюзивно. */
-                    to_ts?: number;
-                    user_id?: number;
-                    /** @description Exact match. */
-                    username?: string;
-                    /** @description Exact match snake-case кода (login.ok, login.fail, …). */
-                    event?: string;
-                    /**
-                     * @description Максимальное число элементов. Дефолт endpoint-зависит (обычно 100,
-                     *     ceiling 1000).
-                     */
-                    limit?: components["parameters"]["LimitParam"];
-                    offset?: components["parameters"]["OffsetParam"];
-                };
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description ok */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            events?: components["schemas"]["AuditEvent"][];
-                        };
-                    };
-                };
-                400: components["responses"]["BadRequest"];
-            };
-        };
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/auth/audit/purge": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Purge old audit events
-         * @description Удаляет записи старше `older_than_days`. Сама операция логируется
-         *     как `audit.purged`.
-         */
-        post: {
-            parameters: {
-                query: {
-                    older_than_days: number;
-                };
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description Purged. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            removed?: number;
-                            older_than_days?: number;
-                        };
-                    };
-                };
-                400: components["responses"]["BadRequest"];
-            };
-        };
-        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2736,7 +2627,10 @@ export interface paths {
                         "application/json": components["schemas"]["OutputList"];
                     };
                 };
-                /** @description Unsafe поле / validation failed. */
+                /**
+                 * @description Тело не прошло проверку (`bad_json`) или выход не удалось
+                 *     собрать (`output_build_failed`). В ответе есть `outcome`.
+                 */
                 400: {
                     headers: {
                         [name: string]: unknown;
@@ -2746,6 +2640,20 @@ export interface paths {
                     };
                 };
                 404: components["responses"]["NotFound"];
+                /**
+                 * @description Новый выход не запустился (`output_start_failed`) либо не удалось
+                 *     ни применить изменение, ни восстановить прежний выход
+                 *     (`output_rollback_failed`). Поле `outcome` — `rolled_back` или
+                 *     `rollback_failed`.
+                 */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
         trace?: never;
@@ -6669,55 +6577,6 @@ export interface components {
         };
         UserDetail: components["schemas"]["User"] & {
             channel_grants?: components["schemas"]["ChannelGrant"][];
-        };
-        /**
-         * @description Источник правды: GET /api/auth/audit handler в
-         *     src/api/ControlApi.cpp:2009-2030. Backend ВСЕГДА эмитит id, ts, event;
-         *     остальные — условные (emit только если значение задано/не пустое).
-         *     `details` (parsed object) и `details_raw` (string) — взаимоисключающие:
-         *     backend парсит `e.details_json` и при успехе кладёт в `details`,
-         *     при ошибке парсинга — raw string в `details_raw`.
-         */
-        AuditEvent: {
-            /** Format: int64 */
-            id: number;
-            /**
-             * Format: int64
-             * @description Unix timestamp (seconds).
-             */
-            ts: number;
-            /**
-             * @description Snake-case код события. Не enum: каноническое множество живёт
-             *     в `AuthService::audit*` callsites. Известные: `login.ok`,
-             *     `login.fail`, `login.locked`, `logout`, `user.create`, `user.update`,
-             *     `user.delete`, `user.reset_password`, `user.unlock`,
-             *     `password.change`, `role.change`, `grant.add`, `grant.remove`,
-             *     `ldap.bind`, `smtp.test`, `plugin.install`, `plugin.uninstall`,
-             *     `master_key.rotate`. UI рендерит unknown коды как-есть.
-             * @example login.ok
-             */
-            event: string;
-            /**
-             * Format: int64
-             * @description Опционален: emit только если actor известен.
-             */
-            user_id?: number;
-            /** @description Опционален: emit только если username не пуст. */
-            username?: string;
-            /** @description Опционален: emit только если ip не пуст. */
-            ip?: string;
-            /**
-             * @description Произвольный JSON-объект (parse `e.details_json`). Опционален.
-             *     Взаимоисключающ с `details_raw`.
-             */
-            details?: {
-                [key: string]: unknown;
-            } | unknown[] | string | number | boolean | null;
-            /**
-             * @description Raw `details_json`-строка, если backend не смог распарсить как
-             *     JSON. Опционален. Взаимоисключающ с `details`.
-             */
-            details_raw?: string;
         };
         /**
          * @description Канало-агностический статус. `degraded` — функционирует, но в неполном

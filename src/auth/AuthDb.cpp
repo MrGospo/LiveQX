@@ -12,9 +12,11 @@
 // Не реализовано в этом коммите (приходит позже):
 //   - channel_permissions CRUD               (commit 22/24)
 //   - ldap_config + jwt_secret encryption    (commits 14, 17/24)
-//   - auth_audit insert/query                (commit 12/24)
 //
 // Sessions CRUD добавлен в commit 5/24 (login/logout/refresh).
+// Legacy auth_audit таблица и её insert/query удалены — enterprise
+// audit trail (state/audit.db) остаётся единственным хранилищем.
+// Существующие БД получают переименование в auth_audit_archived (v8).
 
 #include "auth/AuthDb.h"
 
@@ -35,7 +37,7 @@ namespace {
 // (existing<1) сначала создаётся v1-схема без этих колонок, потом v2/v3
 // ALTER их добавляют. Это позволяет держать v1-определение неизменным
 // (важно для рестора DBs из старых бэкапов).
-constexpr int kSchemaVersion = 7;
+constexpr int kSchemaVersion = 8;
 
 // Schema v1 — все таблицы из fix22 design-doc, чтобы не дёргать
 // миграцию от commit к commit. Поля, реально читаемые сейчас, —
@@ -98,16 +100,6 @@ CREATE TABLE IF NOT EXISTS ldap_config (
   updated_by                  INTEGER REFERENCES users(id)
 );
 
-CREATE TABLE IF NOT EXISTS auth_audit (
-  id            INTEGER PRIMARY KEY,
-  ts            INTEGER NOT NULL,
-  event         TEXT NOT NULL,
-  user_id       INTEGER,
-  username      TEXT,
-  ip            TEXT,
-  details_json  TEXT
-);
-
 CREATE TABLE IF NOT EXISTS password_resets (
   user_id     INTEGER PRIMARY KEY REFERENCES users(id),
   token_hash  TEXT NOT NULL,
@@ -121,8 +113,6 @@ CREATE TABLE IF NOT EXISTS jwt_secret (
   rotated_at        INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_audit_ts        ON auth_audit(ts);
-CREATE INDEX IF NOT EXISTS idx_audit_user      ON auth_audit(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user   ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_channel_perm_ch ON channel_permissions(channel_id);
 )sql";
@@ -206,6 +196,17 @@ CREATE TABLE IF NOT EXISTS system_time_config (
   updated_at            INTEGER
 );
 )sql";
+
+// Schema v8: retire the legacy auth_audit table. The enterprise audit trail
+// (state/audit.db) is now the sole writer for login/logout/refresh/password
+// events, but it only started receiving them after the legacy path was
+// consolidated, so rows written earlier exist nowhere else. Upgrades
+// therefore RENAME the table to auth_audit_archived instead of dropping it:
+// nothing reads or writes it any more, the history stays recoverable, and
+// deleting it later is a separate, explicit decision. A brand-new database
+// has an empty auth_audit (created by the v1 step), so that one is dropped.
+// The step runs in a transaction together with the version bump.
+constexpr const char* kAuditArchiveTable = "auth_audit_archived";
 
 std::int64_t nowUnixSec() {
     return std::chrono::duration_cast<std::chrono::seconds>(
@@ -346,6 +347,30 @@ bool AuthDb::runMigrations() {
     if (existing < 7) {
         if (!exec(kSchemaSqlV7)) return false;
     }
+    // Steps up to v7 are idempotent DDL applied one by one; v8 renames a
+    // table, which is not, so it is applied atomically with the version bump.
+    if (existing < 8) {
+        const std::string set_pragma =
+            "PRAGMA user_version=" + std::to_string(kSchemaVersion) + ";";
+        if (!exec("BEGIN IMMEDIATE;")) return false;
+        bool ok = exec("DROP INDEX IF EXISTS idx_audit_ts;")
+               && exec("DROP INDEX IF EXISTS idx_audit_user;");
+        if (ok && tableExists("auth_audit")) {
+            if (existing == 0) {
+                ok = exec("DROP TABLE auth_audit;");     // fresh db: empty
+            } else {
+                std::string target = kAuditArchiveTable;
+                if (tableExists(target))
+                    target += "_" + std::to_string(nowUnixSec());
+                ok = exec(("ALTER TABLE auth_audit RENAME TO " + target + ";").c_str());
+                if (ok) LOG_WARN("AuthDb: legacy auth_audit kept as {}", target);
+            }
+        }
+        ok = ok && exec(set_pragma.c_str());
+        if (!ok) { exec("ROLLBACK;"); return false; }
+        if (!exec("COMMIT;")) return false;
+        return true;
+    }
 
     if (existing < kSchemaVersion) {
         const std::string set_pragma =
@@ -353,6 +378,17 @@ bool AuthDb::runMigrations() {
         if (!exec(set_pragma.c_str())) return false;
     }
     return true;
+}
+
+bool AuthDb::tableExists(const std::string& name) {
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1;",
+            -1, &st, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+    const bool found = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    return found;
 }
 
 bool AuthDb::open() {
@@ -1433,117 +1469,6 @@ bool AuthDb::writeSmtpConfigRow(const SmtpConfigRow& row) {
     return true;
 }
 
-// ── Audit log (commit 12/24) ──────────────────────────────────────────
-
-bool AuthDb::insertAuditEvent(const AuditEvent& e) {
-    std::lock_guard<std::mutex> lk(mutex_);
-    if (!db_) return false;
-
-    constexpr const char* kSql =
-        "INSERT INTO auth_audit("
-        "  ts, event, user_id, username, ip, details_json) "
-        "VALUES(?, ?, ?, ?, ?, ?)";
-
-    sqlite3_stmt* st = nullptr;
-    if (sqlite3_prepare_v2(db_, kSql, -1, &st, nullptr) != SQLITE_OK) {
-        LOG_ERROR("AuthDb::insertAuditEvent prepare failed: {}",
-                  sqlite3_errmsg(db_));
-        return false;
-    }
-
-    int i = 1;
-    sqlite3_bind_int64(st, i++, e.ts ? e.ts : nowUnixSec());
-    sqlite3_bind_text (st, i++, e.event.c_str(), -1, SQLITE_TRANSIENT);
-    if (e.user_id) sqlite3_bind_int64(st, i++, *e.user_id);
-    else sqlite3_bind_null(st, i++);
-    if (e.username.empty()) sqlite3_bind_null(st, i++);
-    else sqlite3_bind_text(st, i++, e.username.c_str(), -1, SQLITE_TRANSIENT);
-    if (e.ip.empty()) sqlite3_bind_null(st, i++);
-    else sqlite3_bind_text(st, i++, e.ip.c_str(), -1, SQLITE_TRANSIENT);
-    if (e.details_json.empty()) sqlite3_bind_null(st, i++);
-    else sqlite3_bind_text(st, i++, e.details_json.c_str(), -1, SQLITE_TRANSIENT);
-
-    const int rc = sqlite3_step(st);
-    sqlite3_finalize(st);
-    if (rc != SQLITE_DONE) {
-        LOG_ERROR("AuthDb::insertAuditEvent step rc={}: {}", rc, sqlite3_errmsg(db_));
-        return false;
-    }
-    return true;
-}
-
-std::vector<AuditEvent> AuthDb::listAuditEvents(const AuditFilter& f) {
-    std::lock_guard<std::mutex> lk(mutex_);
-    std::vector<AuditEvent> out;
-    if (!db_) return out;
-
-    // Динамический WHERE — собираем только реально заполненные фильтры,
-    // чтобы не индексировать NULL-сравнения.
-    std::string sql =
-        "SELECT id, ts, event, user_id, username, ip, details_json "
-        "FROM auth_audit WHERE 1=1";
-
-    if (f.from_ts)        sql += " AND ts >= ?";
-    if (f.to_ts)          sql += " AND ts <  ?";
-    if (f.user_id)        sql += " AND user_id = ?";
-    if (!f.username.empty()) sql += " AND username = ?";
-    if (!f.event.empty())    sql += " AND event = ?";
-
-    // Пагинация — клиент GET /api/auth/audit просит limit+offset.
-    // Cap 1000 — защита от случайного "?limit=999999999".
-    sql += " ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?";
-
-    sqlite3_stmt* st = nullptr;
-    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &st, nullptr) != SQLITE_OK) {
-        LOG_ERROR("AuthDb::listAuditEvents prepare failed: {}",
-                  sqlite3_errmsg(db_));
-        return out;
-    }
-
-    int i = 1;
-    if (f.from_ts) sqlite3_bind_int64(st, i++, *f.from_ts);
-    if (f.to_ts)   sqlite3_bind_int64(st, i++, *f.to_ts);
-    if (f.user_id) sqlite3_bind_int64(st, i++, *f.user_id);
-    if (!f.username.empty())
-        sqlite3_bind_text(st, i++, f.username.c_str(), -1, SQLITE_TRANSIENT);
-    if (!f.event.empty())
-        sqlite3_bind_text(st, i++, f.event.c_str(), -1, SQLITE_TRANSIENT);
-
-    int limit = f.limit;
-    if (limit <= 0)     limit = 100;
-    if (limit > 1000)   limit = 1000;
-    int offset = f.offset < 0 ? 0 : f.offset;
-    sqlite3_bind_int(st, i++, limit);
-    sqlite3_bind_int(st, i++, offset);
-
-    while (sqlite3_step(st) == SQLITE_ROW) {
-        AuditEvent e;
-        e.id           = sqlite3_column_int64(st, 0);
-        e.ts           = sqlite3_column_int64(st, 1);
-        e.event        = colText(st, 2);
-        e.user_id      = colInt64Opt(st, 3);
-        e.username     = colText(st, 4);
-        e.ip           = colText(st, 5);
-        e.details_json = colText(st, 6);
-        out.push_back(std::move(e));
-    }
-    sqlite3_finalize(st);
-    return out;
-}
-
-int AuthDb::purgeAuditOlderThan(std::int64_t cutoff_ts) {
-    std::lock_guard<std::mutex> lk(mutex_);
-    if (!db_) return 0;
-    constexpr const char* kSql = "DELETE FROM auth_audit WHERE ts < ?";
-    sqlite3_stmt* st = nullptr;
-    if (sqlite3_prepare_v2(db_, kSql, -1, &st, nullptr) != SQLITE_OK) return 0;
-    sqlite3_bind_int64(st, 1, cutoff_ts);
-    const int rc = sqlite3_step(st);
-    const int n  = sqlite3_changes(db_);
-    sqlite3_finalize(st);
-    return rc == SQLITE_DONE ? n : 0;
-}
-
 // ── channel_permissions CRUD (commit 22/24) ───────────────────────────
 
 bool AuthDb::setChannelPermission(std::int64_t user_id,
@@ -1555,7 +1480,8 @@ bool AuthDb::setChannelPermission(std::int64_t user_id,
     if (!db_) return false;
     // UPSERT: ON CONFLICT (user_id, channel_id) DO UPDATE — обновляем
     // permission, granted_at, granted_by. Это admin-сценарий «поменял
-    // permission»; запись о предыдущем состоянии живёт в auth_audit.
+    // permission»; запись о предыдущем состоянии живёт в enterprise
+    // audit trail (state/audit.db).
     constexpr const char* kSql =
         "INSERT INTO channel_permissions"
         " (user_id, channel_id, permission, granted_at, granted_by)"

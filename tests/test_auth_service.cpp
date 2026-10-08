@@ -914,114 +914,6 @@ TEST_F(AuthServiceTest, AdminResetClearsExpiryAfterUserChangesPassword) {
     EXPECT_FALSE(u_final->initial_password_expires_at.has_value());
 }
 
-// ─── Audit log emission (commit 12/24) ─────────────────────────────────
-
-namespace {
-int countAudit(sa::AuthDb& db, const std::string& event) {
-    sa::AuditFilter f;
-    f.event = event;
-    return static_cast<int>(db.listAuditEvents(f).size());
-}
-}  // namespace
-
-TEST_F(AuthServiceTest, AuditLoginOk) {
-    insertLocalUser("alice", "p-12345678");
-    auto lr = svc_->login("alice", "p-12345678", "10.0.0.1", "ua");
-    ASSERT_TRUE(std::holds_alternative<sa::JwtIssuer::TokenPair>(lr.outcome));
-    EXPECT_EQ(countAudit(*db_, "login.ok"), 1);
-}
-
-TEST_F(AuthServiceTest, AuditLoginFailUnknownUser) {
-    svc_->login("ghost", "x", "10.0.0.2", "ua");
-    sa::AuditFilter f; f.event = "login.fail";
-    auto rows = db_->listAuditEvents(f);
-    ASSERT_EQ(rows.size(), 1u);
-    EXPECT_FALSE(rows[0].user_id.has_value());
-    EXPECT_EQ(rows[0].username, "ghost");
-    EXPECT_EQ(rows[0].ip, "10.0.0.2");
-    // details содержат reason
-    EXPECT_NE(rows[0].details_json.find("user_not_found"), std::string::npos);
-}
-
-TEST_F(AuthServiceTest, AuditLoginFailWrongPassword) {
-    insertLocalUser("alice", "p-correct");
-    svc_->login("alice", "WRONG", "ip", "ua");
-    sa::AuditFilter f; f.event = "login.fail";
-    auto rows = db_->listAuditEvents(f);
-    ASSERT_EQ(rows.size(), 1u);
-    EXPECT_NE(rows[0].details_json.find("invalid_password"), std::string::npos);
-}
-
-TEST_F(AuthServiceTest, AuditLogoutEmitsEvent) {
-    insertLocalUser("alice", "p-12345678");
-    auto lr = svc_->login("alice", "p-12345678", "ip", "ua");
-    auto* pair = std::get_if<sa::JwtIssuer::TokenPair>(&lr.outcome);
-    ASSERT_NE(pair, nullptr);
-    EXPECT_TRUE(svc_->logout(pair->jwt_id));
-    EXPECT_EQ(countAudit(*db_, "logout"), 1);
-}
-
-TEST_F(AuthServiceTest, AuditRefreshOkAndReplay) {
-    insertLocalUser("alice", "p-12345678");
-    auto lr = svc_->login("alice", "p-12345678", "ip", "ua");
-    auto* pair = std::get_if<sa::JwtIssuer::TokenPair>(&lr.outcome);
-    ASSERT_NE(pair, nullptr);
-
-    auto rr1 = svc_->refresh(pair->refresh_token, "ip", "ua");
-    ASSERT_TRUE(std::holds_alternative<sa::JwtIssuer::TokenPair>(rr1.outcome));
-    EXPECT_EQ(countAudit(*db_, "refresh.ok"), 1);
-
-    // Re-use старого refresh — replay.
-    auto rr2 = svc_->refresh(pair->refresh_token, "ip", "ua");
-    ASSERT_TRUE(std::holds_alternative<sa::AuthService::RefreshError>(rr2.outcome));
-    EXPECT_EQ(countAudit(*db_, "refresh.replay"), 1);
-}
-
-TEST_F(AuthServiceTest, AuditPasswordChanged) {
-    insertLocalUser("alice", "p-12345678");
-    auto lr = svc_->login("alice", "p-12345678", "ip", "ua");
-    auto* pair = std::get_if<sa::JwtIssuer::TokenPair>(&lr.outcome);
-    ASSERT_NE(pair, nullptr);
-    auto err = svc_->changeOwnPassword(pair->access_token,
-                                       "p-12345678",
-                                       "new-password-1");
-    EXPECT_FALSE(err.has_value());
-    EXPECT_EQ(countAudit(*db_, "password.changed"), 1);
-}
-
-TEST_F(AuthServiceTest, AuditBootstrapEmitsEvent) {
-    auto out = svc_->bootstrapInitialAdmin();
-    ASSERT_TRUE(out.created);
-    EXPECT_EQ(countAudit(*db_, "bootstrap.created"), 1);
-}
-
-TEST_F(AuthServiceTest, AuditPurgeOlderThanDays) {
-    // Вставим 3 события с разными ts вручную.
-    sa::AuditEvent old1; old1.ts = 1; old1.event = "old";
-    sa::AuditEvent old2; old2.ts = 2; old2.event = "old";
-    sa::AuditEvent fresh; fresh.event = "fresh";
-    // ts=0 → AuthDb проставит nowUnixSec().
-    ASSERT_TRUE(db_->insertAuditEvent(old1));
-    ASSERT_TRUE(db_->insertAuditEvent(old2));
-    ASSERT_TRUE(db_->insertAuditEvent(fresh));
-
-    // 1 день назад — fresh выживает, "old" с ts=1/2 всегда гораздо
-    // старше — будут вычищены.
-    const int removed = svc_->purgeAuditOlderThanDays(1);
-    EXPECT_GE(removed, 2);
-
-    EXPECT_EQ(countAudit(*db_, "old"), 0);
-    EXPECT_EQ(countAudit(*db_, "fresh"), 1);
-}
-
-TEST_F(AuthServiceTest, AuditPurgeNegativeDaysIsNoop) {
-    sa::AuditEvent e; e.event = "x";
-    ASSERT_TRUE(db_->insertAuditEvent(e));
-    EXPECT_EQ(svc_->purgeAuditOlderThanDays(0),  0);
-    EXPECT_EQ(svc_->purgeAuditOlderThanDays(-7), 0);
-    EXPECT_EQ(countAudit(*db_, "x"), 1);
-}
-
 // ── Brute-force lockout (commit 13/24) ──────────────────────────────────
 
 TEST_F(AuthServiceTest, FailedLoginsBelowThresholdDoNotLock) {
@@ -1063,8 +955,6 @@ TEST_F(AuthServiceTest, ReachingThresholdLocksAccount) {
     auto* err = std::get_if<sa::AuthService::LoginError>(&lr.outcome);
     ASSERT_NE(err, nullptr);
     EXPECT_EQ(*err, sa::AuthService::LoginError::AccountLocked);
-
-    EXPECT_GE(countAudit(*db_, "login.locked"), 1);
 }
 
 TEST_F(AuthServiceTest, ExponentialDelayDoublesEachFailureAfterThreshold) {
@@ -1176,20 +1066,6 @@ TEST_F(AuthServiceTest, AdminUnlockResetsCounterAndAllowsLogin) {
 
 TEST_F(AuthServiceTest, AdminUnlockMissingUserReturnsFalse) {
     EXPECT_FALSE(svc_->adminUnlockUser(99999));
-}
-
-TEST_F(AuthServiceTest, LockoutEmitsLoginLockedAndLoginFailAuditEvents) {
-    insertLocalUser("victim", "correct-pw");
-    sa::AuthService::LockoutPolicy p; p.threshold = 2; p.base_delay_sec = 60;
-    svc_->setLockoutPolicy(p);
-
-    svc_->login("victim", "WRONG", "10.0.0.1", "ua");
-    svc_->login("victim", "WRONG", "10.0.0.1", "ua");
-
-    // 2 login.fail (по одному на каждую попытку) и 1 login.locked
-    // (создан вторым промахом, который дотянул до threshold).
-    EXPECT_EQ(countAudit(*db_, "login.fail"),   2);
-    EXPECT_EQ(countAudit(*db_, "login.locked"), 1);
 }
 
 TEST_F(AuthServiceTest, ExpiredLockAllowsLoginAttemptAgain) {

@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../client';
 import type {
   LoginResponse, TokenPair, User, UserDetail,
-  ChannelPermissionRow, AuditEvent, OwnSession, MasterKeyInfo,
+  ChannelPermissionRow, OwnSession, MasterKeyInfo,
   LdapConfig, LdapConfigRequest, LdapTestResponse,
   SmtpConfig, SmtpConfigRequest, SmtpTestResponse,
 } from '../types';
@@ -183,32 +183,6 @@ export const useRemoveChannelGrant = (userId: number) => {
       qc.invalidateQueries({ queryKey: ['users', userId, 'channels'] });
       qc.invalidateQueries({ queryKey: ['channels', channelId, 'permissions'] });
     },
-  });
-};
-
-// ─── Audit ───────────────────────────────────────────────────────────────────
-
-export const useAuditEvents = (params: {
-  from_ts?: number; to_ts?: number;
-  user_id?: number; username?: string;
-  event?: string; limit?: number; offset?: number;
-}) =>
-  useQuery({
-    queryKey: ['audit', params],
-    queryFn: () => {
-      const qs = new URLSearchParams();
-      Object.entries(params).forEach(([k, v]) => v !== undefined && qs.set(k, String(v)));
-      return api.get<{ events: AuditEvent[] }>(`/api/auth/audit?${qs}`).then(r => r.events);
-    },
-    staleTime: 10_000,
-  });
-
-export const usePurgeAudit = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (older_than_days: number) =>
-      api.post<{ removed: number; older_than_days: number }>(`/api/auth/audit/purge?older_than_days=${older_than_days}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['audit'] }),
   });
 };
 

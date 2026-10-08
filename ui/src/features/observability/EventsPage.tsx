@@ -17,7 +17,7 @@ import { useAuthStore } from '@/stores/auth';
 import { useEscClose } from '@/hooks/useEscClose';
 
 const EVENT_TYPE_GROUPS = [
-  'all', 'channel', 'output', 'schedule', 'gateway', 'plugin', 'auth', 'stress',
+  'all', 'channel', 'output', 'schedule', 'gateway', 'plugin', 'audit', 'stress',
 ] as const;
 
 // Fields that carry stream-level metadata rather than event payload.
@@ -33,16 +33,22 @@ function payloadPreview(ev: SseEvent): string {
   return Object.keys(rest).length ? JSON.stringify(rest) : '';
 }
 
-// Render an auth_audit event's payload as `event · details` so operators
-// see the action verb (channel.play, admin.user.created, …) without
-// squinting at raw JSON. Falls back to generic preview if the shape is
-// unexpected.
+// Render an audit_event payload as `action · target_type:target_id · http_status`.
+// Enterprise audit rows carry action/target/http fields directly on the
+// SSE payload (see ControlApi.cpp post-handler). Falls back to generic
+// preview if the shape is unexpected.
 function auditPreview(ev: SseEvent): string {
-  const action = typeof ev.event === 'string' ? ev.event : '';
-  const details = (ev as { details?: unknown }).details;
+  // SseEvent has an open index signature, so the audit fields are read
+  // directly and narrowed with typeof.
+  const action = typeof ev.action === 'string' ? ev.action : '';
   if (!action) return payloadPreview(ev);
-  if (details === undefined || details === null) return action;
-  return `${action} · ${typeof details === 'string' ? details : JSON.stringify(details)}`;
+  const targetType = typeof ev.target_type === 'string' ? ev.target_type : '';
+  const targetId = ev.target_id;
+  const status = ev.http_status;
+  const parts: string[] = [action];
+  if (targetType) parts.push(targetId != null ? `${targetType}:${targetId}` : targetType);
+  if (typeof status === 'number') parts.push(String(status));
+  return parts.join(' · ');
 }
 
 const EVENT_COLORS: Record<string, string> = {
@@ -51,7 +57,7 @@ const EVENT_COLORS: Record<string, string> = {
   clip_change:           'text-[var(--success)]',
   output_state_change:   'text-[var(--warning)]',
   schedule_active_change:'text-[var(--text-muted)]',
-  auth_audit:            'text-[var(--danger)]',
+  audit_event:           'text-[var(--danger)]',
   stress_run_started:    'text-[var(--warning)]',
   stress_run_finished:   'text-[var(--warning)]',
   plugin_install:        'text-[var(--info)]',
@@ -80,9 +86,12 @@ export default function EventsPage() {
   const visible = paused ? frozenEvents : events;
 
   const filtered = visible.filter(ev => {
-    if (typeFilter !== 'all' && !ev.type.startsWith(typeFilter.replace('auth', 'auth_'))) return false;
-    // Admin-only: auth events
-    if (ev.type === 'auth_audit' && role !== 'admin') return false;
+    if (typeFilter !== 'all') {
+      if (typeFilter === 'audit') { if (ev.type !== 'audit_event') return false; }
+      else if (!ev.type.startsWith(typeFilter)) return false;
+    }
+    // Admin-only: enterprise audit stream
+    if (ev.type === 'audit_event' && role !== 'admin') return false;
     if (search && !JSON.stringify(ev).toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
@@ -165,8 +174,10 @@ export default function EventsPage() {
               </thead>
               <tbody>
                 {filtered.map((ev, i) => {
-                  const isAudit = ev.type === 'auth_audit';
-                  const username = typeof ev.username === 'string' ? ev.username : '';
+                  const isAudit = ev.type === 'audit_event';
+                  const username = typeof ev.actor_username === 'string'
+                    ? ev.actor_username
+                    : (typeof ev.username === 'string' ? ev.username : '');
                   const ip       = typeof ev.ip === 'string' ? ev.ip : '';
                   const preview  = isAudit ? auditPreview(ev) : payloadPreview(ev);
                   // Time source: prefer ev.ts (backend unix-ms), fall back to

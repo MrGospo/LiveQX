@@ -286,8 +286,8 @@ public:
     // Hard-delete (commit fix38-followup). Атомарно сносит users-row +
     // sessions/channel_permissions/password_resets + NULL'ит self-FK
     // в users.created_by, ldap_config.updated_by, smtp_config.updated_by.
-    // auth_audit'у юзер не нужен (он хранит username snapshot'ом) — purge
-    // совместим с retention-политикой. actor_id блокирует self-purge;
+    // Enterprise-аудит хранит username snapshot'ом, purge юзера не влияет
+    // на существующие audit-записи. actor_id блокирует self-purge;
     // last-enabled-admin проверка не даёт залочить control-plane.
     // Caller обязан проверить RBAC=Admin до вызова.
     struct PurgedUser {
@@ -356,17 +356,16 @@ public:
     void setLockoutPolicy(LockoutPolicy p) noexcept { policy_ = p; }
 
     // Wire process-wide EventBus. Optional: when set, emitAudit() fans out
-    // an AuthAudit event to SSE subscribers so /observability/events can
-    // render admin actions in real time without polling the auth_audit
-    // table. Nullable; unset (or explicitly nullptr) keeps the DB-only
-    // behaviour used by unit tests that don't want a live bus.
+    // an `audit_event` SSE signal so /settings/audit-trail refetches
+    // without polling. Nullable — unit tests that don't need a live bus
+    // can leave it unset.
     void setEventBus(liveqx::events::EventBus* bus) noexcept { event_bus_ = bus; }
 
     // Wire the enterprise AuditLogger. When set, every emitAudit() call
-    // also mirrors the event into state/audit.db under Category::Auth so
-    // login/logout/refresh/password lifecycle appears alongside all
-    // other server mutations on one timeline. Nullable — unit tests and
-    // legacy setups without an audit stack keep working unchanged.
+    // writes the event into state/audit.db under Category::Auth via the
+    // sync broken-glass path so a full async backlog can never lose a
+    // login record. Nullable — unit tests without an audit stack skip
+    // the write silently.
     void setAuditLogger(liveqx::audit::AuditLogger* al) noexcept {
         audit_logger_ = al;
     }
@@ -428,27 +427,18 @@ public:
     // редких CLI-утилит; внутренний код этим не пользуется.
     static std::string hashRefreshToken(std::string_view plaintext);
 
-    // ── Audit log (commit 12/24) ───────────────────────────────────────
+    // ── Audit log (enterprise-only) ────────────────────────────────────
     //
-    // Тонкий fasade над AuthDb::insertAuditEvent — нужен чтобы (а) REST
-    // мог логировать admin-действия с actor'ом (jti того, кто дёрнул
-    // эндпоинт), (б) AuthService мог логировать self-events внутренне.
-    // details_json пишется в "сырое" поле БД — caller сам сериализует
-    // в JSON, или передаёт пустую строку.
+    // Emits an auth-category row into the enterprise audit trail
+    // (state/audit.db) via the sync broken-glass writer. Also publishes
+    // an `audit_event` SSE signal so an open trail view refetches.
+    // details_json is written as-is to details_json; caller serialises
+    // to JSON or passes an empty string.
     void emitAudit(std::string_view event,
                    std::optional<std::int64_t> user_id,
                    std::string_view username,
                    std::string_view ip,
                    std::string_view details_json);
-
-    // Retention sweep — удаляет auth_audit-записи старше cutoff_ts.
-    // Возвращает число удалённых записей. Идемпотентен.
-    int purgeAuditOlderThan(std::int64_t cutoff_ts);
-
-    // Convenience wrapper — same as purgeAuditOlderThan(now - days*86400).
-    int purgeAuditOlderThanDays(int days);
-
-    std::vector<AuditEvent> listAuditEvents(const AuditFilter& f);
 
 private:
     AuthDb&             db_;
@@ -464,13 +454,14 @@ private:
     std::filesystem::path initial_admin_password_file_;
 
     // Set via setEventBus(). nullptr in unit tests — emitAudit skips the
-    // publish step then; DB insert happens regardless.
+    // SSE publish then; DB write still happens if audit_logger_ is set.
     liveqx::events::EventBus* event_bus_{nullptr};
 
-    // Set via setAuditLogger(). Optional — when non-null every emitAudit
-    // is mirrored into the enterprise audit trail (state/audit.db) under
+    // Set via setAuditLogger(). When non-null every emitAudit writes
+    // into the enterprise audit trail (state/audit.db) under
     // Category::Auth via the sync broken-glass path so a full async
-    // backlog can never lose a login record.
+    // backlog can never lose a login record. nullptr in unit tests —
+    // emitAudit becomes a no-op then.
     liveqx::audit::AuditLogger* audit_logger_{nullptr};
 
     // Issue + persist session row. Used by both login() and refresh().

@@ -5,10 +5,9 @@ import type {
   AuditTrailVerify, AuditTrailCategory, AuditTrailStats,
 } from '../types';
 
-// Enterprise audit trail (state/audit.db). Distinct from /api/auth/audit —
-// that endpoint reads the legacy auth-only auth_audit table. This one
-// covers every server mutation (channels/outputs/gateways/plugins/mounts/
-// system) plus auth events mirrored from AuthService.
+// Enterprise audit trail (state/audit.db). Covers every server mutation
+// (channels/outputs/gateways/plugins/mounts/system) plus auth events
+// mirrored from AuthService.
 
 function buildQs(f: AuditTrailFilter): string {
   const qs = new URLSearchParams();

@@ -37,16 +37,16 @@ Event evtFor(EventType t, int channel_id = -1) {
 
 TEST(SseFilter, AdminSeesEverything) {
     auto ctx = ctxFor(Role::Admin);
-    EXPECT_TRUE(sseEventVisibleTo(ctx, evtFor(EventType::AuthAudit)));
+    EXPECT_TRUE(sseEventVisibleTo(ctx, evtFor(EventType::AuditEvent)));
     EXPECT_TRUE(sseEventVisibleTo(ctx, evtFor(EventType::PluginStatusChange)));
     EXPECT_TRUE(sseEventVisibleTo(ctx, evtFor(EventType::ChannelStateChange, 7)));
     EXPECT_TRUE(sseEventVisibleTo(ctx, evtFor(EventType::ChannelStateChange, -1)));
     EXPECT_TRUE(sseEventVisibleTo(ctx, evtFor(EventType::HealthChange, 99)));
 }
 
-TEST(SseFilter, OperatorBlockedFromAuthAudit) {
+TEST(SseFilter, OperatorBlockedFromAuditEvent) {
     auto ctx = ctxFor(Role::Operator);
-    EXPECT_FALSE(sseEventVisibleTo(ctx, evtFor(EventType::AuthAudit)));
+    EXPECT_FALSE(sseEventVisibleTo(ctx, evtFor(EventType::AuditEvent)));
 }
 
 TEST(SseFilter, OperatorAllowedForPluginAndChannelEvents) {
@@ -65,9 +65,9 @@ TEST(SseFilter, ViewerBlockedFromGatewayStateChange) {
     EXPECT_FALSE(sseEventVisibleTo(ctx, evtFor(EventType::GatewayStateChange)));
 }
 
-TEST(SseFilter, ViewerBlockedFromAuthAuditAndPlugin) {
+TEST(SseFilter, ViewerBlockedFromAuditEventAndPlugin) {
     auto ctx = ctxFor(Role::Viewer);
-    EXPECT_FALSE(sseEventVisibleTo(ctx, evtFor(EventType::AuthAudit)));
+    EXPECT_FALSE(sseEventVisibleTo(ctx, evtFor(EventType::AuditEvent)));
     EXPECT_FALSE(sseEventVisibleTo(ctx, evtFor(EventType::PluginStatusChange)));
 }
 
@@ -117,7 +117,7 @@ TEST(SseFilter, DefaultSubscriptionExcludesClipChange) {
 
 TEST(SseFilter, DefaultSubscriptionIncludesOperationalEvents) {
     using liveqx::api::sseEventInDefaultSubscription;
-    EXPECT_TRUE(sseEventInDefaultSubscription(EventType::AuthAudit));
+    EXPECT_TRUE(sseEventInDefaultSubscription(EventType::AuditEvent));
     EXPECT_TRUE(sseEventInDefaultSubscription(EventType::ChannelStateChange));
     EXPECT_TRUE(sseEventInDefaultSubscription(EventType::OutputStateChange));
     EXPECT_TRUE(sseEventInDefaultSubscription(EventType::HealthChange));

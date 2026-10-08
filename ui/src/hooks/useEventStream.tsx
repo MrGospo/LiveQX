@@ -139,10 +139,6 @@ export function EventBusProvider({ children }: { children: React.ReactNode }) {
           case 'plugin_uninstall':
             qc.invalidateQueries({ queryKey: ['plugins'] });
             break;
-          // § 3 — Q3 in answers1.md: invalidate audit query on auth events
-          case 'auth_audit':
-            qc.invalidateQueries({ queryKey: ['audit'] });
-            break;
           // Enterprise audit trail — one signal per row written to
           // state/audit.db. Payload is a compact snapshot; the trail
           // page refetches for the full row (mac, id, chain-position).

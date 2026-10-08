@@ -42,7 +42,6 @@ enum class EventType {
     HealthChange,          // {channel_id, health, reason}
     ScheduleActive,        // {channel_id, entry_id}
     PluginStatusChange,    // {plugin, status}
-    AuthAudit,             // {event, user, ip, ...}
     StressRunStarted,      // {started_at_ms, duration_sec, channels, scenarios}
     StressRunFinished,     // {pass, verdict, report_id, ended_at_ms}
     GatewayStateChange,    // {id, name, state}  fix33 D1

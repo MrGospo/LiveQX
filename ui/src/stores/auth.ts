@@ -16,7 +16,7 @@ interface AuthState {
   user: Pick<User, 'id' | 'username' | 'role'> & { must_change_password?: boolean } | null;
   role: Role | null;
 
-  // Per-channel grants (loaded after login, refreshed on SSE AuthAudit)
+  // Per-channel grants (loaded after login, refreshed on SSE audit_event)
   channelGrants: Record<number, 'view' | 'operate'>;
 
   // Actions

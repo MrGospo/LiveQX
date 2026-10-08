@@ -90,36 +90,4 @@ struct RequestContext {
     std::vector<ChannelGrant> channel_grants;
 };
 
-// Audit event (commit 12/24).
-//
-// Хранится в auth_audit. event — текстовый код, не enum: операторы пишут
-// фильтры в SIEM по строкам, и любой новый event-тип (например, ldap.bind)
-// должен появляться без перекомпиляции callers/REST API. Канонические
-// имена перечислены в AuthService::audit*; держим их рядом с тем, кто
-// их эмитит, а не в централизованном enum.
-//
-// details_json — произвольный JSON-string (опционально). Туда лежат
-// контекстные поля, не вынесенные в первоклассные колонки: например
-// "reason":"bad_password", "old_role":"viewer","new_role":"operator".
-struct AuditEvent {
-    std::int64_t                  id{0};
-    std::int64_t                  ts{0};            // unix-sec
-    std::string                   event;            // e.g. "login.ok"
-    std::optional<std::int64_t>   user_id;          // nullable
-    std::string                   username;         // empty if unknown
-    std::string                   ip;               // remote ip
-    std::string                   details_json;     // raw JSON string
-};
-
-// Filter for AuthDb::listAuditEvents.
-struct AuditFilter {
-    std::optional<std::int64_t>   from_ts;          // ts >= from_ts
-    std::optional<std::int64_t>   to_ts;            // ts <  to_ts (exclusive)
-    std::optional<std::int64_t>   user_id;
-    std::string                   username;         // exact match if non-empty
-    std::string                   event;            // exact match if non-empty
-    int                           limit{100};       // ceiling 1000
-    int                           offset{0};
-};
-
 }  // namespace liveqx::auth

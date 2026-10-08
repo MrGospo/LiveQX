@@ -13,7 +13,6 @@ const char* eventTypeName(EventType t) noexcept {
         case EventType::HealthChange:        return "health_change";
         case EventType::ScheduleActive:      return "schedule_active";
         case EventType::PluginStatusChange:  return "plugin_status_change";
-        case EventType::AuthAudit:           return "auth_audit";
         case EventType::StressRunStarted:    return "stress_run_started";
         case EventType::StressRunFinished:   return "stress_run_finished";
         case EventType::GatewayStateChange:  return "gateway_state_change";
@@ -29,7 +28,6 @@ std::optional<EventType> parseEventType(const std::string& s) noexcept {
     if (s == "health_change")         return EventType::HealthChange;
     if (s == "schedule_active")       return EventType::ScheduleActive;
     if (s == "plugin_status_change")  return EventType::PluginStatusChange;
-    if (s == "auth_audit")            return EventType::AuthAudit;
     if (s == "stress_run_started")    return EventType::StressRunStarted;
     if (s == "stress_run_finished")   return EventType::StressRunFinished;
     if (s == "gateway_state_change")  return EventType::GatewayStateChange;

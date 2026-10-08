@@ -102,10 +102,6 @@ tags:
     description: |
       Управление учётками (admin only). CRUD + role + per-channel grants
       + unlock + reset password. LDAP-юзеры read-only, кроме role/grants.
-  - name: Audit
-    description: |
-      Журнал security-событий (login.ok, login.fail, user.create, plugin.install,
-      …). Только admin. Поддерживает фильтры и пагинацию.
   - name: LDAP
     description: |
       Конфиг LDAP (server/bind/search/group→role). Test-bind. Hot-reload
@@ -779,8 +775,8 @@ paths:
         Физически удаляет users-row + дочерние записи (sessions,
         channel_permissions, password_resets). Self-FK в users.created_by /
         ldap_config.updated_by / smtp_config.updated_by обнуляются.
-        auth_audit-записи СОХРАНЯЮТСЯ (там username хранится snapshot'ом),
-        включая запись `admin.user.purged` об этом действии.
+        Enterprise-аудит (state/audit.db) сохраняет запись
+        `admin.user.purged` об этом действии.
 
         Отказы:
           * 409 `cannot_delete_self` — нельзя удалить собственную учётку
@@ -908,100 +904,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-
-  # ──────────────────────────────────────────────────────────────────────────
-  # Audit
-  # ──────────────────────────────────────────────────────────────────────────
-
-  /api/auth/audit:
-    get:
-      tags: [Audit]
-      summary: List audit events
-      description: |
-        Admin-only. Поддерживает фильтры (date range, user_id, username
-        exact, event exact) и пагинацию (limit max 1000, offset).
-
-        `details` — структурированный объект (бэкенд парсит хранящийся
-        JSON-string обратно перед отдачей). При невалидном JSON — `details_raw`
-        со строкой.
-      parameters:
-        - name: from_ts
-          in: query
-          required: false
-          description: Unix timestamp (sec). Включительно.
-          schema:
-            type: integer
-            format: int64
-        - name: to_ts
-          in: query
-          required: false
-          description: Unix timestamp (sec). Эксклюзивно.
-          schema:
-            type: integer
-            format: int64
-        - name: user_id
-          in: query
-          required: false
-          schema:
-            type: integer
-            format: int64
-        - name: username
-          in: query
-          required: false
-          description: Exact match.
-          schema:
-            type: string
-        - name: event
-          in: query
-          required: false
-          description: Exact match snake-case кода (login.ok, login.fail, …).
-          schema:
-            type: string
-        - $ref: '#/components/parameters/LimitParam'
-        - $ref: '#/components/parameters/OffsetParam'
-      responses:
-        '200':
-          description: ok
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  events:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/AuditEvent'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-
-  /api/auth/audit/purge:
-    post:
-      tags: [Audit]
-      summary: Purge old audit events
-      description: |
-        Удаляет записи старше `older_than_days`. Сама операция логируется
-        как `audit.purged`.
-      parameters:
-        - name: older_than_days
-          in: query
-          required: true
-          schema:
-            type: integer
-            minimum: 1
-      responses:
-        '200':
-          description: Purged.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  removed:
-                    type: integer
-                  older_than_days:
-                    type: integer
-        '400':
-          $ref: '#/components/responses/BadRequest'
 
   # ──────────────────────────────────────────────────────────────────────────
   # LDAP
@@ -1743,59 +1645,6 @@ paths:
                 $ref: '#/components/schemas/PlaybackLogResponse'
         '404':
           $ref: '#/components/responses/NotFound'
-        '500':
-          description: |
-            Новый выход не запустился (`output_start_failed`) либо не удалось
-            ни применить изменение, ни восстановить прежний выход
-            (`output_rollback_failed`). Поле `outcome` — `rolled_back` или
-            `rollback_failed`.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-
-  /api/channels/{id}/outputs/{output_id}/restart:
-    parameters:
-      - $ref: '#/components/parameters/ChannelId'
-      - name: output_id
-        in: path
-        required: true
-        schema: {type: string}
-    post:
-      tags: [Outputs]
-      summary: Restart output from its stored config
-      description: |
-        Пересобирает выход из сохранённой конфигурации — тот же
-        транзакционный путь, что и PATCH (проверка, откат при ошибке,
-        запись в журнал действий `output.restarted` / `output.restart_failed`).
-        Для multicast замена идёт без перерыва в потоке (новый драйвер
-        запускается до остановки старого); для остальных типов поток на
-        выходе прерывается на секунды.
-
-        Это также способ вернуть выход, который остался в конфигурации без
-        работающего драйвера после неудачного отката (в списке выходов он
-        виден как `state: "down"`).
-      responses:
-        '200':
-          description: Updated outputs list.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OutputList'
-        '400':
-          description: Сохранённая конфигурация не прошла проверку или выход не удалось собрать.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          description: Выход не запустился (`output_start_failed`) или не удалось восстановить прежнее состояние (`output_rollback_failed`). Поле `outcome` — `rolled_back` или `rollback_failed`.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
 
   # ──────────────────────────────────────────────────────────────────────────
   # Outputs
@@ -1922,10 +1771,11 @@ paths:
           application/json:
             schema:
               type: object
+              required: [type]
               additionalProperties: true
               description: |
-                Только subset OutputConfig — поля для patch'а. Тип менять
-                нельзя.
+                Полная конфигурация выхода (см. `OutputConfig*`). `type`
+                обязателен.
       responses:
         '200':
           description: Updated outputs list.
@@ -1934,13 +1784,68 @@ paths:
               schema:
                 $ref: '#/components/schemas/OutputList'
         '400':
-          description: Unsafe поле / validation failed.
+          description: |
+            Тело не прошло проверку (`bad_json`) или выход не удалось
+            собрать (`output_build_failed`). В ответе есть `outcome`.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          description: |
+            Новый выход не запустился (`output_start_failed`) либо не удалось
+            ни применить изменение, ни восстановить прежний выход
+            (`output_rollback_failed`). Поле `outcome` — `rolled_back` или
+            `rollback_failed`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/channels/{id}/outputs/{output_id}/restart:
+    parameters:
+      - $ref: '#/components/parameters/ChannelId'
+      - name: output_id
+        in: path
+        required: true
+        schema: {type: string}
+    post:
+      tags: [Outputs]
+      summary: Restart output from its stored config
+      description: |
+        Пересобирает выход из сохранённой конфигурации — тот же
+        транзакционный путь, что и PATCH (проверка, откат при ошибке,
+        запись в журнал действий `output.restarted` / `output.restart_failed`).
+        Для multicast замена идёт без перерыва в потоке (новый драйвер
+        запускается до остановки старого); для остальных типов поток на
+        выходе прерывается на секунды.
+
+        Это также способ вернуть выход, который остался в конфигурации без
+        работающего драйвера после неудачного отката (в списке выходов он
+        виден как `state: "down"`).
+      responses:
+        '200':
+          description: Updated outputs list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutputList'
+        '400':
+          description: Сохранённая конфигурация не прошла проверку или выход не удалось собрать.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          description: Выход не запустился (`output_start_failed`) или не удалось восстановить прежнее состояние (`output_rollback_failed`). Поле `outcome` — `rolled_back` или `rollback_failed`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /api/channels/{id}/outputs/{output_id}/status:
     parameters:
@@ -4574,69 +4479,6 @@ components:
               type: array
               items:
                 $ref: '#/components/schemas/ChannelGrant'
-
-    # ────────────────────────────────────────────────────────────────────────
-    # Audit
-    # ────────────────────────────────────────────────────────────────────────
-
-    AuditEvent:
-      type: object
-      additionalProperties: false
-      description: |
-        Источник правды: GET /api/auth/audit handler в
-        src/api/ControlApi.cpp:2009-2030. Backend ВСЕГДА эмитит id, ts, event;
-        остальные — условные (emit только если значение задано/не пустое).
-        `details` (parsed object) и `details_raw` (string) — взаимоисключающие:
-        backend парсит `e.details_json` и при успехе кладёт в `details`,
-        при ошибке парсинга — raw string в `details_raw`.
-      required: [id, ts, event]
-      properties:
-        id:
-          type: integer
-          format: int64
-        ts:
-          type: integer
-          format: int64
-          description: Unix timestamp (seconds).
-        event:
-          type: string
-          description: |
-            Snake-case код события. Не enum: каноническое множество живёт
-            в `AuthService::audit*` callsites. Известные: `login.ok`,
-            `login.fail`, `login.locked`, `logout`, `user.create`, `user.update`,
-            `user.delete`, `user.reset_password`, `user.unlock`,
-            `password.change`, `role.change`, `grant.add`, `grant.remove`,
-            `ldap.bind`, `smtp.test`, `plugin.install`, `plugin.uninstall`,
-            `master_key.rotate`. UI рендерит unknown коды как-есть.
-          example: login.ok
-        user_id:
-          type: integer
-          format: int64
-          description: 'Опционален: emit только если actor известен.'
-        username:
-          type: string
-          description: 'Опционален: emit только если username не пуст.'
-        ip:
-          type: string
-          description: 'Опционален: emit только если ip не пуст.'
-        details:
-          description: |
-            Произвольный JSON-объект (parse `e.details_json`). Опционален.
-            Взаимоисключающ с `details_raw`.
-          oneOf:
-            - type: object
-              additionalProperties: true
-            - type: array
-              items: {}
-            - type: string
-            - type: number
-            - type: boolean
-            - type: 'null'
-        details_raw:
-          type: string
-          description: |
-            Raw `details_json`-строка, если backend не смог распарсить как
-            JSON. Опционален. Взаимоисключающ с `details`.
 
     # ────────────────────────────────────────────────────────────────────────
     # Health/state

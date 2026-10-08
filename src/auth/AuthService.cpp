@@ -289,107 +289,48 @@ std::optional<Role> AuthService::pickRoleForGroups(
     return best;
 }
 
-// ── Audit log (commit 12/24) ──────────────────────────────────────────
+// ── Audit log (enterprise-only) ───────────────────────────────────────
+//
+// Auth events are written into the enterprise audit trail
+// (state/audit.db) via the sync broken-glass writer so a wedged async
+// backlog can never lose one — auth is the one category that stays
+// reachable even when the trail is fail-closed to mutations.
 
 void AuthService::emitAudit(std::string_view event,
                             std::optional<std::int64_t> user_id,
                             std::string_view username,
                             std::string_view ip,
                             std::string_view details_json) {
-    AuditEvent e;
-    e.ts           = nowUnixSec();
-    e.event        = std::string(event);
-    e.user_id      = user_id;
-    e.username     = std::string(username);
-    e.ip           = std::string(ip);
-    e.details_json = std::string(details_json);
-    const bool inserted = db_.insertAuditEvent(e);
-    if (!inserted) {
-        LOG_WARN("AuthService: failed to write audit event '{}'", e.event);
-    }
-    // Publish to SSE regardless of DB outcome — an operator watching the
-    // events stream still wants to see live activity even if retention
-    // storage is temporarily broken (disk full, WAL locked).
+    if (!audit_logger_) return;
+
+    const auto ts = nowUnixSec();
+    liveqx::audit::AuditEvent ae;
+    ae.ts_unix_ms     = ts * 1000;
+    ae.category       = liveqx::audit::Category::Auth;
+    ae.action         = std::string(event);
+    ae.actor_user_id  = user_id;
+    ae.actor_username = std::string(username);
+    ae.actor_ip       = std::string(ip);
+    ae.target_type    = "user";
+    ae.target_id      = std::string(username);
+    ae.summary        = ae.action + " " + ae.actor_username;
+    if (!details_json.empty()) ae.details_json = std::string(details_json);
+    audit_logger_->logSyncBrokenGlass(std::move(ae));
+
+    // Emit the SSE trail-signal so an open audit-trail view updates
+    // without polling.
     if (event_bus_) {
-        nlohmann::json payload = {
-            {"event",    e.event},
-            {"ts",       e.ts},
-            {"username", e.username},
-            {"ip",       e.ip},
+        nlohmann::json ap = {
+            {"category",       "auth"},
+            {"action",         std::string(event)},
+            {"target_type",    "user"},
+            {"target_id",      std::string(username)},
+            {"actor_username", std::string(username)},
+            {"actor_ip",       std::string(ip)},
         };
-        if (e.user_id.has_value()) {
-            payload["user_id"] = *e.user_id;
-        } else {
-            payload["user_id"] = nullptr;
-        }
-        if (!e.details_json.empty()) {
-            try {
-                payload["details"] = nlohmann::json::parse(e.details_json);
-            } catch (const std::exception&) {
-                // Legacy call site passed a non-JSON string — preserve it
-                // verbatim so the UI can still render something meaningful.
-                payload["details"] = e.details_json;
-            }
-        }
-        event_bus_->publish(liveqx::events::EventType::AuthAudit,
-                            /*channel_id=*/-1, std::move(payload));
+        event_bus_->publish(liveqx::events::EventType::AuditEvent,
+                            /*channel_id=*/-1, std::move(ap));
     }
-
-    // Mirror into the enterprise audit trail (state/audit.db). Uses the
-    // sync broken-glass writer so a wedged async backlog can never lose
-    // an auth event — auth is the one category that stays reachable even
-    // when the trail is fail-closed to mutations.
-    if (audit_logger_) {
-        liveqx::audit::AuditEvent ae;
-        ae.ts_unix_ms   = e.ts * 1000;
-        ae.category     = liveqx::audit::Category::Auth;
-        ae.action       = e.event;
-        ae.actor_user_id  = e.user_id;
-        ae.actor_username = e.username;
-        ae.actor_ip     = e.ip;
-        ae.target_type  = "user";
-        ae.target_id    = e.username;
-        ae.summary      = e.event + " " + e.username;
-        if (!e.details_json.empty()) ae.details_json = e.details_json;
-        audit_logger_->logSyncBrokenGlass(std::move(ae));
-
-        // Also emit the SSE trail-signal so an open audit-trail view
-        // updates without polling. Distinct from the AuthAudit event
-        // above (which powers /observability/events) — the audit-trail
-        // page listens on `audit_event` and refetches on every hit.
-        if (event_bus_) {
-            nlohmann::json ap = {
-                {"category",       "auth"},
-                {"action",         e.event},
-                {"target_type",    "user"},
-                {"target_id",      e.username},
-                {"actor_username", e.username},
-                {"actor_ip",       e.ip},
-            };
-            event_bus_->publish(liveqx::events::EventType::AuditEvent,
-                                /*channel_id=*/-1, std::move(ap));
-        }
-    }
-}
-
-int AuthService::purgeAuditOlderThan(std::int64_t cutoff_ts) {
-    const int n = db_.purgeAuditOlderThan(cutoff_ts);
-    if (n > 0) {
-        LOG_INFO("AuthService::purgeAuditOlderThan removed {} entries (cutoff_ts={})",
-                 n, cutoff_ts);
-    }
-    return n;
-}
-
-int AuthService::purgeAuditOlderThanDays(int days) {
-    if (days <= 0) return 0;
-    const auto cutoff = nowUnixSec() -
-        static_cast<std::int64_t>(days) * 86400;
-    return purgeAuditOlderThan(cutoff);
-}
-
-std::vector<AuditEvent> AuthService::listAuditEvents(const AuditFilter& f) {
-    return db_.listAuditEvents(f);
 }
 
 std::optional<JwtIssuer::TokenPair>

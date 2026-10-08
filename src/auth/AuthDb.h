@@ -70,8 +70,8 @@ public:
     // Hard-delete: atomic transaction wipes the user row plus rows in
     // sessions, channel_permissions, password_resets keyed on user_id,
     // and NULLs out self-FKs in users.created_by, ldap_config.updated_by,
-    // smtp_config.updated_by. auth_audit rows survive (they snapshot the
-    // username, no FK on user_id) — purge stays compliant with audit
+    // smtp_config.updated_by. Enterprise audit rows survive (they snapshot
+    // the username, no FK on user_id) — purge stays compliant with audit
     // retention. Returns true iff the user row was actually removed.
     // Caller (AuthService) must enforce policy: not self, not last admin.
     bool purgeUser(std::int64_t user_id);
@@ -142,15 +142,6 @@ public:
     bool touchSession(std::string_view jwt_id,
                       std::int64_t when,
                       std::int64_t throttle_sec);
-
-    // ── Audit log (commit 12/24) ───────────────────────────────────────
-    //
-    // Запись событий — append-only; чтения — фильтр + пагинация для
-    // GET /api/auth/audit (admin). Retention реализован через purge:
-    // оператор/janitor вызывает purgeAuditOlderThan на основе политики.
-    bool insertAuditEvent(const AuditEvent& e);
-    std::vector<AuditEvent> listAuditEvents(const AuditFilter& f);
-    int  purgeAuditOlderThan(std::int64_t cutoff_ts);
 
     // ── JWT secret encrypted-at-rest (commit 14/24) ────────────────────
     //
@@ -314,6 +305,8 @@ private:
 
     bool runMigrations();
     bool exec(const char* sql);
+    // True if a table with this name exists in the open database.
+    bool tableExists(const std::string& name);
 };
 
 }  // namespace liveqx::auth
