@@ -99,6 +99,7 @@ vi.mock('@/api/queries/channels', () => ({
   useChannels: () => ({ data: [], isLoading: false, refetch: vi.fn() }),
   usePlayChannel:  () => ({ mutate: vi.fn(), isPending: false }),
   useStopChannel:  () => ({ mutate: vi.fn(), isPending: false }),
+  useRestartChannel:() => ({ mutate: vi.fn(), isPending: false }),
   useNextClip:     () => ({ mutate: vi.fn(), isPending: false }),
   useDeleteChannel:() => ({ mutate: vi.fn(), isPending: false }),
   useAddOutput:    () => ({ mutate: vi.fn(), isPending: false }),
