@@ -88,3 +88,7 @@
 /remove.md
 /packaging/migrate-to-liveqx.sh
 /ui/public/favicon.svg
+
+# Рабочие документы по связке с LiveQX-Player (контракт и серверный план)
+/player_roadmap.md
+/player_server_plan.md
