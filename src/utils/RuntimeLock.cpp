@@ -45,6 +45,31 @@ void RuntimeLock::release() noexcept {
     }
 }
 
+RuntimeLock::Probe RuntimeLock::probe(const fs::path& path, std::string& error) {
+    error.clear();
+    std::error_code ec;
+    if (!fs::exists(path, ec)) return Probe::NotRunning;
+
+    const int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        error = std::string{"open("} + path.string() + "): " + std::strerror(errno);
+        return Probe::Error;
+    }
+    Probe result = Probe::NotRunning;
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if (errno == EWOULDBLOCK) {
+            result = Probe::Running;
+        } else {
+            error = std::string{"flock("} + path.string() + "): " + std::strerror(errno);
+            result = Probe::Error;
+        }
+    } else {
+        ::flock(fd, LOCK_UN);
+    }
+    ::close(fd);
+    return result;
+}
+
 RuntimeLock RuntimeLock::tryAcquire(const fs::path& path) {
     RuntimeLock lock;
     lock.path_ = path;

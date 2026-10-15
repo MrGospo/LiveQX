@@ -72,6 +72,7 @@ add_executable(liveqx-tests
     test_sealed_server.cpp
     test_master_key_boot.cpp
     test_key_protect_cli.cpp
+    test_runtime_lock.cpp
     test_master_key_reset.cpp
     test_ldap_client.cpp
     test_smtp_client.cpp

@@ -3,6 +3,7 @@
 #include "auth/KeyProtectCli.h"
 
 #include "auth/MasterKey.h"
+#include "utils/FileOwnership.h"
 #include "utils/RuntimeLock.h"
 
 #include <sodium.h>
@@ -53,15 +54,15 @@ bool preflight(const fs::path& key_file, const fs::path& state_dir,
         return false;
     }
     if (!state_dir.empty()) {
-        auto lock = util::RuntimeLock::tryAcquire(state_dir / "liveqx.lock");
-        if (lock.held()) {
-            lock.release();
-        } else if (lock.error().find("another instance") != std::string::npos) {
-            err = "LiveQX is running. Stop the service first";
-            return false;
-        } else {
-            err = "cannot check whether LiveQX is running: " + lock.error();
-            return false;
+        std::string probe_err;
+        switch (util::RuntimeLock::probe(state_dir / "liveqx.lock", probe_err)) {
+            case util::RuntimeLock::Probe::NotRunning: break;
+            case util::RuntimeLock::Probe::Running:
+                err = "LiveQX is running. Stop the service first";
+                return false;
+            case util::RuntimeLock::Probe::Error:
+                err = "cannot check whether LiveQX is running: " + probe_err;
+                return false;
         }
     }
     std::error_code ec;
@@ -92,6 +93,7 @@ bool replaceFile(const fs::path& dest, const std::string& bytes,
     fs::remove(tmp, ec);
     const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) { err = "cannot create " + tmp.string() + ": " + std::strerror(errno); return false; }
+    util::copyOwnerAndMode(fd, dest);   // keep who may read the key
     const auto n = ::write(fd, bytes.data(), bytes.size());
     const bool wrote = (n == static_cast<ssize_t>(bytes.size())) && ::fsync(fd) == 0;
     ::close(fd);

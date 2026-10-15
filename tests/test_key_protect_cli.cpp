@@ -135,6 +135,28 @@ TEST_F(ProtectTest, ProtectWrapsTheKeyAndKeepsTheSameKey) {
     EXPECT_EQ(st.st_mode & 0777, 0600u);
 }
 
+TEST_F(ProtectTest, ProtectKeepsThePermissionsOfTheOriginalFile) {
+    // The key may live in /etc/liveqx as root:liveqx 0640 so the service
+    // (user liveqx) can read it; a rewrite by root must not lock it out.
+    ASSERT_EQ(::chmod(keyPath().c_str(), 0640), 0);
+    ASSERT_EQ(protect({kGood, kGood}).rc, 0);
+    struct stat st{};
+    ASSERT_EQ(::stat(keyPath().c_str(), &st), 0);
+    EXPECT_EQ(st.st_mode & 0777, 0640u);
+}
+
+TEST_F(ProtectTest, UnprotectAndChangeKeepThePermissionsToo) {
+    ASSERT_EQ(::chmod(keyPath().c_str(), 0640), 0);
+    ASSERT_EQ(protect({kGood, kGood}).rc, 0);
+    ASSERT_EQ(change({kGood, "the new long passphrase", "the new long passphrase"}).rc, 0);
+    struct stat st{};
+    ASSERT_EQ(::stat(keyPath().c_str(), &st), 0);
+    EXPECT_EQ(st.st_mode & 0777, 0640u);
+    ASSERT_EQ(unprotect({"the new long passphrase"}).rc, 0);
+    ASSERT_EQ(::stat(keyPath().c_str(), &st), 0);
+    EXPECT_EQ(st.st_mode & 0777, 0640u);
+}
+
 TEST_F(ProtectTest, ProtectLeavesNoPlaintextCopyBehind) {
     ASSERT_EQ(protect({kGood, kGood}).rc, 0);
     for (const auto& e : fs::directory_iterator(dir_)) {

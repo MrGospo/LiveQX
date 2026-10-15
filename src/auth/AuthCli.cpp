@@ -33,6 +33,7 @@
 #include "auth/MasterKey.h"
 #include "mounts/MountsDb.h"
 #include "utils/DeviceCa.h"
+#include "utils/FileOwnership.h"
 #include "utils/RuntimeLock.h"
 
 #include "utils/Log.h"
@@ -181,17 +182,17 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
     // Rotating under a running service breaks it: for a moment the DB
     // points at the new key while the process holds the old one.
     if (!state_dir.empty()) {
-        auto lock = liveqx::util::RuntimeLock::tryAcquire(state_dir / "liveqx.lock");
-        if (lock.held()) {
-            lock.release();
-        } else if (lock.error().find("another instance") != std::string::npos) {
-            std::cerr << "ERROR: LiveQX is running. Stop the service before "
-                         "rotating the master key.\n";
-            return 1;
-        } else {
-            std::cerr << "ERROR: cannot check whether LiveQX is running: "
-                      << lock.error() << "\n";
-            return 1;
+        std::string probe_err;
+        switch (liveqx::util::RuntimeLock::probe(state_dir / "liveqx.lock", probe_err)) {
+            case liveqx::util::RuntimeLock::Probe::NotRunning: break;
+            case liveqx::util::RuntimeLock::Probe::Running:
+                std::cerr << "ERROR: LiveQX is running. Stop the service before "
+                             "rotating the master key.\n";
+                return 1;
+            case liveqx::util::RuntimeLock::Probe::Error:
+                std::cerr << "ERROR: cannot check whether LiveQX is running: "
+                          << probe_err << "\n";
+                return 1;
         }
     }
 
@@ -419,8 +420,10 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
         LOG_WARN("rotateMasterKey: fsync failed on {}: {}",
                  tmp_path.string(), std::strerror(errno));
     }
+    // Same owner and mode as the key file being replaced (0600 stays 0600;
+    // root:liveqx 0640 in /etc/liveqx stays readable by the service).
+    util::copyOwnerAndMode(fd, key_file_path);
     ::close(fd);
-    ::chmod(tmp_path.c_str(), 0600);
     sodium_memzero(fresh.data(), fresh.size());
 
     // (5) Загружаем новый ключ через MasterKey API (re-read file) — это

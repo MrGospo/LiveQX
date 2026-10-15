@@ -37,6 +37,13 @@ public:
     // The file is created with mode 0600 if it doesn't exist.
     static RuntimeLock tryAcquire(const std::filesystem::path& path);
 
+    // "Is another process holding this lock?" — answered WITHOUT creating the
+    // file. A missing file means nobody ever took it, so nobody holds it.
+    // The recovery CLI runs as root; creating the file there would leave a
+    // root-owned lock the service (user liveqx) could not open.
+    enum class Probe { NotRunning, Running, Error };
+    static Probe probe(const std::filesystem::path& path, std::string& error);
+
     RuntimeLock();
     RuntimeLock(const RuntimeLock&)            = delete;
     RuntimeLock& operator=(const RuntimeLock&) = delete;

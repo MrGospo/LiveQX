@@ -573,6 +573,20 @@ void writeRawKey(const std::filesystem::path& p, char fill) {
 
 }  // namespace
 
+TEST_F(RotateMasterKeyTest, RotationKeepsThePermissionsOfTheKeyFile) {
+    {
+        sa::MasterKey mk(key_path().string());
+        ASSERT_TRUE(mk.load());
+    }
+    // root:liveqx 0640 in /etc/liveqx: the service must still be able to read it.
+    ASSERT_EQ(::chmod(key_path().c_str(), 0640), 0);
+    const auto run = runRotation(db_path(), key_path());
+    ASSERT_EQ(run.rc, 0) << run.err;
+    struct stat st{};
+    ASSERT_EQ(::stat(key_path().c_str(), &st), 0);
+    EXPECT_EQ(st.st_mode & 0777, 0640u);
+}
+
 TEST_F(RotateMasterKeyTest, RefusesWhileServiceIsRunningAndChangesNothing) {
     {
         sa::MasterKey mk(key_path().string());

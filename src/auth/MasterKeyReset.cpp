@@ -59,20 +59,15 @@ std::int64_t unixSec() {
 //   "running" — flock returned EWOULDBLOCK; daemon is alive.
 //   "error:<msg>" — couldn't open/create the lockfile (treat as fatal).
 std::string probeServiceState(const fs::path& state_dir) {
-    auto lock = liveqx::util::RuntimeLock::tryAcquire(
-        state_dir / "liveqx.lock");
-    if (lock.held()) {
-        // Hand the lock back immediately — we just wanted to know
-        // whether anyone else was holding it.
-        lock.release();
-        return "ok";
+    // probe() never creates the lock file: this runs as root, and a
+    // root-owned liveqx.lock would keep the service from starting.
+    std::string err;
+    switch (liveqx::util::RuntimeLock::probe(state_dir / "liveqx.lock", err)) {
+        case liveqx::util::RuntimeLock::Probe::NotRunning: return "ok";
+        case liveqx::util::RuntimeLock::Probe::Running:    return "running";
+        case liveqx::util::RuntimeLock::Probe::Error:      break;
     }
-    // RuntimeLock encodes EWOULDBLOCK as "another instance is running";
-    // anything else is an open/permission failure on the lockfile path.
-    if (lock.error().find("another instance") != std::string::npos) {
-        return "running";
-    }
-    return "error:" + lock.error();
+    return "error:" + err;
 }
 
 bool wipeEncryptedSecrets(const fs::path& auth_db,
