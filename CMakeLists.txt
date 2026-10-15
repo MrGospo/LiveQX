@@ -361,6 +361,7 @@ set(SOURCES
     src/auth/AuthService.cpp
     src/auth/MasterKey.cpp
     src/auth/KeyWrap.cpp
+    src/auth/SealedServer.cpp
     src/auth/MasterKeyReset.cpp
     src/auth/RbacMiddleware.cpp
     src/auth/AuthCli.cpp

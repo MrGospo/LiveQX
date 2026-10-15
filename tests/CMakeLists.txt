@@ -69,6 +69,7 @@ add_executable(liveqx-tests
     test_auth_cli.cpp
     test_master_key.cpp
     test_key_wrap.cpp
+    test_sealed_server.cpp
     test_master_key_reset.cpp
     test_ldap_client.cpp
     test_smtp_client.cpp
@@ -166,6 +167,7 @@ add_executable(liveqx-tests
     ../src/auth/AuthCli.cpp
     ../src/auth/MasterKey.cpp
     ../src/auth/KeyWrap.cpp
+    ../src/auth/SealedServer.cpp
     ../src/auth/MasterKeyReset.cpp
     ../src/auth/LdapClient.cpp
     ../src/auth/LdapConfigRepo.cpp
@@ -228,6 +230,7 @@ target_link_libraries(liveqx-tests PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
     date::date-tz
+    httplib::httplib
 )
 include(GoogleTest)
 gtest_discover_tests(liveqx-tests DISCOVERY_MODE PRE_TEST)
