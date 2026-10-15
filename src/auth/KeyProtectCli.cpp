@@ -166,6 +166,14 @@ bool sameKeyAfter(const std::string& file, const std::string& pass,
 
 }  // namespace
 
+std::optional<std::string> promptNewPassphrase(const PassphraseSource& passphrase,
+                                               std::string& err) {
+    Secret s;
+    if (!askNewPassphrase(passphrase, s, err)) return std::nullopt;
+    std::string out = s.s;
+    return out;
+}
+
 PassphraseSource makeStreamPassphraseSource(std::istream& in) {
     return [&in](std::string_view) -> std::optional<std::string> {
         std::string line;

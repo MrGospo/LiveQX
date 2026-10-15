@@ -62,6 +62,7 @@
 #include "utils/TlsConfig.h"
 #include "api/TlsBootstrap.h"
 #include "auth/KeyProtectCli.h"
+#include "utils/DeviceCaCli.h"
 #include "auth/MasterKeyBoot.h"
 
 #include <sodium.h>
@@ -179,6 +180,13 @@ int main(int argc, char* argv[]) {
     bool                do_unprotect_master_key = false;
     bool                do_change_master_pass   = false;
     bool                passphrase_from_stdin   = false;
+    // Two-tier device CA ceremony (utils/DeviceCaCli.h).
+    bool                do_ca_root_init   = false;
+    bool                do_ca_request     = false;
+    bool                do_ca_root_sign   = false;
+    bool                do_ca_import      = false;
+    std::string         ca_out_path, ca_root_dir, ca_csr_path, ca_cert_path, ca_root_cert_path;
+    int                 ca_days = 1825;
     bool                confirm_reset        = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -220,6 +228,26 @@ int main(int argc, char* argv[]) {
             do_change_master_pass = true;
         } else if (arg == "--passphrase-stdin") {
             passphrase_from_stdin = true;
+        } else if (arg == "--device-ca-root-init") {
+            do_ca_root_init = true;
+        } else if (arg == "--device-ca-request") {
+            do_ca_request = true;
+        } else if (arg == "--device-ca-root-sign") {
+            do_ca_root_sign = true;
+        } else if (arg == "--device-ca-import") {
+            do_ca_import = true;
+        } else if (arg == "--out" && i + 1 < argc) {
+            ca_out_path = argv[++i];
+        } else if (arg == "--root-dir" && i + 1 < argc) {
+            ca_root_dir = argv[++i];
+        } else if (arg == "--csr" && i + 1 < argc) {
+            ca_csr_path = argv[++i];
+        } else if (arg == "--cert" && i + 1 < argc) {
+            ca_cert_path = argv[++i];
+        } else if (arg == "--root" && i + 1 < argc) {
+            ca_root_cert_path = argv[++i];
+        } else if (arg == "--days" && i + 1 < argc) {
+            ca_days = std::atoi(argv[++i]);
         } else if (arg == "--confirm-reset") {
             confirm_reset = true;
         } else if (arg[0] != '-') {
@@ -241,7 +269,8 @@ int main(int argc, char* argv[]) {
 
     if (do_print_bootstrap || do_reset_admin || do_rotate_master_key
         || do_reset_master_key || do_protect_master_key
-        || do_unprotect_master_key || do_change_master_pass) {
+        || do_unprotect_master_key || do_change_master_pass
+        || do_ca_root_init || do_ca_request || do_ca_root_sign || do_ca_import) {
         const json recovery_cfg = try_load_config(config_path);
         const auto recovery_paths = scp::Paths::resolve(path_args, recovery_cfg);
         const auto db_path  = recovery_paths.authDb();
@@ -255,6 +284,32 @@ int main(int argc, char* argv[]) {
         const auto source = passphrase_from_stdin
             ? liveqx::auth::makeStreamPassphraseSource(std::cin)
             : liveqx::auth::makeTerminalPassphraseSource();
+        if (do_ca_root_init || do_ca_request || do_ca_root_sign || do_ca_import) {
+            namespace tlsns = liveqx::tls;
+            const auto& store = recovery_paths.masterKeyStore();
+            if (do_ca_root_init) {
+                if (ca_out_path.empty()) {
+                    std::cerr << "ERROR: --device-ca-root-init needs --out <directory>\n";
+                    return 1;
+                }
+                return tlsns::deviceCaRootInit(ca_out_path, source);
+            }
+            if (do_ca_request)
+                return tlsns::deviceCaRequest(key_path, recovery_paths.deviceCaDir(), store, source);
+            if (do_ca_root_sign) {
+                if (ca_root_dir.empty() || ca_csr_path.empty() || ca_out_path.empty()) {
+                    std::cerr << "ERROR: --device-ca-root-sign needs --root-dir, --csr and --out\n";
+                    return 1;
+                }
+                return tlsns::deviceCaRootSign(ca_root_dir, ca_csr_path, ca_out_path, ca_days, source);
+            }
+            if (ca_cert_path.empty() || ca_root_cert_path.empty()) {
+                std::cerr << "ERROR: --device-ca-import needs --cert and --root\n";
+                return 1;
+            }
+            return tlsns::deviceCaImport(key_path, recovery_paths.deviceCaDir(), store,
+                                         ca_cert_path, ca_root_cert_path, source);
+        }
         if (do_protect_master_key || do_unprotect_master_key || do_change_master_pass) {
             const auto& store = recovery_paths.masterKeyStore();
             if (do_protect_master_key)

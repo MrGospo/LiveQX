@@ -37,6 +37,12 @@ PassphraseSource makeTerminalPassphraseSource();
 
 inline constexpr std::size_t kMinPassphraseLength = 12;
 
+// Asks twice for a NEW passphrase and applies the length rule. nullopt with
+// `err` filled if none is available, the two differ or it is too short.
+// The caller should wipe the returned string when done.
+std::optional<std::string> promptNewPassphrase(const PassphraseSource& passphrase,
+                                               std::string& err);
+
 int protectMasterKey(const std::filesystem::path& key_file,
                      const std::filesystem::path& state_dir,
                      const std::string& key_store,

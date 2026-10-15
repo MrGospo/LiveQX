@@ -247,6 +247,7 @@ set(SOURCES
     src/utils/Tls.cpp
     src/utils/DeviceCa.cpp
     src/utils/DeviceRootCa.cpp
+    src/utils/DeviceCaCli.cpp
     src/utils/TlsConfig.cpp
     src/utils/CpuAffinity.cpp
     src/utils/LegacyMigration.cpp
