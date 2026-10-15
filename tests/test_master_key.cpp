@@ -386,6 +386,78 @@ TEST_F(MasterKeyTest, GetInfoEnvSourceHasNullCreatedAt) {
     EXPECT_EQ(info.fingerprint.size(), 16u);
 }
 
+// ─── protection: where the key sits relative to the data it protects ───────
+
+TEST_F(MasterKeyTest, ProtectionIsFileInStateWhenKeyLivesInStateDir) {
+    sa::MasterKey mk(keyPath().string());
+    mk.setStateDir(tmp_.string());
+    ASSERT_TRUE(mk.load());
+    EXPECT_EQ(mk.getInfo().protection, "file_in_state");
+}
+
+TEST_F(MasterKeyTest, ProtectionIsFileInStateWhenStateDirIsUnknown) {
+    // Conservative default: warn rather than silently claim the key is safe.
+    sa::MasterKey mk(keyPath().string());
+    ASSERT_TRUE(mk.load());
+    EXPECT_EQ(mk.getInfo().protection, "file_in_state");
+}
+
+TEST_F(MasterKeyTest, ProtectionIsExternalFileWhenKeyLivesOutsideStateDir) {
+    const auto state = tmp_ / "state";
+    fs::create_directories(state);
+    sa::MasterKey mk(keyPath().string());
+    mk.setStateDir(state.string());
+    ASSERT_TRUE(mk.load());
+    EXPECT_EQ(mk.getInfo().protection, "external_file");
+}
+
+TEST_F(MasterKeyTest, ProtectionIsNotFooledByPrefixLikeSiblingDirectory) {
+    // "/x/state-backup/master.key" must not count as being inside "/x/state".
+    const auto state = tmp_ / "state";
+    const auto sibling = tmp_ / "state-backup";
+    fs::create_directories(state);
+    fs::create_directories(sibling);
+    sa::MasterKey mk((sibling / "master.key").string());
+    mk.setStateDir(state.string());
+    ASSERT_TRUE(mk.load());
+    EXPECT_EQ(mk.getInfo().protection, "external_file");
+}
+
+TEST_F(MasterKeyTest, ProtectionIsEnvForEnvKey) {
+    ::setenv("LIVEQX_MASTER_KEY", toBase64(std::string(sa::MasterKey::kKeyBytes, 'E')).c_str(), 1);
+    sa::MasterKey mk(keyPath().string());
+    ASSERT_TRUE(mk.load());
+    EXPECT_EQ(mk.getInfo().protection, "env");
+}
+
+TEST_F(MasterKeyTest, ProtectionIsSystemdCredentialForFileInCredentialsDirectory) {
+    const auto creds = tmp_ / "creds";
+    fs::create_directories(creds);
+    {
+        std::ofstream f(creds / "liveqx_master_key", std::ios::binary);
+        f << std::string(sa::MasterKey::kKeyBytes, 'C');
+    }
+    ::setenv("CREDENTIALS_DIRECTORY", creds.string().c_str(), 1);
+    ::setenv("LIVEQX_MASTER_KEY_FILE", (creds / "liveqx_master_key").string().c_str(), 1);
+    sa::MasterKey mk(keyPath().string());
+    ASSERT_TRUE(mk.load());
+    EXPECT_EQ(mk.getInfo().protection, "systemd_credential");
+    ::unsetenv("CREDENTIALS_DIRECTORY");
+}
+
+TEST_F(MasterKeyTest, ProtectionIsExternalFileForEnvFileOutsideCredentialsDirectory) {
+    const auto cred = tmp_ / "somewhere.key";
+    {
+        std::ofstream f(cred, std::ios::binary);
+        f << std::string(sa::MasterKey::kKeyBytes, 'D');
+    }
+    ::unsetenv("CREDENTIALS_DIRECTORY");
+    ::setenv("LIVEQX_MASTER_KEY_FILE", cred.string().c_str(), 1);
+    sa::MasterKey mk(keyPath().string());
+    ASSERT_TRUE(mk.load());
+    EXPECT_EQ(mk.getInfo().protection, "external_file");
+}
+
 TEST_F(MasterKeyTest, GetInfoLastRotatedAtPicksNewestBackup) {
     sa::MasterKey mk(keyPath().string());
     ASSERT_TRUE(mk.load());

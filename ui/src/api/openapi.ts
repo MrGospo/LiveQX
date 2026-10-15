@@ -6514,6 +6514,17 @@ export interface components {
              */
             source: "file" | "env";
             /**
+             * @description Где ключ лежит относительно данных, которые он защищает.
+             *     `file_in_state` — файл внутри каталога состояния (или каталог
+             *     неизвестен): любая копия `state/` уносит ключ вместе с данными.
+             *     `external_file` — файл вне каталога состояния.
+             *     `systemd_credential` — файл от systemd (`LoadCredential*`).
+             *     `env` — переменная LIVEQX_MASTER_KEY. О привязке к TPM процесс
+             *     знать не может, поэтому о ней поле ничего не говорит.
+             * @enum {string}
+             */
+            protection: "file_in_state" | "external_file" | "systemd_credential" | "env";
+            /**
              * Format: int64
              * @description unix-sec mtime файла master.key. NULL для `source=env` (файла нет).
              */

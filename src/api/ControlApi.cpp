@@ -3686,6 +3686,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             {"fingerprint", info.fingerprint},
             {"algorithm",   info.algorithm},
             {"source",      info.source},
+            {"protection",  info.protection},
         };
         if (info.created_at.has_value())
             out["created_at"] = *info.created_at;

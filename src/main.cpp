@@ -550,9 +550,17 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         sa::MasterKey master_key(master_key_path);
+        master_key.setStateDir(paths.stateDir().string());
         if (!master_key.load()) {
             LOG_ERROR("Cannot load master key from {}", master_key_path);
             return 1;
+        }
+        if (master_key.getInfo().protection == "file_in_state") {
+            LOG_WARN("Master key is stored inside the state directory ({}): "
+                     "any copy of the state (backup, VM snapshot, disk image) "
+                     "carries the key together with the data it protects. "
+                     "Keep the key outside the state directory or deliver it "
+                     "through systemd-creds.", master_key_path);
         }
 
         // JWT signing secret: либо берём расшифрованный из БД, либо

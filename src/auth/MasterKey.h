@@ -37,7 +37,19 @@ public:
         std::string source;                            // "file" | "env" | "env_file"
         std::optional<std::int64_t> created_at;        // unix-sec mtime of key file, null when source=env
         std::optional<std::int64_t> last_rotated_at;   // unix-sec mtime of newest .bak in key dir, null if none
+        // Where the key sits relative to the data it protects:
+        //   "file_in_state"      key file inside the state dir (or state dir unknown):
+        //                        any copy of state/ carries the key with it
+        //   "external_file"      key file outside the state dir
+        //   "systemd_credential" file handed over by systemd (LoadCredential*)
+        //   "env"                LIVEQX_MASTER_KEY environment variable
+        // Says nothing about TPM binding: the process cannot know that.
+        std::string protection;
     };
+
+    // Directory holding the state (databases). Used only to classify
+    // Info::protection; call before getInfo().
+    void setStateDir(std::string dir) { state_dir_ = std::move(dir); }
 
     explicit MasterKey(std::string key_file_path);
 
@@ -75,6 +87,8 @@ public:
 
 private:
     std::string key_file_path_;
+    std::string state_dir_;
+    std::string env_file_path_;  // set when source_ == EnvFile
     std::array<std::uint8_t, kKeyBytes> key_{};
     bool loaded_{false};
     Source source_{Source::Unknown};

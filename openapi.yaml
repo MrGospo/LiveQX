@@ -4350,7 +4350,7 @@ components:
     # fix32 B3 — master-key metadata для Settings/MasterKey page.
     MasterKeyInfo:
       type: object
-      required: [fingerprint, algorithm, source, created_at, last_rotated_at]
+      required: [fingerprint, algorithm, source, protection, created_at, last_rotated_at]
       additionalProperties: false
       description: |
         Безопасная к показу metadata XSalsa20-Poly1305 master-ключа.
@@ -4372,6 +4372,17 @@ components:
           description: |
             Откуда поднят ключ при load(): `env` — из LIVEQX_MASTER_KEY,
             `file` — из state/master.key.
+        protection:
+          type: string
+          enum: [file_in_state, external_file, systemd_credential, env]
+          description: |
+            Где ключ лежит относительно данных, которые он защищает.
+            `file_in_state` — файл внутри каталога состояния (или каталог
+            неизвестен): любая копия `state/` уносит ключ вместе с данными.
+            `external_file` — файл вне каталога состояния.
+            `systemd_credential` — файл от systemd (`LoadCredential*`).
+            `env` — переменная LIVEQX_MASTER_KEY. О привязке к TPM процесс
+            знать не может, поэтому о ней поле ничего не говорит.
         created_at:
           type: integer
           format: int64

@@ -22,6 +22,16 @@ function sourceI18nKey(source: string): string {
   }
 }
 
+function protectionI18nKey(protection: string | undefined): string {
+  switch (protection) {
+    case 'file_in_state':      return 'masterKey.protectionFileInState';
+    case 'external_file':      return 'masterKey.protectionExternalFile';
+    case 'systemd_credential': return 'masterKey.protectionSystemdCredential';
+    case 'env':                return 'masterKey.protectionEnv';
+    default:                   return 'masterKey.protectionUnknown';
+  }
+}
+
 export default function MasterKeyPage() {
   const { t } = useTranslation();
   const { data, isLoading, error } = useMasterKeyInfo();
@@ -29,6 +39,15 @@ export default function MasterKeyPage() {
   return (
     <div className="p-7 flex flex-col gap-5">
       <SubNav items={SETTINGS_NAV} />
+      {data?.protection === 'file_in_state' && (
+        <div
+          role="alert"
+          className="rounded-lg border border-[var(--warning)] bg-[var(--warning-bg,transparent)] px-4 py-3 text-sm"
+        >
+          <div className="font-semibold text-[var(--warning)] mb-1">{t('masterKey.warnFileInStateTitle')}</div>
+          <p className="text-[var(--text-muted)]">{t('masterKey.warnFileInState')}</p>
+        </div>
+      )}
       <Block>
         <h2 className="text-base font-semibold text-[var(--text-primary)] mb-3">{t('masterKey.keyInfo')}</h2>
         {isLoading ? (
@@ -50,6 +69,13 @@ export default function MasterKeyPage() {
               <dd className="text-[var(--text-primary)]">
                 {t(sourceI18nKey(data.source))}{' '}
                 <span className="text-[var(--text-muted)] font-mono text-xs">({data.source})</span>
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1">{t('masterKey.protection')}</dt>
+              <dd className="text-[var(--text-primary)]">
+                {t(protectionI18nKey(data.protection))}{' '}
+                <span className="text-[var(--text-muted)] font-mono text-xs">({data.protection})</span>
               </dd>
             </div>
             <div>

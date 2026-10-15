@@ -99,6 +99,21 @@ bool statFileMode(const std::string& path, mode_t& out_mode) {
     return true;
 }
 
+// True if `path` is `dir` itself or lies below it. Compares whole path
+// components, so "/x/state-backup" is not inside "/x/state".
+bool isInside(const std::string& path, const std::string& dir) {
+    std::error_code ec;
+    const auto p = std::filesystem::weakly_canonical(path, ec);
+    if (ec) return false;
+    const auto d = std::filesystem::weakly_canonical(dir, ec);
+    if (ec) return false;
+    auto pi = p.begin();
+    for (auto di = d.begin(); di != d.end(); ++di, ++pi) {
+        if (pi == p.end() || *pi != *di) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 MasterKey::MasterKey(std::string key_file_path)
@@ -169,6 +184,7 @@ bool MasterKey::load() {
             sodium_memzero(buf.data(), buf.size());
             loaded_ = true;
             source_ = Source::EnvFile;
+            env_file_path_ = path;
             LOG_INFO("MasterKey: loaded raw key from "
                      "LIVEQX_MASTER_KEY_FILE={}", path);
             return true;
@@ -187,6 +203,7 @@ bool MasterKey::load() {
         sodium_memzero(decoded->data(), decoded->size());
         loaded_ = true;
         source_ = Source::EnvFile;
+        env_file_path_ = path;
         LOG_INFO("MasterKey: loaded base64 key from "
                  "LIVEQX_MASTER_KEY_FILE={}", path);
         return true;
@@ -363,6 +380,28 @@ MasterKey::Info MasterKey::getInfo() const {
 
     if (loaded_) {
         info.fingerprint = keyFingerprint(key_);
+    }
+
+    switch (source_) {
+        case Source::Env:
+            info.protection = "env";
+            break;
+        case Source::EnvFile: {
+            const char* creds = std::getenv("CREDENTIALS_DIRECTORY");
+            info.protection =
+                (creds && *creds && isInside(env_file_path_, creds))
+                    ? "systemd_credential" : "external_file";
+            break;
+        }
+        case Source::File:
+            // Unknown state dir -> assume the default layout (key in state/)
+            // so the warning errs on the safe side.
+            info.protection =
+                (state_dir_.empty() || isInside(key_file_path_, state_dir_))
+                    ? "file_in_state" : "external_file";
+            break;
+        case Source::Unknown:
+            break;
     }
 
     // created_at: only meaningful for file-loaded keys. For ENV / EnvFile
