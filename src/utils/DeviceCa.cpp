@@ -165,6 +165,24 @@ std::map<int, fs::path> listGenerations(const fs::path& dir) {
     return gens;
 }
 
+// gen-<digits>.pending directories: requests waiting for the root's signature.
+// They are not generations and open() ignores them.
+std::map<int, fs::path> listPending(const fs::path& dir) {
+    static const std::string kSuffix = ".pending";
+    std::map<int, fs::path> out;
+    std::error_code ec;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        const std::string name = it->path().filename().string();
+        if (name.size() <= kSuffix.size() ||
+            name.compare(name.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0)
+            continue;
+        const int n = parseGenName(name.substr(0, name.size() - kSuffix.size()));
+        if (n > 0) out.emplace(n, it->path());
+    }
+    return out;
+}
+
 Asn randomSerial() {
     Bn bn(BN_new());
     if (!bn || !BN_rand(bn.get(), 63, BN_RAND_TOP_TWO, BN_RAND_BOTTOM_ANY)) return nullptr;
@@ -263,6 +281,8 @@ struct DeviceCa::Impl {
     Cert     cert;
     Pkey     key;
     std::string cert_pem;
+    std::string root_pem;    // two-tier only
+    bool        two_tier{false};
 };
 
 DeviceCa::DeviceCa(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -270,17 +290,31 @@ DeviceCa::~DeviceCa() = default;
 
 int DeviceCa::generation() const noexcept { return impl_->generation; }
 const std::string& DeviceCa::certPem() const noexcept { return impl_->cert_pem; }
+bool DeviceCa::twoTier() const noexcept { return impl_->two_tier; }
+const std::string& DeviceCa::chainPem() const noexcept {
+    static const std::string kEmpty;
+    return impl_->two_tier ? impl_->cert_pem : kEmpty;
+}
+const std::string& DeviceCa::rootPem() const noexcept { return impl_->root_pem; }
 
 std::unique_ptr<DeviceCa> DeviceCa::open(const fs::path& dir,
                                          const liveqx::auth::MasterKey& key,
-                                         std::string& err) {
+                                         std::string& err, bool allow_create) {
     err.clear();
     std::error_code ec;
+    if (!allow_create && !fs::exists(dir, ec)) {
+        err = "device CA is not initialised: no generation yet";
+        return nullptr;
+    }
     fs::create_directories(dir, ec);
     if (ec) { err = "create_directories: " + ec.message(); return nullptr; }
     fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace, ec);
 
     auto gens = listGenerations(dir);
+    if (gens.empty() && !allow_create) {
+        err = "device CA is not initialised: no generation yet";
+        return nullptr;
+    }
     if (gens.empty()) {
         // Build generation 1 in a scratch directory and rename it into place,
         // so a crash never leaves a half-written gen-1 that open() would
@@ -354,6 +388,18 @@ std::unique_ptr<DeviceCa> DeviceCa::open(const fs::path& dir,
         err = gdir.filename().string() + ": CA key does not match its certificate";
         return nullptr;
     }
+    // Two-tier generation: ca.crt is an intermediate and must really be
+    // signed by the root stored beside it.
+    if (auto root_pem = readFile(gdir / "root.crt")) {
+        Cert root = certFromPem(*root_pem);
+        if (!root || X509_verify(impl->cert.get(), X509_get0_pubkey(root.get())) != 1) {
+            ERR_clear_error();
+            err = gdir.filename().string() + ": the intermediate is not signed by its root.crt";
+            return nullptr;
+        }
+        impl->two_tier = true;
+        impl->root_pem = *root_pem;
+    }
     impl->dir = dir;
     impl->generation = gen;
     impl->cert_pem = *cert_pem;
@@ -413,6 +459,13 @@ bool DeviceCa::signClientCsr(std::string_view csr_pem, std::string_view player_i
 
     const std::int64_t nb = now - kNotBeforeSkewSec;
     const std::int64_t na = now + std::int64_t{validity_days} * 86400;
+    {   // A certificate must not outlive the CA that issued it.
+        Time na_t(ASN1_TIME_set(nullptr, static_cast<time_t>(na)));
+        if (!na_t || ASN1_TIME_compare(na_t.get(), X509_get0_notAfter(impl_->cert.get())) > 0) {
+            err = "ca_validity_too_short";
+            return false;
+        }
+    }
     if (!setTime(X509_set1_notBefore, cert.get(), nb) ||
         !setTime(X509_set1_notAfter, cert.get(), na) ||
         !X509_set_pubkey(cert.get(), pub)) {
@@ -436,6 +489,7 @@ bool DeviceCa::signClientCsr(std::string_view csr_pem, std::string_view player_i
     }
 
     out.cert_pem        = certToPem(cert.get());
+    out.chain_pem       = impl_->two_tier ? impl_->cert_pem : std::string{};
     out.serial_hex      = serialToHex(serial.get());
     out.generation      = impl_->generation;
     out.not_before_unix = nb;
@@ -500,6 +554,151 @@ bool DeviceCa::generateCrl(const std::vector<RevokedCert>& revoked,
     return true;
 }
 
+bool DeviceCa::createIntermediateRequest(const fs::path& dir,
+                                         const liveqx::auth::MasterKey& key,
+                                         std::string& csr_pem, std::string& err) {
+    err.clear();
+    csr_pem.clear();
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) { err = "create_directories: " + ec.message(); return false; }
+    fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace, ec);
+
+    // A request that is already waiting is returned as it is: no orphaned keys.
+    if (auto pending = listPending(dir); !pending.empty()) {
+        auto csr = readFile(pending.rbegin()->second / "ca.csr");
+        if (!csr) { err = "pending request is unreadable"; return false; }
+        csr_pem = *csr;
+        return true;
+    }
+
+    const auto gens = listGenerations(dir);
+    const int n = gens.empty() ? 1 : gens.rbegin()->first + 1;
+
+    Pkey ca_key(EVP_EC_gen("P-256"));
+    if (!ca_key) { err = "EVP_EC_gen: " + sslErr(); return false; }
+    SecretPem pem;
+    if (!keyToPem(ca_key.get(), pem)) { err = "serialize CA key"; return false; }
+    auto blob = key.encrypt(pem.s);
+    if (blob.empty()) { err = "cannot seal CA key"; return false; }
+
+    Req req(X509_REQ_new());
+    if (!req) { err = "X509_REQ_new"; return false; }
+    const std::string cn = "LiveQX Device CA " + std::to_string(n);
+    X509_NAME_add_entry_by_txt(X509_REQ_get_subject_name(req.get()), "CN", MBSTRING_ASC,
+                               reinterpret_cast<const unsigned char*>(cn.data()),
+                               static_cast<int>(cn.size()), -1, 0);
+    if (!X509_REQ_set_pubkey(req.get(), ca_key.get()) ||
+        !X509_REQ_sign(req.get(), ca_key.get(), EVP_sha256())) {
+        err = "cannot build the request: " + sslErr();
+        return false;
+    }
+    Bio out(BIO_new(BIO_s_mem()));
+    if (!PEM_write_bio_X509_REQ(out.get(), req.get())) { err = "serialize request"; return false; }
+    const std::string csr = bioToString(out.get());
+
+    const fs::path scratch = dir / ("gen-" + std::to_string(n) + ".pending.tmp");
+    fs::remove_all(scratch, ec);
+    fs::create_directories(scratch, ec);
+    if (ec) { err = "create_directories: " + ec.message(); return false; }
+    fs::permissions(scratch, fs::perms::owner_all, fs::perm_options::replace, ec);
+    if (!atomicWrite(scratch / "ca.key.enc",
+                     std::string_view(reinterpret_cast<const char*>(blob.data()), blob.size()),
+                     fs::perms::owner_read | fs::perms::owner_write, err) ||
+        !atomicWrite(scratch / "ca.csr", csr,
+                     fs::perms::owner_read | fs::perms::owner_write |
+                     fs::perms::group_read | fs::perms::others_read, err)) {
+        fs::remove_all(scratch, ec);
+        return false;
+    }
+    fs::rename(scratch, dir / ("gen-" + std::to_string(n) + ".pending"), ec);
+    if (ec) {
+        err = "rename pending: " + ec.message();
+        fs::remove_all(scratch, ec);
+        return false;
+    }
+    csr_pem = csr;
+    return true;
+}
+
+bool DeviceCa::importIntermediate(const fs::path& dir, const liveqx::auth::MasterKey& key,
+                                  std::string_view cert_pem, std::string_view root_pem,
+                                  std::string& err, std::int64_t now_unix) {
+    err.clear();
+    std::error_code ec;
+    std::map<int, fs::path> pending;
+    if (fs::exists(dir, ec)) pending = listPending(dir);
+    if (pending.empty()) { err = "no_pending_request"; return false; }
+    const int n = pending.rbegin()->first;
+    const fs::path pdir = pending.rbegin()->second;
+
+    Cert cert = certFromPem(std::string(cert_pem));
+    if (!cert) { ERR_clear_error(); err = "bad_certificate_pem"; return false; }
+    Cert root = certFromPem(std::string(root_pem));
+    if (!root) { ERR_clear_error(); err = "bad_root_pem"; return false; }
+
+    // The root must be a self-signed CA, and must really have signed the certificate.
+    if (X509_check_ca(root.get()) == 0 ||
+        X509_verify(root.get(), X509_get0_pubkey(root.get())) != 1) {
+        ERR_clear_error();
+        err = "root_not_a_ca";
+        return false;
+    }
+    if (X509_verify(cert.get(), X509_get0_pubkey(root.get())) != 1) {
+        ERR_clear_error();
+        err = "certificate_not_signed_by_root";
+        return false;
+    }
+    // An intermediate that can issue players' certificates, but no further CAs.
+    if (X509_check_ca(cert.get()) == 0 || X509_get_pathlen(cert.get()) != 0) {
+        err = "certificate_not_an_intermediate_ca";
+        return false;
+    }
+
+    // It must belong to the key we generated for this request.
+    auto blob = readFile(pdir / "ca.key.enc");
+    std::optional<std::string> plain;
+    if (blob) plain = key.decrypt(std::vector<std::uint8_t>(blob->begin(), blob->end()));
+    if (!plain) { err = "pending_key_unreadable"; return false; }
+    Pkey pending_key = keyFromPem(*plain);
+    OPENSSL_cleanse(plain->data(), plain->size());
+    if (!pending_key) { ERR_clear_error(); err = "pending_key_unreadable"; return false; }
+    if (X509_check_private_key(cert.get(), pending_key.get()) != 1) {
+        ERR_clear_error();
+        err = "certificate_does_not_match_request";
+        return false;
+    }
+
+    const std::int64_t now = now_unix ? now_unix : wallNow();
+    Time now_t(ASN1_TIME_set(nullptr, static_cast<time_t>(now)));
+    if (!now_t || ASN1_TIME_compare(now_t.get(), X509_get0_notBefore(cert.get())) < 0 ||
+        ASN1_TIME_compare(now_t.get(), X509_get0_notAfter(cert.get())) > 0) {
+        err = "certificate_not_currently_valid";
+        return false;
+    }
+    if (ASN1_TIME_compare(X509_get0_notAfter(cert.get()), X509_get0_notAfter(root.get())) > 0) {
+        err = "certificate_outlives_root";
+        return false;
+    }
+
+    const fs::path gdir = dir / ("gen-" + std::to_string(n));
+    if (fs::exists(gdir, ec)) { err = "generation_exists"; return false; }
+    std::string werr;
+    if (!atomicWrite(pdir / "ca.crt", certToPem(cert.get()),
+                     fs::perms::owner_read | fs::perms::owner_write |
+                     fs::perms::group_read | fs::perms::others_read, werr) ||
+        !atomicWrite(pdir / "root.crt", certToPem(root.get()),
+                     fs::perms::owner_read | fs::perms::owner_write |
+                     fs::perms::group_read | fs::perms::others_read, werr)) {
+        err = "cannot_write_files";
+        return false;
+    }
+    fs::remove(pdir / "ca.csr", ec);
+    fs::rename(pdir, gdir, ec);
+    if (ec) { err = "cannot_write_files"; return false; }
+    return true;
+}
+
 bool DeviceCa::resealAll(const fs::path& dir, const liveqx::auth::MasterKey& old_key,
                          const liveqx::auth::MasterKey& new_key, std::string& err) {
     err.clear();
@@ -512,7 +711,9 @@ bool DeviceCa::resealAll(const fs::path& dir, const liveqx::auth::MasterKey& old
         std::vector<std::uint8_t> new_blob;
     };
     std::vector<Item> items;
-    for (const auto& [gen, gdir] : listGenerations(dir)) {
+    auto all_dirs = listGenerations(dir);
+    for (const auto& [n, pdir] : listPending(dir)) all_dirs.emplace(-n, pdir);   // pending: distinct keys
+    for (const auto& [gen, gdir] : all_dirs) {
         Item it;
         it.path = gdir / "ca.key.enc";
         auto blob = readFile(it.path);

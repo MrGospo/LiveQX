@@ -91,6 +91,7 @@ add_executable(liveqx-tests
     test_tls.cpp
     test_tls_bootstrap.cpp
     test_device_ca.cpp
+    test_device_ca_two_tier.cpp
     test_tls_config.cpp
     test_ts_packet.cpp
     test_ts_psi_parser.cpp
@@ -150,6 +151,7 @@ add_executable(liveqx-tests
     ../src/utils/Tls.cpp
     ../src/api/TlsBootstrap.cpp
     ../src/utils/DeviceCa.cpp
+    ../src/utils/DeviceRootCa.cpp
     ../src/utils/TlsConfig.cpp
     ../src/utils/RuntimeLock.cpp
     ../src/metrics/ChannelProfiler.cpp
