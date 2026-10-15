@@ -85,6 +85,7 @@ add_executable(liveqx-tests
     test_profile_sampler.cpp
     test_paths.cpp
     test_tls.cpp
+    test_tls_bootstrap.cpp
     test_device_ca.cpp
     test_tls_config.cpp
     test_ts_packet.cpp
@@ -143,6 +144,7 @@ add_executable(liveqx-tests
     ../src/gateway/GatewayCfg.cpp
     ../src/utils/Paths.cpp
     ../src/utils/Tls.cpp
+    ../src/api/TlsBootstrap.cpp
     ../src/utils/DeviceCa.cpp
     ../src/utils/TlsConfig.cpp
     ../src/utils/RuntimeLock.cpp

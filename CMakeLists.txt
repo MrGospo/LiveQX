@@ -311,6 +311,7 @@ set(SOURCES
     src/output/NdiLib.cpp
     src/output/NdiOutput.cpp
     src/api/ControlApi.cpp
+    src/api/TlsBootstrap.cpp
     src/api/ChannelManager.cpp
     src/api/MetricsCollector.cpp
     src/api/RbacScope.cpp
