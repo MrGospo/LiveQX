@@ -273,11 +273,11 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
         return 1;
     }
 
-    // (3) Собираем ВСЕ секреты, зашифрованные мастер-ключом, и
-    // расшифровываем их старым ключом ДО любых изменений. Если хоть один
-    // не расшифровывается, отказываем: ротация сделала бы его нечитаемым.
-    // Новый вид секрета добавляется сюда одной записью (и в
-    // MasterKeyReset.cpp — тоже одной).
+    // (3) Collect EVERY secret encrypted with the master key and decrypt it
+    // with the old key BEFORE changing anything. If even one cannot be
+    // decrypted we refuse: the rotation would make it unreadable. A new kind
+    // of secret is added here with one entry (and in MasterKeyReset.cpp with
+    // one more).
     std::vector<detail::RotationEntry> entries;
     const auto refuse = [](const std::string& label) {
         std::cerr << "ERROR: existing " << label << " blob cannot be decrypted "
@@ -447,16 +447,16 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
         return 1;
     }
 
-    // (6) Перешифровываем все секреты новым ключом и записываем. При сбое
-    // посреди записи reencryptAll возвращает уже записанное к старому
-    // шифртексту, поэтому БД не остаётся наполовину перешифрованной.
-    // ВАЖНО: между этим шагом и rename'ом БД указывает на новый ключ, а
-    // файл — на старый. Параллельный server в этом окне сломается на
-    // decrypt'е. Поэтому rotation — out-of-band procedure при stop'нутом
-    // сервере (как printBootstrap / resetAdmin).
-    // Ключ CA центра устройств перепечатывается первым: resealAll сначала
-    // расшифровывает всё старым ключом и при отказе ничего не меняет, а БД
-    // к этому моменту ещё не тронута.
+    // (6) Re-encrypt every secret with the new key and store it. If a write
+    // fails half way, reencryptAll puts back what was already written, so the
+    // DB is never left half re-encrypted.
+    // IMPORTANT: between this step and the rename the DB points at the new
+    // key while the file still holds the old one; a running server would fail
+    // to decrypt in that window. So the rotation is an out-of-band procedure
+    // with the service stopped (like printBootstrap / resetAdmin).
+    // The device CA key is re-sealed first: resealAll decrypts everything with
+    // the old key before writing and changes nothing if one fails, and the DB
+    // has not been touched yet at that point.
     std::vector<std::string> rotated;
     std::string rotate_err;
     const bool has_device_ca = !device_ca_dir.empty() && fs::exists(device_ca_dir);

@@ -33,39 +33,40 @@ class MasterKey;
 //       пароля viewer'у через CLI).
 //     - Reset password + must_change=true + revokeAllSessions.
 //     - Печатает новый plaintext на stdout.
-//   rotateMasterKey (auth_db_path, key_file_path):
-//     - Загружает текущий MasterKey из key_file_path.
-//     - Читает ВСЕ encrypted-blob'ы, зашифрованные мастер-ключом:
-//       jwt_secret, пароль привязки LDAP, пароль SMTP (auth.db) и CIFS-пароли
-//       монтирований (mounts.db, если файл существует).
-//     - Расшифровывает каждый старым ключом ДО любых изменений: если хоть
-//       один блоб не расшифровывается, ротация отказывается и ничего не
-//       меняет. Затем генерирует новый ключ и перешифровывает блобы.
-//     - Пишет новый ключ во временный файл `<key>.new` mode 0600,
-//       записывает новые ciphertext'ы (при сбое посреди записи уже
-//       записанные возвращаются к прежним), бэкапит старый ключ как
-//       `<key>.bak.<unix_ns>` и атомарно перемещает `.new` на место.
-//     - Должно запускаться при остановленном сервере: между UPSERT'ом
-//       и rename'ом DB-блобы зашифрованы новым ключом, а файл всё ещё
-//       старый — параллельный server failed бы decrypt.
+//   rotateMasterKey (auth_db_path, key_file_path, ...):
+//     - Loads the current MasterKey from key_file_path.
+//     - Reads EVERY blob encrypted with the master key: jwt_secret, the LDAP
+//       bind password, the SMTP password (auth.db) and the CIFS passwords of
+//       mounts (mounts.db, if the file exists).
+//     - Decrypts each with the old key BEFORE changing anything: if even one
+//       blob cannot be decrypted, the rotation refuses and changes nothing.
+//       Then it generates a new key and re-encrypts the blobs.
+//     - Writes the new key to `<key>.new` (mode and owner of the old file),
+//       stores the new ciphertexts (a failure half way puts back those
+//       already written), backs the old key up as `<key>.bak.<unix_ns>` and
+//       atomically moves `.new` into place.
+//     - Must run with the service stopped: between the UPSERTs and the rename
+//       the DB blobs are encrypted with the new key while the file still holds
+//       the old one, so a running server would fail to decrypt.
 //
-// Возвращаемое значение — process exit code (0 success, !=0 error).
+// Return value: the process exit code (0 = success, non-zero = error).
 
 int printBootstrap(const std::filesystem::path& auth_db_path);
 
 int resetAdmin(const std::filesystem::path& auth_db_path,
                std::string_view username);
 
-// `mounts_db_path` — mounts.db с CIFS-паролями; пусто или файла нет —
-// монтирования пропускаются (БД при этом не создаётся).
-// `device_ca_dir` — каталог центра устройств (ключ CA запечатан мастер-ключом);
-// пусто или каталога нет — пропускается (каталог не создаётся).
-// `state_dir` — если задан, ротация отказывает при запущенной службе.
-// `key_store` — master_key_store из конфига; не "file" → отказ (ключ доставляется
-// снаружи и здесь не перезаписывается).
-// `passphrase` — источник парольной фразы для ключа, обёрнутого фразой
-// (LQXKEY1): нужен, чтобы открыть старый ключ; новый ключ данных оборачивается
-// той же фразой с параметрами `kdf`. Без источника такой ключ не ротируется.
+// `mounts_db_path`: mounts.db with the CIFS passwords; empty or missing file
+//   means the mounts are skipped (the database is not created).
+// `device_ca_dir`: directory of the device CA (its key is sealed with the
+//   master key); empty or missing means it is skipped (not created).
+// `state_dir`: when set, the rotation refuses while the service is running.
+// `key_store`: master_key_store from the config; anything but "file" is
+//   refused (the key is delivered from outside and is not rewritten here).
+// `passphrase`: source of the passphrase for a passphrase-wrapped key
+//   (LQXKEY1). It is needed to open the old key; the new data key is wrapped
+//   under the same passphrase with the parameters `kdf`. Without a source such
+//   a key is not rotated.
 int rotateMasterKey(const std::filesystem::path& auth_db_path,
                     const std::filesystem::path& key_file_path,
                     const std::filesystem::path& mounts_db_path = {},
