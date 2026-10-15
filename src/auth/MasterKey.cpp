@@ -121,7 +121,31 @@ bool isInside(const std::string& path, const std::string& dir) {
 MasterKey::MasterKey(std::string key_file_path)
     : key_file_path_(std::move(key_file_path)) {}
 
+MasterKey::~MasterKey() {
+    if (memory_locked_) sodium_munlock(key_.data(), key_.size());   // also zeroes
+    else                sodium_memzero(key_.data(), key_.size());
+}
+
+// Pins the key's page in RAM and excludes it from core dumps. Failure (for
+// example a tiny RLIMIT_MEMLOCK) is not fatal: the key still works, it is
+// just not protected from swap.
+void MasterKey::lockMemory() {
+    if (memory_locked_ || !loaded_) return;
+    if (sodium_mlock(key_.data(), key_.size()) == 0) {
+        memory_locked_ = true;
+    } else {
+        LOG_WARN("MasterKey: could not lock the key in memory (mlock failed); "
+                 "it may be written to swap");
+    }
+}
+
 bool MasterKey::load() {
+    const bool ok = loadImpl();
+    if (ok) lockMemory();
+    return ok;
+}
+
+bool MasterKey::loadImpl() {
     if (!ensureSodiumInit()) {
         LOG_ERROR("MasterKey: sodium_init failed");
         return false;
@@ -480,6 +504,7 @@ bool MasterKey::unlock(std::string_view passphrase, std::string& err) {
     std::memcpy(key_.data(), k.data(), kKeyBytes);
     sodium_memzero(k.data(), k.size());
     loaded_ = true;
+    lockMemory();
     LOG_INFO("MasterKey: unlocked from {}", key_file_path_);
     return true;
 }

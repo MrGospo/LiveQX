@@ -62,6 +62,13 @@ public:
 
     explicit MasterKey(std::string key_file_path);
 
+    // The key lives in locked memory (never swapped, kept out of core dumps)
+    // and is wiped on destruction. Copying would duplicate it outside that
+    // protection, so it is not allowed.
+    ~MasterKey();
+    MasterKey(const MasterKey&)            = delete;
+    MasterKey& operator=(const MasterKey&) = delete;
+
     // Load from env / file / auto-generate. Returns false on any error
     // that should keep the server from starting (file write fails, env
     // value malformed).
@@ -109,6 +116,9 @@ private:
     std::string state_dir_;
     std::string env_file_path_;  // set when source_ == EnvFile
     bool auto_generate_{true};
+    bool memory_locked_{false};   // key_ is mlock'ed (libsodium: also MADV_DONTDUMP)
+    bool loadImpl();
+    void lockMemory();
     bool wrapped_{false};         // key file is an LQXKEY1 file
     std::string wrapped_file_;    // its contents, kept for unlock()
     std::array<std::uint8_t, kKeyBytes> key_{};
