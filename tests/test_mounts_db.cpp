@@ -98,6 +98,51 @@ TEST_F(MountsDbTest, InsertWithBlobRoundTrips) {
     EXPECT_TRUE(fetched->hasPassword());
 }
 
+TEST_F(MountsDbTest, UpdateCifsPasswordBlobChangesOnlyTheBlob) {
+    // Used by master-key rotation: the ciphertext is replaced, but the row
+    // must otherwise look untouched (in particular updated_at stays put,
+    // otherwise a rotation would show up as an operator edit).
+    MountsDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    auto r = makeRow("/mnt/liveqx/lib1");
+    r.cifs_password_blob = std::vector<std::uint8_t>{1, 2, 3};
+    const auto id = db.insert(r);
+    ASSERT_TRUE(id.has_value());
+    const auto before = db.findById(*id);
+    ASSERT_TRUE(before.has_value());
+
+    const std::vector<std::uint8_t> fresh{9, 8, 7, 6};
+    ASSERT_TRUE(db.updateCifsPasswordBlob(*id, fresh));
+
+    const auto after = db.findById(*id);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(after->cifs_password_blob, fresh);
+    EXPECT_EQ(after->updated_at,    before->updated_at);
+    EXPECT_EQ(after->cifs_username, before->cifs_username);
+    EXPECT_EQ(after->cifs_domain,   before->cifs_domain);
+    EXPECT_EQ(after->source,        before->source);
+    EXPECT_EQ(after->target,        before->target);
+}
+
+TEST_F(MountsDbTest, UpdateCifsPasswordBlobReportsMissingRow) {
+    MountsDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    EXPECT_FALSE(db.updateCifsPasswordBlob(424242, {1, 2, 3}));
+}
+
+TEST_F(MountsDbTest, UpdateCifsPasswordBlobEmptyClearsPassword) {
+    MountsDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    auto r = makeRow("/mnt/liveqx/lib1");
+    r.cifs_password_blob = std::vector<std::uint8_t>{1, 2, 3};
+    const auto id = db.insert(r);
+    ASSERT_TRUE(id.has_value());
+    ASSERT_TRUE(db.updateCifsPasswordBlob(*id, {}));
+    const auto after = db.findById(*id);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_FALSE(after->hasPassword());
+}
+
 TEST_F(MountsDbTest, DuplicateTargetRejected) {
     MountsDb db(dbPath());
     ASSERT_TRUE(db.open());

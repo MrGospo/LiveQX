@@ -9,12 +9,17 @@
 
 #include "auth/AuthCli.h"
 
+#include <array>
 #include <chrono>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <iostream>
+#include <memory>
+#include <string>
 #include <system_error>
+#include <vector>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -26,6 +31,7 @@
 #include "auth/AuthService.h"
 #include "auth/JwtIssuer.h"
 #include "auth/MasterKey.h"
+#include "mounts/MountsDb.h"
 
 #include "utils/Log.h"
 
@@ -113,8 +119,48 @@ int resetAdmin(const std::filesystem::path& auth_db_path,
     return 0;
 }
 
+namespace detail {
+
+bool reencryptAll(const std::vector<RotationEntry>& entries,
+                  const MasterKey&                  new_key,
+                  std::string&                      err,
+                  std::vector<std::string>*         done_labels) {
+    if (done_labels) done_labels->clear();
+    std::vector<std::size_t> stored;   // indices already written
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const auto& e = entries[i];
+        const auto blob = new_key.encrypt(e.plaintext);
+        if (blob.empty() || !e.store(blob)) {
+            err = "cannot store re-encrypted " + e.label;
+            // Put back whatever was already rotated, newest first, so a
+            // failure in the middle never leaves storage half-rotated.
+            std::string not_restored;
+            for (auto it = stored.rbegin(); it != stored.rend(); ++it) {
+                const auto& done = entries[*it];
+                if (!done.store(done.old_blob)) {
+                    if (!not_restored.empty()) not_restored += ", ";
+                    not_restored += done.label;
+                }
+            }
+            if (!not_restored.empty()) {
+                err += "; ROLLBACK FAILED for: " + not_restored +
+                       " (these are now encrypted with the NEW key; "
+                       "restore the database from backup or re-enter them)";
+            }
+            if (done_labels) done_labels->clear();
+            return false;
+        }
+        stored.push_back(i);
+        if (done_labels) done_labels->push_back(e.label);
+    }
+    return true;
+}
+
+}  // namespace detail
+
 int rotateMasterKey(const std::filesystem::path& auth_db_path,
-                    const std::filesystem::path& key_file_path) {
+                    const std::filesystem::path& key_file_path,
+                    const std::filesystem::path& mounts_db_path) {
     namespace fs = std::filesystem;
 
     // (1) Загружаем старый ключ. Если файла нет — отказ: ротация
@@ -141,18 +187,100 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
         return 1;
     }
 
-    // (3) Расшифровываем все известные blob'ы старым ключом. Сейчас
-    // таких блобов один — jwt_secret. ldap.bind_password / smtp.password
-    // добавятся когда соответствующие фичи появятся (commits 17, 23).
-    std::optional<std::string> jwt_plain;
+    // (3) Собираем ВСЕ секреты, зашифрованные мастер-ключом, и
+    // расшифровываем их старым ключом ДО любых изменений. Если хоть один
+    // не расшифровывается, отказываем: ротация сделала бы его нечитаемым.
+    // Новый вид секрета добавляется сюда одной записью (и в
+    // MasterKeyReset.cpp — тоже одной).
+    std::vector<detail::RotationEntry> entries;
+    const auto refuse = [](const std::string& label) {
+        std::cerr << "ERROR: existing " << label << " blob cannot be decrypted "
+                     "with current master key — refusing to rotate (the secret "
+                     "would become unreadable). Возможно, ключ уже был "
+                     "ротирован, а DB — нет.\n";
+        return 1;
+    };
+
+    // jwt_secret.
     if (auto blob = db.readJwtSecret(); blob.has_value()) {
-        jwt_plain = old_key.decrypt(*blob);
-        if (!jwt_plain) {
-            std::cerr << "ERROR: existing jwt_secret blob cannot be decrypted "
-                         "with current master key — refusing to rotate (DB "
-                         "would become unreadable). Возможно, ключ уже был "
-                         "ротирован, а DB — нет.\n";
+        auto plain = old_key.decrypt(*blob);
+        if (!plain) return refuse("jwt_secret");
+        detail::RotationEntry e;
+        e.label     = "jwt_secret";
+        e.old_blob  = *blob;
+        e.plaintext = std::move(*plain);
+        e.store = [&db](const std::vector<std::uint8_t>& b) {
+            const std::int64_t now =
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+            return db.storeJwtSecret(b, now);
+        };
+        entries.push_back(std::move(e));
+    }
+
+    // LDAP bind password. Read-modify-write of the singleton row so every
+    // other column (updated_at/updated_by included) stays exactly as it was.
+    if (auto row = db.readLdapConfigRow();
+        row && !row->bind_password_encrypted.empty()) {
+        auto plain = old_key.decrypt(row->bind_password_encrypted);
+        if (!plain) return refuse("ldap_config.bind_password");
+        detail::RotationEntry e;
+        e.label     = "ldap_config.bind_password";
+        e.old_blob  = row->bind_password_encrypted;
+        e.plaintext = std::move(*plain);
+        e.store = [&db](const std::vector<std::uint8_t>& b) {
+            auto r = db.readLdapConfigRow();
+            if (!r) return false;
+            r->bind_password_encrypted = b;
+            return db.writeLdapConfigRow(*r);
+        };
+        entries.push_back(std::move(e));
+    }
+
+    // SMTP password.
+    if (auto row = db.readSmtpConfigRow();
+        row && !row->password_encrypted.empty()) {
+        auto plain = old_key.decrypt(row->password_encrypted);
+        if (!plain) return refuse("smtp_config.password");
+        detail::RotationEntry e;
+        e.label     = "smtp_config.password";
+        e.old_blob  = row->password_encrypted;
+        e.plaintext = std::move(*plain);
+        e.store = [&db](const std::vector<std::uint8_t>& b) {
+            auto r = db.readSmtpConfigRow();
+            if (!r) return false;
+            r->password_encrypted = b;
+            return db.writeSmtpConfigRow(*r);
+        };
+        entries.push_back(std::move(e));
+    }
+
+    // CIFS passwords of mounts (separate mounts.db). Only if the file is
+    // already there: rotation must never create an empty database.
+    std::unique_ptr<liveqx::mounts::MountsDb> mounts;
+    if (!mounts_db_path.empty() && fs::exists(mounts_db_path)) {
+        mounts = std::make_unique<liveqx::mounts::MountsDb>(mounts_db_path);
+        if (!mounts->open()) {
+            std::cerr << "ERROR: cannot open mounts.db at " << mounts_db_path
+                      << "\n";
             return 1;
+        }
+        for (const auto& row : mounts->listAll()) {
+            if (row.cifs_password_blob.empty()) continue;
+            const std::string label =
+                "mounts.cifs_password#" + std::to_string(row.id);
+            auto plain = old_key.decrypt(row.cifs_password_blob);
+            if (!plain) return refuse(label);
+            detail::RotationEntry e;
+            e.label     = label;
+            e.old_blob  = row.cifs_password_blob;
+            e.plaintext = std::move(*plain);
+            const std::int64_t id = row.id;
+            auto* mdb = mounts.get();
+            e.store = [mdb, id](const std::vector<std::uint8_t>& b) {
+                return mdb->updateCifsPasswordBlob(id, b);
+            };
+            entries.push_back(std::move(e));
         }
     }
 
@@ -203,27 +331,20 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
         return 1;
     }
 
-    // (6) Перешифровываем все blob'ы новым ключом и UPSERT'им в БД.
-    // ВАЖНО: между этим шагом и rename'ом DB указывает на новый ключ,
-    // а файл — на старый. Параллельный server в этом окне сломается на
+    // (6) Перешифровываем все секреты новым ключом и записываем. При сбое
+    // посреди записи reencryptAll возвращает уже записанное к старому
+    // шифртексту, поэтому БД не остаётся наполовину перешифрованной.
+    // ВАЖНО: между этим шагом и rename'ом БД указывает на новый ключ, а
+    // файл — на старый. Параллельный server в этом окне сломается на
     // decrypt'е. Поэтому rotation — out-of-band procedure при stop'нутом
     // сервере (как printBootstrap / resetAdmin).
-    if (jwt_plain) {
-        auto new_blob = new_key.encrypt(*jwt_plain);
-        if (new_blob.empty()) {
-            std::cerr << "ERROR: re-encrypt of jwt_secret failed\n";
-            std::error_code ec;
-            fs::remove(tmp_path, ec);
-            return 1;
-        }
-        const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        if (!db.storeJwtSecret(new_blob, now)) {
-            std::cerr << "ERROR: cannot UPSERT jwt_secret with new ciphertext\n";
-            std::error_code ec;
-            fs::remove(tmp_path, ec);
-            return 1;
-        }
+    std::vector<std::string> rotated;
+    std::string rotate_err;
+    if (!detail::reencryptAll(entries, new_key, rotate_err, &rotated)) {
+        std::cerr << "ERROR: " << rotate_err << "\n";
+        std::error_code ec;
+        fs::remove(tmp_path, ec);
+        return 1;
     }
 
     // (7) Backup'им старый ключ и перемещаем `.new` на место. Если этот
@@ -240,11 +361,11 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
     if (ec) {
         std::cerr << "ERROR: cannot backup current key to " << bak_path
                   << ": " << ec.message() << "\n";
-        // НЕ удаляем `.new` — он содержит ключ, которым уже зашифрован
-        // jwt_secret в БД. Operator должен вручную перенести `.new`
+        // НЕ удаляем `.new` — он содержит ключ, которым уже зашифрованы
+        // секреты в БД. Operator должен вручную перенести `.new`
         // на место (mv key.new key) либо откатить DB.
         std::cerr << "NOTE: new key file is at " << tmp_path
-                  << ". DB jwt_secret уже зашифрован новым ключом — "
+                  << ". Секреты в БД уже зашифрованы новым ключом — "
                      "переместите файл вручную: mv " << tmp_path << " "
                   << key_file_path << "\n";
         return 1;
@@ -263,8 +384,16 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
     std::cout << "master_key_rotated: true\n";
     std::cout << "key_file: " << key_file_path << "\n";
     std::cout << "backup_file: " << bak_path << "\n";
-    std::cout << "blobs_re_encrypted: "
-              << (jwt_plain ? "jwt_secret" : "(none)") << "\n";
+    std::cout << "blobs_re_encrypted: ";
+    if (rotated.empty()) {
+        std::cout << "(none)";
+    } else {
+        for (std::size_t i = 0; i < rotated.size(); ++i) {
+            if (i) std::cout << ", ";
+            std::cout << rotated[i];
+        }
+    }
+    std::cout << "\n";
     std::cout.flush();
     return 0;
 }

@@ -293,6 +293,28 @@ bool MountsDb::update(const MountRow& row) {
     return rc == SQLITE_DONE;
 }
 
+bool MountsDb::updateCifsPasswordBlob(std::int64_t id,
+                                      const std::vector<std::uint8_t>& blob) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "UPDATE mounts SET cifs_password_encrypted=? WHERE id=?",
+            -1, &st, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    if (blob.empty()) {
+        sqlite3_bind_null(st, 1);
+    } else {
+        sqlite3_bind_blob(st, 1, blob.data(), static_cast<int>(blob.size()),
+                          SQLITE_TRANSIENT);
+    }
+    sqlite3_bind_int64(st, 2, id);
+    const int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE && sqlite3_changes(db_) == 1;
+}
+
 bool MountsDb::deleteById(std::int64_t id) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!db_) return false;

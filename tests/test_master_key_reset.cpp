@@ -29,6 +29,7 @@
 #include "auth/AuthDb.h"
 #include "auth/MasterKey.h"
 #include "auth/MasterKeyReset.h"
+#include "mounts/MountsDb.h"
 #include "utils/Paths.h"
 
 namespace fs = std::filesystem;
@@ -257,4 +258,49 @@ TEST_F(MasterKeyResetTest, ResetWipesEncryptedSecrets) {
     EXPECT_TRUE(isNullBlob("SELECT password_encrypted     FROM smtp_config WHERE id=1"));
     EXPECT_EQ(rowCount("SELECT COUNT(*) FROM jwt_secret"), 0);
     sqlite3_close(db);
+}
+
+TEST_F(MasterKeyResetTest, ResetWipesMountCifsPasswords) {
+    // CIFS passwords of mounts are encrypted with the master key too. After
+    // a reset the old ciphertext can never be decrypted again, so it must be
+    // cleared (and reported) rather than left behind as undecryptable junk.
+    const auto paths = makePaths();
+    writeKey(paths.masterKey(), 0x66);
+    {
+        liveqx::mounts::MountsDb mdb(paths.mountsDb());
+        ASSERT_TRUE(mdb.open());
+        liveqx::mounts::MountRow r;
+        r.fs_type = "cifs";
+        r.source  = "//srv/share";
+        r.target  = "/mnt/liveqx/x";
+        r.cifs_username = "alice";
+        r.cifs_password_blob = {1, 2, 3, 4};
+        ASSERT_TRUE(mdb.insert(r).has_value());
+    }
+
+    const auto report = sa::resetMasterKey(paths, /*confirmed=*/true);
+    ASSERT_EQ(report.result, sa::ResetResult::Success) << report.error;
+
+    bool reported = false;
+    for (const auto& s : report.wiped)
+        if (s.find("mounts.cifs_password_encrypted") != std::string::npos)
+            reported = true;
+    EXPECT_TRUE(reported);
+
+    liveqx::mounts::MountsDb mdb(paths.mountsDb());
+    ASSERT_TRUE(mdb.open());
+    const auto rows = mdb.listAll();
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_FALSE(rows[0].hasPassword());
+    EXPECT_EQ(rows[0].cifs_username, "alice");   // only the secret is wiped
+}
+
+TEST_F(MasterKeyResetTest, ResetDoesNotCreateMountsDbWhenAbsent) {
+    const auto paths = makePaths();
+    writeKey(paths.masterKey(), 0x77);
+    ASSERT_FALSE(fs::exists(paths.mountsDb()));
+
+    const auto report = sa::resetMasterKey(paths, /*confirmed=*/true);
+    ASSERT_EQ(report.result, sa::ResetResult::Success) << report.error;
+    EXPECT_FALSE(fs::exists(paths.mountsDb()));
 }

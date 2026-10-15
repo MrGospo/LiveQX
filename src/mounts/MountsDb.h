@@ -83,6 +83,14 @@ public:
     // отвечает за «leave password alone if empty» semantics.
     bool                           update(const MountRow& row);
 
+    // Replaces only the encrypted CIFS password, leaving every other
+    // column — updated_at included — as it was. Used by master-key
+    // rotation, which must not look like an operator edit. An empty blob
+    // stores NULL (no password). False when no row has that id.
+    bool                           updateCifsPasswordBlob(
+                                       std::int64_t id,
+                                       const std::vector<std::uint8_t>& blob);
+
     // Удаляет строку. Возвращает true даже если id уже отсутствовал
     // (DELETE'у похуй сколько rows aff'нуло).
     bool                           deleteById(std::int64_t id);

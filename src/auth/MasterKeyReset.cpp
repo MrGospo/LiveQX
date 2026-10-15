@@ -119,6 +119,37 @@ bool wipeEncryptedSecrets(const fs::path& auth_db,
     return ok;
 }
 
+// CIFS passwords of mounts live in a separate database (mounts.db) and are
+// encrypted with the master key too. After a reset their ciphertext can
+// never be decrypted again, so clear it (the rest of the row stays), and
+// report it like the auth.db secrets.
+bool wipeMountSecrets(const fs::path& mounts_db,
+                      std::vector<std::string>& wiped_out,
+                      std::string& err_out) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(mounts_db.string().c_str(), &db,
+                        SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK) {
+        err_out = std::string{"open mounts.db: "} + (db ? sqlite3_errmsg(db) : "");
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    sqlite3_busy_timeout(db, 5000);
+    char* e = nullptr;
+    const bool ok = sqlite3_exec(
+        db,
+        "UPDATE mounts SET cifs_password_encrypted=NULL "
+        "WHERE cifs_password_encrypted IS NOT NULL",
+        nullptr, nullptr, &e) == SQLITE_OK;
+    if (!ok) {
+        err_out = std::string{"mounts.cifs_password_encrypted: "} + (e ? e : "");
+        if (e) sqlite3_free(e);
+    } else if (sqlite3_changes(db) > 0) {
+        wiped_out.emplace_back("mounts.cifs_password_encrypted");
+    }
+    sqlite3_close(db);
+    return ok;
+}
+
 // Atomic write of `bytes` to `path` with mode 0600. Pattern lifted from
 // AuthCli.rotateMasterKey(): write to <path>.new (O_CREAT|O_EXCL),
 // fsync, rename onto target.
@@ -267,6 +298,15 @@ ResetReport resetMasterKey(const liveqx::paths::Paths& paths,
     // exists; on a fresh install there's nothing to wipe.
     if (fs::exists(auth_db)) {
         if (!wipeEncryptedSecrets(auth_db, report.wiped, report.error)) {
+            report.result = ResetResult::WipeFailed;
+            return report;
+        }
+    }
+
+    // (4b) The CIFS passwords of mounts (separate mounts.db). Same rule:
+    // only if the file exists, never create it here.
+    if (fs::exists(paths.mountsDb())) {
+        if (!wipeMountSecrets(paths.mountsDb(), report.wiped, report.error)) {
             report.result = ResetResult::WipeFailed;
             return report;
         }

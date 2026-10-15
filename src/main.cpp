@@ -234,7 +234,8 @@ int main(int argc, char* argv[]) {
         if (do_reset_admin)
             return liveqx::auth::resetAdmin(db_path, reset_admin_user);
         if (do_rotate_master_key)
-            return liveqx::auth::rotateMasterKey(db_path, key_path);
+            return liveqx::auth::rotateMasterKey(db_path, key_path,
+                                                 recovery_paths.mountsDb());
         if (do_reset_master_key) {
             // fix35 A3.13 — destructive master-key reset. The CLI is
             // responsible for printing the warning when the operator
@@ -243,7 +244,7 @@ int main(int argc, char* argv[]) {
             if (!confirm_reset) {
                 std::cerr
                     << "WARNING: --reset-master-key destroys the current master key.\n"
-                    << "Encrypted secrets (LDAP/SMTP passwords, jwt_secret) will be wiped.\n"
+                    << "Encrypted secrets (LDAP/SMTP passwords, CIFS passwords of mounts, jwt_secret) will be wiped.\n"
                     << "A backup of the current key will be saved to "
                     << key_path.string() << ".<unix_timestamp>.bak.\n"
                     << "The LiveQX service must be stopped before running this.\n"

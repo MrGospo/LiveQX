@@ -7,9 +7,11 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <functional>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -23,6 +25,7 @@
 #include "auth/JwtIssuer.h"
 #include "auth/MasterKey.h"
 #include "auth/PasswordHasher.h"
+#include "mounts/MountsDb.h"
 
 namespace sa = liveqx::auth;
 
@@ -380,4 +383,309 @@ TEST_F(RotateMasterKeyTest, RefusesIfExistingBlobUndecryptable) {
         f.read(reinterpret_cast<char*>(after.data()), after.size());
     }
     EXPECT_EQ(before, after);
+}
+
+// ── rotation must cover EVERY secret encrypted with the master key ───────
+//
+// Before this, rotateMasterKey() re-encrypted only jwt_secret: the LDAP
+// bind password, the SMTP password and the CIFS passwords of mounts were
+// left under the old key and became undecryptable after a rotation.
+
+namespace {
+
+struct RotationRun {
+    int         rc{0};
+    std::string out;
+    std::string err;
+};
+
+RotationRun runRotation(const std::filesystem::path& db,
+                        const std::filesystem::path& key,
+                        const std::filesystem::path& mounts = {}) {
+    std::stringstream out, err;
+    auto* old_out = std::cout.rdbuf(out.rdbuf());
+    auto* old_err = std::cerr.rdbuf(err.rdbuf());
+    RotationRun r;
+    r.rc = sa::rotateMasterKey(db, key, mounts);
+    std::cout.rdbuf(old_out);
+    std::cerr.rdbuf(old_err);
+    r.out = out.str();
+    r.err = err.str();
+    return r;
+}
+
+std::vector<std::uint8_t> readFileBytes(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+}
+
+std::vector<std::uint8_t> garbageBlob() {
+    return std::vector<std::uint8_t>(
+        sa::MasterKey::kNonceBytes + sa::MasterKey::kMacBytes + 8, 0xCC);
+}
+
+}  // namespace
+
+TEST_F(RotateMasterKeyTest, ReEncryptsLdapBindPassword) {
+    sa::MasterKey mk(key_path().string());
+    ASSERT_TRUE(mk.load());
+    {
+        sa::AuthDb db(db_path());
+        ASSERT_TRUE(db.open());
+        sa::AuthDb::LdapConfigRow row;
+        row.server = "ldaps://dir.example.com";
+        row.bind_dn = "cn=svc,dc=example,dc=com";
+        row.bind_password_encrypted = mk.encrypt("ldap-secret");
+        ASSERT_TRUE(db.writeLdapConfigRow(row));
+    }
+
+    const auto run = runRotation(db_path(), key_path());
+    ASSERT_EQ(run.rc, 0) << run.err;
+    EXPECT_NE(run.out.find("ldap_config.bind_password"), std::string::npos);
+
+    sa::MasterKey fresh(key_path().string());
+    ASSERT_TRUE(fresh.load());
+    sa::AuthDb db(db_path());
+    ASSERT_TRUE(db.open());
+    const auto row = db.readLdapConfigRow();
+    ASSERT_TRUE(row.has_value());
+    const auto plain = fresh.decrypt(row->bind_password_encrypted);
+    ASSERT_TRUE(plain.has_value());
+    EXPECT_EQ(*plain, "ldap-secret");
+    // Nothing else in the row is touched.
+    EXPECT_EQ(row->server, "ldaps://dir.example.com");
+    EXPECT_EQ(row->bind_dn, "cn=svc,dc=example,dc=com");
+}
+
+TEST_F(RotateMasterKeyTest, ReEncryptsSmtpPassword) {
+    sa::MasterKey mk(key_path().string());
+    ASSERT_TRUE(mk.load());
+    {
+        sa::AuthDb db(db_path());
+        ASSERT_TRUE(db.open());
+        sa::AuthDb::SmtpConfigRow row;
+        row.server = "smtp.example.com";
+        row.port = 2525;
+        row.password_encrypted = mk.encrypt("smtp-secret");
+        ASSERT_TRUE(db.writeSmtpConfigRow(row));
+    }
+
+    const auto run = runRotation(db_path(), key_path());
+    ASSERT_EQ(run.rc, 0) << run.err;
+    EXPECT_NE(run.out.find("smtp_config.password"), std::string::npos);
+
+    sa::MasterKey fresh(key_path().string());
+    ASSERT_TRUE(fresh.load());
+    sa::AuthDb db(db_path());
+    ASSERT_TRUE(db.open());
+    const auto row = db.readSmtpConfigRow();
+    ASSERT_TRUE(row.has_value());
+    const auto plain = fresh.decrypt(row->password_encrypted);
+    ASSERT_TRUE(plain.has_value());
+    EXPECT_EQ(*plain, "smtp-secret");
+    EXPECT_EQ(row->server, "smtp.example.com");
+    EXPECT_EQ(row->port, 2525);
+}
+
+TEST_F(RotateMasterKeyTest, ReEncryptsCifsPasswordsOfMounts) {
+    const auto mounts_path = dir_ / "mounts.db";
+    sa::MasterKey mk(key_path().string());
+    ASSERT_TRUE(mk.load());
+
+    std::int64_t with_pw = 0, without_pw = 0;
+    std::int64_t updated_with = 0;
+    {
+        liveqx::mounts::MountsDb mdb(mounts_path);
+        ASSERT_TRUE(mdb.open());
+        liveqx::mounts::MountRow a;
+        a.fs_type = "cifs"; a.source = "//srv/a"; a.target = "/mnt/liveqx/a";
+        a.cifs_username = "alice";
+        a.cifs_password_blob = mk.encrypt("cifs-secret");
+        const auto ia = mdb.insert(a);
+        ASSERT_TRUE(ia.has_value());
+        with_pw = *ia;
+
+        liveqx::mounts::MountRow b;
+        b.fs_type = "nfs"; b.source = "10.0.0.1:/x"; b.target = "/mnt/liveqx/b";
+        const auto ib = mdb.insert(b);
+        ASSERT_TRUE(ib.has_value());
+        without_pw = *ib;
+        updated_with = mdb.findById(with_pw)->updated_at;
+    }
+
+    const auto run = runRotation(db_path(), key_path(), mounts_path);
+    ASSERT_EQ(run.rc, 0) << run.err;
+    EXPECT_NE(run.out.find("mounts.cifs_password"), std::string::npos);
+
+    sa::MasterKey fresh(key_path().string());
+    ASSERT_TRUE(fresh.load());
+    liveqx::mounts::MountsDb mdb(mounts_path);
+    ASSERT_TRUE(mdb.open());
+    const auto a = mdb.findById(with_pw);
+    ASSERT_TRUE(a.has_value());
+    const auto plain = fresh.decrypt(a->cifs_password_blob);
+    ASSERT_TRUE(plain.has_value());
+    EXPECT_EQ(*plain, "cifs-secret");
+    EXPECT_EQ(a->updated_at, updated_with)
+        << "a rotation must not look like an operator edit";
+    EXPECT_EQ(a->cifs_username, "alice");
+    const auto b = mdb.findById(without_pw);
+    ASSERT_TRUE(b.has_value());
+    EXPECT_FALSE(b->hasPassword());
+}
+
+TEST_F(RotateMasterKeyTest, MissingMountsDbIsSkippedAndNotCreated) {
+    {
+        sa::MasterKey mk(key_path().string());
+        ASSERT_TRUE(mk.load());
+    }
+    const auto mounts_path = dir_ / "no-such-mounts.db";
+    const auto run = runRotation(db_path(), key_path(), mounts_path);
+    ASSERT_EQ(run.rc, 0) << run.err;
+    EXPECT_FALSE(std::filesystem::exists(mounts_path));
+}
+
+TEST_F(RotateMasterKeyTest, RefusesIfLdapBlobUndecryptableAndChangesNothing) {
+    sa::MasterKey mk(key_path().string());
+    ASSERT_TRUE(mk.load());
+    const auto jwt_blob = mk.encrypt("jwt-secret-value-32-bytes-long!!!!");
+    {
+        sa::AuthDb db(db_path());
+        ASSERT_TRUE(db.open());
+        ASSERT_TRUE(db.storeJwtSecret(jwt_blob, 1));
+        sa::AuthDb::LdapConfigRow row;
+        row.server = "ldaps://x";
+        row.bind_password_encrypted = garbageBlob();
+        ASSERT_TRUE(db.writeLdapConfigRow(row));
+    }
+    const auto key_before = readFileBytes(key_path());
+
+    const auto run = runRotation(db_path(), key_path());
+    EXPECT_EQ(run.rc, 1);
+    EXPECT_NE(run.err.find("cannot be decrypted"), std::string::npos);
+    EXPECT_EQ(readFileBytes(key_path()), key_before);
+
+    // The jwt blob, which could have been rotated first, is untouched.
+    sa::AuthDb db(db_path());
+    ASSERT_TRUE(db.open());
+    const auto jwt_after = db.readJwtSecret();
+    ASSERT_TRUE(jwt_after.has_value());
+    EXPECT_EQ(*jwt_after, jwt_blob);
+}
+
+TEST_F(RotateMasterKeyTest, RefusesIfMountBlobUndecryptableAndChangesNothing) {
+    const auto mounts_path = dir_ / "mounts.db";
+    sa::MasterKey mk(key_path().string());
+    ASSERT_TRUE(mk.load());
+    const auto good = mk.encrypt("fine");
+    {
+        sa::AuthDb db(db_path());
+        ASSERT_TRUE(db.open());
+        ASSERT_TRUE(db.storeJwtSecret(mk.encrypt("jwt"), 1));
+        liveqx::mounts::MountsDb mdb(mounts_path);
+        ASSERT_TRUE(mdb.open());
+        liveqx::mounts::MountRow a;
+        a.fs_type = "cifs"; a.source = "//srv/a"; a.target = "/mnt/liveqx/a";
+        a.cifs_password_blob = good;
+        ASSERT_TRUE(mdb.insert(a).has_value());
+        liveqx::mounts::MountRow b;
+        b.fs_type = "cifs"; b.source = "//srv/b"; b.target = "/mnt/liveqx/b";
+        b.cifs_password_blob = garbageBlob();
+        ASSERT_TRUE(mdb.insert(b).has_value());
+    }
+    const auto key_before = readFileBytes(key_path());
+
+    const auto run = runRotation(db_path(), key_path(), mounts_path);
+    EXPECT_EQ(run.rc, 1);
+    EXPECT_EQ(readFileBytes(key_path()), key_before);
+
+    liveqx::mounts::MountsDb mdb(mounts_path);
+    ASSERT_TRUE(mdb.open());
+    const auto rows = mdb.listAll();
+    ASSERT_EQ(rows.size(), 2u);
+    EXPECT_EQ(rows[0].cifs_password_blob, good);   // not rotated
+}
+
+// ── the transactional core, tested without any real storage ──────────────
+
+namespace {
+
+class ReencryptAllTest : public ::testing::Test {
+protected:
+    std::filesystem::path dir_;
+    std::unique_ptr<sa::MasterKey> key_;
+
+    void SetUp() override {
+        dir_ = std::filesystem::temp_directory_path() /
+            ("reencrypt_all_" +
+             std::string(::testing::UnitTest::GetInstance()->current_test_info()->name()));
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);
+        std::filesystem::create_directories(dir_);
+        ::unsetenv("LIVEQX_MASTER_KEY");
+        key_ = std::make_unique<sa::MasterKey>((dir_ / "k.key").string());
+        ASSERT_TRUE(key_->load());
+    }
+    void TearDown() override {
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);
+    }
+
+    // An entry whose "storage" is a vector the test can inspect.
+    sa::detail::RotationEntry entry(std::string label, std::string plain,
+                                    std::vector<std::vector<std::uint8_t>>& writes,
+                                    bool fail_on_new = false) {
+        sa::detail::RotationEntry e;
+        e.label     = std::move(label);
+        e.plaintext = std::move(plain);
+        e.old_blob  = std::vector<std::uint8_t>{0x0A, 0x0B};   // marker
+        e.store = [&writes, fail_on_new, old = e.old_blob]
+                  (const std::vector<std::uint8_t>& blob) {
+            // A failing store still fails when asked to put the OLD blob
+            // back only if the test says so via writes.size() sentinel.
+            if (fail_on_new && blob != old) return false;
+            writes.push_back(blob);
+            return true;
+        };
+        return e;
+    }
+};
+
+}  // namespace
+
+TEST_F(ReencryptAllTest, StoresEveryEntryUnderTheNewKey) {
+    std::vector<std::vector<std::uint8_t>> w1, w2;
+    std::vector<sa::detail::RotationEntry> entries;
+    entries.push_back(entry("a", "alpha", w1));
+    entries.push_back(entry("b", "beta",  w2));
+
+    std::string err;
+    std::vector<std::string> done;
+    ASSERT_TRUE(sa::detail::reencryptAll(entries, *key_, err, &done)) << err;
+    ASSERT_EQ(w1.size(), 1u);
+    ASSERT_EQ(w2.size(), 1u);
+    EXPECT_EQ(key_->decrypt(w1[0]).value_or(""), "alpha");
+    EXPECT_EQ(key_->decrypt(w2[0]).value_or(""), "beta");
+    EXPECT_EQ(done, (std::vector<std::string>{"a", "b"}));
+}
+
+TEST_F(ReencryptAllTest, PutsBackEntriesAlreadyStoredWhenALaterStoreFails) {
+    std::vector<std::vector<std::uint8_t>> w1, w2, w3;
+    std::vector<sa::detail::RotationEntry> entries;
+    entries.push_back(entry("a", "alpha", w1));
+    entries.push_back(entry("b", "beta",  w2));
+    entries.push_back(entry("c", "gamma", w3, /*fail_on_new=*/true));
+
+    std::string err;
+    std::vector<std::string> done;
+    EXPECT_FALSE(sa::detail::reencryptAll(entries, *key_, err, &done));
+    EXPECT_NE(err.find("re-encrypted c"), std::string::npos) << "the failing entry is named";
+
+    // a and b were stored under the new key, then put back to the old blob.
+    ASSERT_EQ(w1.size(), 2u);
+    ASSERT_EQ(w2.size(), 2u);
+    EXPECT_EQ(w1[1], (std::vector<std::uint8_t>{0x0A, 0x0B}));
+    EXPECT_EQ(w2[1], (std::vector<std::uint8_t>{0x0A, 0x0B}));
+    EXPECT_TRUE(w3.empty());
+    EXPECT_TRUE(done.empty()) << "nothing counts as rotated after a rollback";
 }

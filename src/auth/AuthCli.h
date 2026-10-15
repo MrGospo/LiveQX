@@ -1,10 +1,15 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace liveqx::auth {
+
+class MasterKey;
 
 // fix22 commit 10/24 — recovery-CLI поверх AuthService.
 //
@@ -27,12 +32,15 @@ namespace liveqx::auth {
 //     - Печатает новый plaintext на stdout.
 //   rotateMasterKey (auth_db_path, key_file_path):
 //     - Загружает текущий MasterKey из key_file_path.
-//     - Читает все encrypted-blob'ы (commit 15/24 — пока только jwt_secret;
-//       ldap.bind_password / smtp.password добавятся в commits 17 и 23).
-//     - Расшифровывает каждый старым ключом, генерирует новый ключ,
-//       перешифровывает блобы новым ключом.
+//     - Читает ВСЕ encrypted-blob'ы, зашифрованные мастер-ключом:
+//       jwt_secret, пароль привязки LDAP, пароль SMTP (auth.db) и CIFS-пароли
+//       монтирований (mounts.db, если файл существует).
+//     - Расшифровывает каждый старым ключом ДО любых изменений: если хоть
+//       один блоб не расшифровывается, ротация отказывается и ничего не
+//       меняет. Затем генерирует новый ключ и перешифровывает блобы.
 //     - Пишет новый ключ во временный файл `<key>.new` mode 0600,
-//       UPSERT'ит новые ciphertext'ы в БД, бэкапит старый ключ как
+//       записывает новые ciphertext'ы (при сбое посреди записи уже
+//       записанные возвращаются к прежним), бэкапит старый ключ как
 //       `<key>.bak.<unix_ns>` и атомарно перемещает `.new` на место.
 //     - Должно запускаться при остановленном сервере: между UPSERT'ом
 //       и rename'ом DB-блобы зашифрованы новым ключом, а файл всё ещё
@@ -45,7 +53,32 @@ int printBootstrap(const std::filesystem::path& auth_db_path);
 int resetAdmin(const std::filesystem::path& auth_db_path,
                std::string_view username);
 
+// `mounts_db_path` — mounts.db с CIFS-паролями; пусто или файла нет —
+// монтирования пропускаются (БД при этом не создаётся).
 int rotateMasterKey(const std::filesystem::path& auth_db_path,
-                    const std::filesystem::path& key_file_path);
+                    const std::filesystem::path& key_file_path,
+                    const std::filesystem::path& mounts_db_path = {});
+
+namespace detail {
+
+// One secret protected by the master key, as seen by rotation.
+struct RotationEntry {
+    std::string                label;      // e.g. "ldap_config.bind_password"
+    std::vector<std::uint8_t>  old_blob;   // ciphertext under the CURRENT key
+    std::string                plaintext;  // decrypted with the current key
+    // Persists `blob` for this secret; false on failure.
+    std::function<bool(const std::vector<std::uint8_t>&)> store;
+};
+
+// Re-encrypts every entry with `new_key` and stores it. Stops at the first
+// failure and puts the entries already stored back to their old_blob, so
+// the storage is never left half-rotated. On success `done_labels` (if
+// given) lists every entry in order; after a rollback it is empty.
+bool reencryptAll(const std::vector<RotationEntry>& entries,
+                  const MasterKey&                  new_key,
+                  std::string&                      err,
+                  std::vector<std::string>*         done_labels = nullptr);
+
+}  // namespace detail
 
 }  // namespace liveqx::auth
