@@ -34,6 +34,7 @@ const DOCS: DocEntry[] = [
   { file: 'USERS_USER.md',          category: 'settings' },
   { file: 'TIME_USER.md',           category: 'settings' },
   { file: 'MOUNTS_USER.md',         category: 'settings' },
+  { file: 'MASTER_KEY.md',          category: 'settings' },
 
   // Операции / Operations
   { file: 'STRESS_USER.md',         category: 'operations' },

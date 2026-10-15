@@ -28,6 +28,7 @@ function protectionI18nKey(protection: string | undefined): string {
     case 'external_file':      return 'masterKey.protectionExternalFile';
     case 'systemd_credential': return 'masterKey.protectionSystemdCredential';
     case 'env':                return 'masterKey.protectionEnv';
+    case 'passphrase':         return 'masterKey.protectionPassphrase';
     default:                   return 'masterKey.protectionUnknown';
   }
 }
@@ -103,13 +104,22 @@ export default function MasterKeyPage() {
       </Block>
       <Block>
         <h2 className="text-base font-semibold text-[var(--text-primary)] mb-3">{t('masterKey.rotation')}</h2>
-        {data?.source === 'file' ? (
+        {data?.protection === 'passphrase' ? (
+          <>
+            <p className="text-sm text-[var(--text-muted)] mb-4">{t('masterKey.rotationHintPassphrase')}</p>
+            <div className="bg-canvas rounded-lg px-4 py-3 font-mono text-sm text-[var(--accent)] leading-relaxed">
+              sudo systemctl stop liveqx<br />
+              sudo liveqx --config /etc/liveqx/config.json --rotate-master-key<br />
+              sudo systemctl start liveqx
+            </div>
+          </>
+        ) : data?.source === 'file' ? (
           <>
             <p className="text-sm text-[var(--text-muted)] mb-4">{t('masterKey.rotationHintFile')}</p>
             <div className="bg-canvas rounded-lg px-4 py-3 font-mono text-sm text-[var(--accent)] leading-relaxed">
-              liveqx --rotate-master-key \<br />
-              &nbsp;&nbsp;&nbsp;&nbsp;--auth-db state/auth.db \<br />
-              &nbsp;&nbsp;&nbsp;&nbsp;--master-key-file state/master.key
+              sudo systemctl stop liveqx<br />
+              sudo liveqx --config /etc/liveqx/config.json --rotate-master-key<br />
+              sudo systemctl start liveqx
             </div>
           </>
         ) : data?.source === 'env' ? (

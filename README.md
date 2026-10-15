@@ -74,7 +74,7 @@ The RBAC model provides three roles: `admin`, `operator`, `viewer`, with the abi
 
 LDAP integration is optionally supported.
 
-The master key (based on libsodium) is stored either in the `state/master.key` file (with `0600` permissions) or in the `LIVEQX_MASTER_KEY` environment variable (base64-encoded). Key rotation is performed via CLI with exclusive locking, backup creation, and clearing of credentials for LDAP, SMTP, and network shares.
+The master key (libsodium) encrypts the stored secrets: LDAP/SMTP passwords, CIFS share passwords and the session signing secret. The installer keeps it outside the data directory (`/etc/liveqx/master.key`, `root:liveqx 0640`); it can also be a systemd credential (TPM2-bound when available) or be wrapped with a passphrase, in which case the service starts sealed and waits for the passphrase on a web page. Rotation (`--rotate-master-key`) re-encrypts every secret with a new key; reset (`--reset-master-key --confirm-reset`) wipes the secrets instead. See the knowledge base article "Master key".
 
 ### Time Handling
 
