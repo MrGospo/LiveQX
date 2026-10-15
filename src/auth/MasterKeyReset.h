@@ -52,6 +52,7 @@ enum class ResetResult {
     BackupFailed,      // cp master.key → master.key.<ts>.bak failed
     WipeFailed,        // UPDATE/DELETE on encrypted columns failed
     GenerateFailed,    // cannot write the new master.key file
+    UnsupportedKeyStore,  // key is delivered from outside (creds/env): cannot be rewritten here
 };
 
 struct ResetReport {

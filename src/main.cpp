@@ -236,7 +236,9 @@ int main(int argc, char* argv[]) {
         if (do_rotate_master_key)
             return liveqx::auth::rotateMasterKey(db_path, key_path,
                                                  recovery_paths.mountsDb(),
-                                                 recovery_paths.deviceCaDir());
+                                                 recovery_paths.deviceCaDir(),
+                                                 recovery_paths.stateDir(),
+                                                 recovery_paths.masterKeyStore());
         if (do_reset_master_key) {
             // fix35 A3.13 — destructive master-key reset. The CLI is
             // responsible for printing the warning when the operator
@@ -294,6 +296,9 @@ int main(int argc, char* argv[]) {
                 case R::GenerateFailed:
                     std::cerr << "ERROR: cannot generate new master.key: "
                               << report.error << "\n";
+                    return 1;
+                case R::UnsupportedKeyStore:
+                    std::cerr << "ERROR: " << report.error << "\n";
                     return 1;
                 case R::NoConfirmation:
                     // Should be unreachable — we already gated above.
@@ -549,11 +554,29 @@ int main(int argc, char* argv[]) {
             LOG_ERROR("Cannot open auth.db at {}", auth_db_path);
             return 1;
         }
+        const std::string key_store = paths.masterKeyStore();
+        if (key_store != "file" && key_store != "creds" && key_store != "env") {
+            LOG_ERROR("master_key_store \"{}\" is not one of file, creds, env",
+                      key_store);
+            return 1;
+        }
         sa::MasterKey master_key(master_key_path);
         master_key.setStateDir(paths.stateDir().string());
+        // Keys delivered from outside must never be silently replaced by a
+        // freshly generated file: existing data would become unreadable.
+        master_key.setAutoGenerate(key_store == "file");
         if (!master_key.load()) {
             LOG_ERROR("Cannot load master key from {}", master_key_path);
             return 1;
+        }
+        {
+            const auto prot = master_key.getInfo().protection;
+            if ((key_store == "creds" && prot != "systemd_credential") ||
+                (key_store == "env" && prot != "env")) {
+                LOG_ERROR("master_key_store is \"{}\" but the key was loaded "
+                          "as \"{}\"; check the service unit", key_store, prot);
+                return 1;
+            }
         }
         if (master_key.getInfo().protection == "file_in_state") {
             LOG_WARN("Master key is stored inside the state directory ({}): "

@@ -80,6 +80,10 @@ public:
     // `--auth-db` / `--master-key-file` overrides if those were supplied.
     std::filesystem::path authDb() const;
     std::filesystem::path masterKey() const;
+    // Where the master key lives: "file" (default), "creds" (systemd
+    // credential) or "env" (LIVEQX_MASTER_KEY). From config `master_key_store`.
+    // Rotation/reset rewrite only "file"; the others are delivered from outside.
+    const std::string& masterKeyStore() const noexcept { return master_key_store_; }
     std::filesystem::path stressJson() const                  { return state_dir_ / "stress.json"; }
     std::filesystem::path initialAdminPasswordFile() const    { return state_dir_ / "initial_admin_password.txt"; }
     std::filesystem::path playbackDb() const                  { return state_dir_ / "playback.db"; }
@@ -134,6 +138,7 @@ private:
     // Optional explicit overrides. When empty we derive from state_dir_.
     std::filesystem::path auth_db_override_;
     std::filesystem::path master_key_override_;
+    std::string           master_key_store_{"file"};
 
     bool fhs_root_detected_{false};
 };

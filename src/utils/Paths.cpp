@@ -154,6 +154,10 @@ Paths Paths::resolve(const Args&           cli,
         p.master_key_override_ = *e;
     }
 
+    if (auto s = cfgString(cfg, "master_key_store"); s.has_value() && !s->empty()) {
+        p.master_key_store_ = *s;
+    }
+
     return p;
 }
 

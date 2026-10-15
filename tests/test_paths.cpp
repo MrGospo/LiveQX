@@ -46,12 +46,30 @@ struct FakeEnv {
 
 }  // namespace
 
+// ── master_key_store ───────────────────────────────────────────────────
+
+TEST(PathsMasterKeyStore, DefaultsToFile) {
+    Args a;
+    a.state_dir = "/tmp/lqx-state";
+    FakeEnv fe;
+    const auto p = Paths::resolve(a, nlohmann::json::object(), fe.make());
+    EXPECT_EQ(p.masterKeyStore(), "file");
+}
+
+TEST(PathsMasterKeyStore, ReadsConfig) {
+    Args a;
+    a.state_dir = "/tmp/lqx-state";
+    FakeEnv fe;
+    const auto p = Paths::resolve(a, nlohmann::json{{"master_key_store", "creds"}}, fe.make());
+    EXPECT_EQ(p.masterKeyStore(), "creds");
+}
+
 // ── default branch ─────────────────────────────────────────────────────
 
 TEST(PathsDefault, FhsRootMissingFallsBackToCwd) {
     FakeEnv env;  // fhs_root_exists = false
     Args args;
-    auto p = Paths::resolve(args, json::object(), env.make());
+    auto p = Paths::resolve(args, nlohmann::json::object(), env.make());
     EXPECT_EQ(p.stateDir(),    std::filesystem::path("state"));
     EXPECT_EQ(p.logDir(),      std::filesystem::path("logs"));
     EXPECT_EQ(p.pluginDir(),   std::filesystem::path("plugins"));
@@ -65,7 +83,7 @@ TEST(PathsDefault, FhsRootPresentUsesVarLib) {
     FakeEnv env;
     env.fhs_root_exists = true;
     Args args;
-    auto p = Paths::resolve(args, json::object(), env.make());
+    auto p = Paths::resolve(args, nlohmann::json::object(), env.make());
     EXPECT_EQ(p.stateDir(),
               std::filesystem::path("/var/lib/liveqx/state"));
     EXPECT_EQ(p.logDir(),
@@ -124,7 +142,7 @@ TEST(PathsPrecedence, EmptyCliFallsThroughToEnv) {
     env.vars["LIVEQX_LOG_DIR"] = "/env/logs";
     Args args;
     args.log_dir = "";  // empty CLI value should NOT win
-    auto p = Paths::resolve(args, json::object(), env.make());
+    auto p = Paths::resolve(args, nlohmann::json::object(), env.make());
     EXPECT_EQ(p.logDir(), std::filesystem::path("/env/logs"));
 }
 
@@ -132,7 +150,7 @@ TEST(PathsPrecedence, EmptyCliFallsThroughToEnv) {
 
 TEST(PathsUiDir, EmptyByDefault) {
     FakeEnv env;
-    auto p = Paths::resolve(Args{}, json::object(), env.make());
+    auto p = Paths::resolve(Args{}, nlohmann::json::object(), env.make());
     EXPECT_TRUE(p.uiDir().empty());
 }
 
@@ -243,7 +261,7 @@ TEST(PathsBackwardCompat, NewKeyWinsOverLegacyKey) {
 
 TEST(PathsAllowList, DefaultIsRepoTreePath) {
     FakeEnv env;
-    auto p = Paths::resolve(Args{}, json::object(), env.make());
+    auto p = Paths::resolve(Args{}, nlohmann::json::object(), env.make());
     EXPECT_EQ(p.pluginsAllowListDir(),
               std::filesystem::path("docs/plugin_hashes"));
 }

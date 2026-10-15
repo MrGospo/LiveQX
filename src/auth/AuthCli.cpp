@@ -33,6 +33,7 @@
 #include "auth/MasterKey.h"
 #include "mounts/MountsDb.h"
 #include "utils/DeviceCa.h"
+#include "utils/RuntimeLock.h"
 
 #include "utils/Log.h"
 
@@ -162,8 +163,35 @@ bool reencryptAll(const std::vector<RotationEntry>& entries,
 int rotateMasterKey(const std::filesystem::path& auth_db_path,
                     const std::filesystem::path& key_file_path,
                     const std::filesystem::path& mounts_db_path,
-                    const std::filesystem::path& device_ca_dir) {
+                    const std::filesystem::path& device_ca_dir,
+                    const std::filesystem::path& state_dir,
+                    const std::string& key_store) {
     namespace fs = std::filesystem;
+
+    if (key_store != "file") {
+        std::cerr << "ERROR: master_key_store is \"" << key_store
+                  << "\": the key is delivered from outside (systemd credential "
+                     "or environment) and cannot be rotated here. Create the new "
+                     "key in its store yourself and re-encrypt the secrets.\n";
+        return 1;
+    }
+
+    // Rotating under a running service breaks it: for a moment the DB
+    // points at the new key while the process holds the old one.
+    if (!state_dir.empty()) {
+        auto lock = liveqx::util::RuntimeLock::tryAcquire(state_dir / "liveqx.lock");
+        if (lock.held()) {
+            lock.release();
+        } else if (lock.error().find("another instance") != std::string::npos) {
+            std::cerr << "ERROR: LiveQX is running. Stop the service before "
+                         "rotating the master key.\n";
+            return 1;
+        } else {
+            std::cerr << "ERROR: cannot check whether LiveQX is running: "
+                      << lock.error() << "\n";
+            return 1;
+        }
+    }
 
     // (1) Загружаем старый ключ. Если файла нет — отказ: ротация
     // означает «переехать со старого на новый», и пустого источника
@@ -179,6 +207,34 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
         std::cerr << "ERROR: cannot load current master key from "
                   << key_file_path << "\n";
         return 1;
+    }
+
+    // The new key must land where the service reads it. Environment
+    // variable and systemd credential are delivered from outside.
+    switch (old_key.source()) {
+        case MasterKey::Source::Env:
+            std::cerr << "ERROR: the key comes from LIVEQX_MASTER_KEY; it cannot "
+                         "be rotated here. Change the variable yourself and "
+                         "re-encrypt the secrets.\n";
+            return 1;
+        case MasterKey::Source::EnvFile: {
+            if (old_key.getInfo().protection == "systemd_credential") {
+                std::cerr << "ERROR: the key is a systemd credential; it cannot "
+                             "be rotated here. Re-create the credential with "
+                             "systemd-creds and re-encrypt the secrets.\n";
+                return 1;
+            }
+            std::error_code eq_ec;
+            if (!fs::equivalent(old_key.envFilePath(), key_file_path, eq_ec)) {
+                std::cerr << "ERROR: the service reads its key from "
+                          << old_key.envFilePath() << " (LIVEQX_MASTER_KEY_FILE), "
+                          << "not from " << key_file_path << ".\n";
+                return 1;
+            }
+            break;
+        }
+        default:
+            break;
     }
 
     // (2) Открываем DB. AuthDb::open() создаст файл, если его нет —

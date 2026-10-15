@@ -386,6 +386,25 @@ TEST_F(MasterKeyTest, GetInfoEnvSourceHasNullCreatedAt) {
     EXPECT_EQ(info.fingerprint.size(), 16u);
 }
 
+// ─── auto-generation can be switched off ───────────────────────────────────
+
+TEST_F(MasterKeyTest, WithoutAutoGenerateAMissingKeyIsAnErrorAndNothingIsCreated) {
+    sa::MasterKey mk(keyPath().string());
+    mk.setAutoGenerate(false);
+    EXPECT_FALSE(mk.load());
+    EXPECT_FALSE(fs::exists(keyPath()));
+}
+
+TEST_F(MasterKeyTest, WithoutAutoGenerateAnExistingKeyStillLoads) {
+    {
+        sa::MasterKey first(keyPath().string());
+        ASSERT_TRUE(first.load());
+    }
+    sa::MasterKey mk(keyPath().string());
+    mk.setAutoGenerate(false);
+    EXPECT_TRUE(mk.load());
+}
+
 // ─── protection: where the key sits relative to the data it protects ───────
 
 TEST_F(MasterKeyTest, ProtectionIsFileInStateWhenKeyLivesInStateDir) {

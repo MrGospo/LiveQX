@@ -58,7 +58,7 @@ protected:
         fs::remove_all(root_, ec);
     }
 
-    scp::Paths makePaths() {
+    scp::Paths makePaths(const nlohmann::json& cfg = nlohmann::json::object()) {
         scp::Args a;
         a.state_dir = (root_ / "state").string();
         a.log_dir   = (root_ / "logs").string();
@@ -68,7 +68,7 @@ protected:
         scp::Paths::Env env;
         env.get_env = [](const char*) { return std::optional<std::string>{}; };
         env.exists  = [](const fs::path&) { return false; };
-        return scp::Paths::resolve(a, nlohmann::json::object(), env);
+        return scp::Paths::resolve(a, cfg, env);
     }
 
     std::vector<std::uint8_t> readFileBytes(const fs::path& p) {
@@ -294,6 +294,32 @@ TEST_F(MasterKeyResetTest, ResetWipesMountCifsPasswords) {
     ASSERT_EQ(rows.size(), 1u);
     EXPECT_FALSE(rows[0].hasPassword());
     EXPECT_EQ(rows[0].cifs_username, "alice");   // only the secret is wiped
+}
+
+TEST_F(MasterKeyResetTest, ResetRefusesKeyStoreItCannotRewrite) {
+    const auto paths = makePaths({{"master_key_store", "creds"}});
+    writeKey(paths.masterKey(), 0xAA);
+
+    const auto report = sa::resetMasterKey(paths, /*confirmed=*/true);
+    EXPECT_EQ(report.result, sa::ResetResult::UnsupportedKeyStore);
+    EXPECT_NE(report.error.find("master_key_store"), std::string::npos);
+    const auto bytes = readFileBytes(paths.masterKey());
+    ASSERT_EQ(bytes.size(), sa::MasterKey::kKeyBytes);
+    EXPECT_EQ(bytes[0], 0xAA);
+}
+
+TEST_F(MasterKeyResetTest, ResetRefusesWhenKeyComesFromEnvironmentVariable) {
+    const auto paths = makePaths();
+    writeKey(paths.masterKey(), 0xAA);
+    ::setenv("LIVEQX_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", 1);
+    const auto report = sa::resetMasterKey(paths, /*confirmed=*/true);
+    ::unsetenv("LIVEQX_MASTER_KEY");
+
+    EXPECT_EQ(report.result, sa::ResetResult::UnsupportedKeyStore);
+    EXPECT_NE(report.error.find("LIVEQX_MASTER_KEY"), std::string::npos);
+    const auto bytes = readFileBytes(paths.masterKey());
+    ASSERT_EQ(bytes.size(), sa::MasterKey::kKeyBytes);
+    EXPECT_EQ(bytes[0], 0xAA);
 }
 
 TEST_F(MasterKeyResetTest, ResetMovesDeviceCaAsideInsteadOfLeavingItUnreadable) {

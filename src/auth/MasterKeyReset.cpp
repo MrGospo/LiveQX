@@ -242,6 +242,25 @@ ResetReport resetMasterKey(const liveqx::paths::Paths& paths,
         return report;
     }
 
+    // The new key is written to a file. If the service reads its key
+    // from somewhere else, a reset would leave it with a key that no
+    // longer matches the wiped data.
+    if (paths.masterKeyStore() != "file") {
+        report.result = ResetResult::UnsupportedKeyStore;
+        report.error  = "master_key_store is \"" + paths.masterKeyStore() +
+                        "\": the key is delivered from outside and cannot be "
+                        "reset here. Replace the key in its store and wipe the "
+                        "secrets by hand.";
+        return report;
+    }
+    if (std::getenv("LIVEQX_MASTER_KEY") != nullptr) {
+        report.result = ResetResult::UnsupportedKeyStore;
+        report.error  = "LIVEQX_MASTER_KEY is set: the key comes from the "
+                        "environment and cannot be reset here. Unset it or "
+                        "change the variable yourself.";
+        return report;
+    }
+
     if (sodium_init() < 0) {
         report.result = ResetResult::GenerateFailed;
         report.error  = "sodium_init failed";

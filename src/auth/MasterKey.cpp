@@ -242,6 +242,13 @@ bool MasterKey::load() {
         }
     }
 
+    if (!auto_generate_) {
+        LOG_ERROR("MasterKey: no key available and auto-generation is "
+                  "disabled (master_key_store is not \"file\"); deliver the "
+                  "key through the configured store");
+        return false;
+    }
+
     // (4) Auto-generate. Создаём родительскую директорию, кидаем ключ
     // через libsodium, пишем mode 0600.
     std::error_code ec;

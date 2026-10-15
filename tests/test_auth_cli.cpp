@@ -27,6 +27,7 @@
 #include "auth/PasswordHasher.h"
 #include "mounts/MountsDb.h"
 #include "utils/DeviceCa.h"
+#include "utils/RuntimeLock.h"
 
 namespace sa = liveqx::auth;
 
@@ -403,12 +404,14 @@ struct RotationRun {
 RotationRun runRotation(const std::filesystem::path& db,
                         const std::filesystem::path& key,
                         const std::filesystem::path& mounts = {},
-                        const std::filesystem::path& device_ca = {}) {
+                        const std::filesystem::path& device_ca = {},
+                        const std::filesystem::path& state_dir = {},
+                        const std::string& key_store = "file") {
     std::stringstream out, err;
     auto* old_out = std::cout.rdbuf(out.rdbuf());
     auto* old_err = std::cerr.rdbuf(err.rdbuf());
     RotationRun r;
-    r.rc = sa::rotateMasterKey(db, key, mounts, device_ca);
+    r.rc = sa::rotateMasterKey(db, key, mounts, device_ca, state_dir, key_store);
     std::cout.rdbuf(old_out);
     std::cerr.rdbuf(old_err);
     r.out = out.str();
@@ -545,6 +548,106 @@ TEST_F(RotateMasterKeyTest, MissingMountsDbIsSkippedAndNotCreated) {
     const auto run = runRotation(db_path(), key_path(), mounts_path);
     ASSERT_EQ(run.rc, 0) << run.err;
     EXPECT_FALSE(std::filesystem::exists(mounts_path));
+}
+
+// ── key source awareness: rotation must write where the service reads ────
+
+namespace {
+
+struct EnvVar {
+    std::string name;
+    EnvVar(const char* n, const std::string& v) : name(n) {
+        ::setenv(n, v.c_str(), 1);
+    }
+    ~EnvVar() { ::unsetenv(name.c_str()); }
+};
+
+void writeRawKey(const std::filesystem::path& p, char fill) {
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    f << std::string(sa::MasterKey::kKeyBytes, fill);
+}
+
+}  // namespace
+
+TEST_F(RotateMasterKeyTest, RefusesWhileServiceIsRunningAndChangesNothing) {
+    {
+        sa::MasterKey mk(key_path().string());
+        ASSERT_TRUE(mk.load());
+    }
+    const auto key_before = readFileBytes(key_path());
+    auto lock = liveqx::util::RuntimeLock::tryAcquire(dir_ / "liveqx.lock");
+    ASSERT_TRUE(lock.held());
+
+    const auto run = runRotation(db_path(), key_path(), {}, {}, dir_);
+    EXPECT_EQ(run.rc, 1);
+    EXPECT_NE(run.err.find("running"), std::string::npos) << run.err;
+    EXPECT_EQ(readFileBytes(key_path()), key_before);
+}
+
+TEST_F(RotateMasterKeyTest, RotatesWhenServiceIsStopped) {
+    {
+        sa::MasterKey mk(key_path().string());
+        ASSERT_TRUE(mk.load());
+    }
+    const auto run = runRotation(db_path(), key_path(), {}, {}, dir_);
+    EXPECT_EQ(run.rc, 0) << run.err;
+}
+
+TEST_F(RotateMasterKeyTest, RefusesWhenKeyComesFromEnvironmentVariable) {
+    {
+        sa::MasterKey mk(key_path().string());
+        ASSERT_TRUE(mk.load());
+    }
+    const auto key_before = readFileBytes(key_path());
+    // 32 zero bytes, base64.
+    EnvVar env("LIVEQX_MASTER_KEY",
+               "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+
+    const auto run = runRotation(db_path(), key_path());
+    EXPECT_EQ(run.rc, 1);
+    EXPECT_NE(run.err.find("LIVEQX_MASTER_KEY"), std::string::npos) << run.err;
+    EXPECT_EQ(readFileBytes(key_path()), key_before)
+        << "the file the service does not read must stay untouched";
+}
+
+TEST_F(RotateMasterKeyTest, RotatesExternalKeyFileNamedByEnvironment) {
+    const auto ext = dir_ / "external.key";
+    writeRawKey(ext, 'K');
+    const auto before = readFileBytes(ext);
+    EnvVar env("LIVEQX_MASTER_KEY_FILE", ext.string());
+
+    const auto run = runRotation(db_path(), ext);
+    ASSERT_EQ(run.rc, 0) << run.err;
+    EXPECT_NE(readFileBytes(ext), before);
+    bool backup = false;
+    for (const auto& e : std::filesystem::directory_iterator(dir_))
+        if (e.path().filename().string().rfind("external.key.bak.", 0) == 0)
+            backup = true;
+    EXPECT_TRUE(backup);
+}
+
+TEST_F(RotateMasterKeyTest, RefusesSystemdCredential) {
+    const auto creds = dir_ / "creds";
+    std::filesystem::create_directories(creds);
+    writeRawKey(creds / "liveqx_master_key", 'S');
+    EnvVar dirvar("CREDENTIALS_DIRECTORY", creds.string());
+    EnvVar filevar("LIVEQX_MASTER_KEY_FILE", (creds / "liveqx_master_key").string());
+
+    const auto run = runRotation(db_path(), creds / "liveqx_master_key");
+    EXPECT_EQ(run.rc, 1);
+    EXPECT_NE(run.err.find("systemd"), std::string::npos) << run.err;
+}
+
+TEST_F(RotateMasterKeyTest, RefusesKeyStoreItCannotRewrite) {
+    {
+        sa::MasterKey mk(key_path().string());
+        ASSERT_TRUE(mk.load());
+    }
+    const auto key_before = readFileBytes(key_path());
+    const auto run = runRotation(db_path(), key_path(), {}, {}, {}, "creds");
+    EXPECT_EQ(run.rc, 1);
+    EXPECT_NE(run.err.find("master_key_store"), std::string::npos) << run.err;
+    EXPECT_EQ(readFileBytes(key_path()), key_before);
 }
 
 TEST_F(RotateMasterKeyTest, ResealsDeviceCaKeyUnderTheNewMasterKey) {

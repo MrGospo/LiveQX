@@ -51,6 +51,15 @@ public:
     // Info::protection; call before getInfo().
     void setStateDir(std::string dir) { state_dir_ = std::move(dir); }
 
+    // When false, load() fails instead of creating a new key file. Set for
+    // deployments where the key is delivered from outside (systemd
+    // credential, environment): a missing key there is a misconfiguration,
+    // and silently generating a fresh one would make existing data unreadable.
+    void setAutoGenerate(bool on) { auto_generate_ = on; }
+
+    // Path named by LIVEQX_MASTER_KEY_FILE when source() == EnvFile.
+    const std::string& envFilePath() const noexcept { return env_file_path_; }
+
     explicit MasterKey(std::string key_file_path);
 
     // Load from env / file / auto-generate. Returns false on any error
@@ -89,6 +98,7 @@ private:
     std::string key_file_path_;
     std::string state_dir_;
     std::string env_file_path_;  // set when source_ == EnvFile
+    bool auto_generate_{true};
     std::array<std::uint8_t, kKeyBytes> key_{};
     bool loaded_{false};
     Source source_{Source::Unknown};

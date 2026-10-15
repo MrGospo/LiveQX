@@ -57,10 +57,15 @@ int resetAdmin(const std::filesystem::path& auth_db_path,
 // монтирования пропускаются (БД при этом не создаётся).
 // `device_ca_dir` — каталог центра устройств (ключ CA запечатан мастер-ключом);
 // пусто или каталога нет — пропускается (каталог не создаётся).
+// `state_dir` — если задан, ротация отказывает при запущенной службе.
+// `key_store` — master_key_store из конфига; не "file" → отказ (ключ доставляется
+// снаружи и здесь не перезаписывается).
 int rotateMasterKey(const std::filesystem::path& auth_db_path,
                     const std::filesystem::path& key_file_path,
                     const std::filesystem::path& mounts_db_path = {},
-                    const std::filesystem::path& device_ca_dir = {});
+                    const std::filesystem::path& device_ca_dir = {},
+                    const std::filesystem::path& state_dir = {},
+                    const std::string& key_store = "file");
 
 namespace detail {
 
