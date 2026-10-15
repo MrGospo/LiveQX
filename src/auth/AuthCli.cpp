@@ -32,6 +32,7 @@
 #include "auth/JwtIssuer.h"
 #include "auth/MasterKey.h"
 #include "mounts/MountsDb.h"
+#include "utils/DeviceCa.h"
 
 #include "utils/Log.h"
 
@@ -160,7 +161,8 @@ bool reencryptAll(const std::vector<RotationEntry>& entries,
 
 int rotateMasterKey(const std::filesystem::path& auth_db_path,
                     const std::filesystem::path& key_file_path,
-                    const std::filesystem::path& mounts_db_path) {
+                    const std::filesystem::path& mounts_db_path,
+                    const std::filesystem::path& device_ca_dir) {
     namespace fs = std::filesystem;
 
     // (1) Загружаем старый ключ. Если файла нет — отказ: ротация
@@ -338,14 +340,31 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
     // файл — на старый. Параллельный server в этом окне сломается на
     // decrypt'е. Поэтому rotation — out-of-band procedure при stop'нутом
     // сервере (как printBootstrap / resetAdmin).
+    // Ключ CA центра устройств перепечатывается первым: resealAll сначала
+    // расшифровывает всё старым ключом и при отказе ничего не меняет, а БД
+    // к этому моменту ещё не тронута.
     std::vector<std::string> rotated;
     std::string rotate_err;
-    if (!detail::reencryptAll(entries, new_key, rotate_err, &rotated)) {
-        std::cerr << "ERROR: " << rotate_err << "\n";
+    const bool has_device_ca = !device_ca_dir.empty() && fs::exists(device_ca_dir);
+    if (has_device_ca &&
+        !liveqx::tls::DeviceCa::resealAll(device_ca_dir, old_key, new_key, rotate_err)) {
+        std::cerr << "ERROR: " << rotate_err << " — refusing to rotate\n";
         std::error_code ec;
         fs::remove(tmp_path, ec);
         return 1;
     }
+    if (!detail::reencryptAll(entries, new_key, rotate_err, &rotated)) {
+        std::cerr << "ERROR: " << rotate_err << "\n";
+        if (has_device_ca) {
+            std::string back_err;
+            if (!liveqx::tls::DeviceCa::resealAll(device_ca_dir, new_key, old_key, back_err))
+                std::cerr << "ERROR: device CA could not be put back: " << back_err << "\n";
+        }
+        std::error_code ec;
+        fs::remove(tmp_path, ec);
+        return 1;
+    }
+    if (has_device_ca) rotated.push_back("device_ca");
 
     // (7) Backup'им старый ключ и перемещаем `.new` на место. Если этот
     // блок упадёт между rename'ом backup'а и rename'ом `.new`, то file

@@ -26,6 +26,7 @@
 #include "auth/MasterKey.h"
 #include "auth/PasswordHasher.h"
 #include "mounts/MountsDb.h"
+#include "utils/DeviceCa.h"
 
 namespace sa = liveqx::auth;
 
@@ -401,12 +402,13 @@ struct RotationRun {
 
 RotationRun runRotation(const std::filesystem::path& db,
                         const std::filesystem::path& key,
-                        const std::filesystem::path& mounts = {}) {
+                        const std::filesystem::path& mounts = {},
+                        const std::filesystem::path& device_ca = {}) {
     std::stringstream out, err;
     auto* old_out = std::cout.rdbuf(out.rdbuf());
     auto* old_err = std::cerr.rdbuf(err.rdbuf());
     RotationRun r;
-    r.rc = sa::rotateMasterKey(db, key, mounts);
+    r.rc = sa::rotateMasterKey(db, key, mounts, device_ca);
     std::cout.rdbuf(old_out);
     std::cerr.rdbuf(old_err);
     r.out = out.str();
@@ -543,6 +545,61 @@ TEST_F(RotateMasterKeyTest, MissingMountsDbIsSkippedAndNotCreated) {
     const auto run = runRotation(db_path(), key_path(), mounts_path);
     ASSERT_EQ(run.rc, 0) << run.err;
     EXPECT_FALSE(std::filesystem::exists(mounts_path));
+}
+
+TEST_F(RotateMasterKeyTest, ResealsDeviceCaKeyUnderTheNewMasterKey) {
+    const auto ca_dir = dir_ / "device_ca";
+    std::string cert_pem;
+    {
+        sa::MasterKey mk(key_path().string());
+        ASSERT_TRUE(mk.load());
+        std::string err;
+        auto ca = liveqx::tls::DeviceCa::open(ca_dir, mk, err);
+        ASSERT_TRUE(ca) << err;
+        cert_pem = ca->certPem();
+    }
+    const auto run = runRotation(db_path(), key_path(), {}, ca_dir);
+    ASSERT_EQ(run.rc, 0) << run.err;
+    EXPECT_NE(run.out.find("device_ca"), std::string::npos);
+
+    sa::MasterKey fresh(key_path().string());
+    ASSERT_TRUE(fresh.load());
+    std::string err;
+    auto ca = liveqx::tls::DeviceCa::open(ca_dir, fresh, err);
+    ASSERT_TRUE(ca) << "device CA must open under the rotated key: " << err;
+    EXPECT_EQ(ca->certPem(), cert_pem) << "the CA itself must not change";
+}
+
+TEST_F(RotateMasterKeyTest, RefusesIfDeviceCaKeyUndecryptableAndChangesNothing) {
+    const auto ca_dir = dir_ / "device_ca";
+    {
+        sa::MasterKey mk(key_path().string());
+        ASSERT_TRUE(mk.load());
+        std::string err;
+        ASSERT_TRUE(liveqx::tls::DeviceCa::open(ca_dir, mk, err)) << err;
+    }
+    {
+        std::ofstream f(ca_dir / "gen-1" / "ca.key.enc",
+                        std::ios::binary | std::ios::trunc);
+        f << std::string(80, 'x');
+    }
+    const auto key_before = readFileBytes(key_path());
+
+    const auto run = runRotation(db_path(), key_path(), {}, ca_dir);
+    EXPECT_EQ(run.rc, 1);
+    EXPECT_NE(run.err.find("device CA"), std::string::npos) << run.err;
+    EXPECT_EQ(readFileBytes(key_path()), key_before);
+}
+
+TEST_F(RotateMasterKeyTest, MissingDeviceCaDirIsSkippedAndNotCreated) {
+    {
+        sa::MasterKey mk(key_path().string());
+        ASSERT_TRUE(mk.load());
+    }
+    const auto ca_dir = dir_ / "no-device-ca";
+    const auto run = runRotation(db_path(), key_path(), {}, ca_dir);
+    ASSERT_EQ(run.rc, 0) << run.err;
+    EXPECT_FALSE(std::filesystem::exists(ca_dir));
 }
 
 TEST_F(RotateMasterKeyTest, RefusesIfLdapBlobUndecryptableAndChangesNothing) {

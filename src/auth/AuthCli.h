@@ -55,9 +55,12 @@ int resetAdmin(const std::filesystem::path& auth_db_path,
 
 // `mounts_db_path` — mounts.db с CIFS-паролями; пусто или файла нет —
 // монтирования пропускаются (БД при этом не создаётся).
+// `device_ca_dir` — каталог центра устройств (ключ CA запечатан мастер-ключом);
+// пусто или каталога нет — пропускается (каталог не создаётся).
 int rotateMasterKey(const std::filesystem::path& auth_db_path,
                     const std::filesystem::path& key_file_path,
-                    const std::filesystem::path& mounts_db_path = {});
+                    const std::filesystem::path& mounts_db_path = {},
+                    const std::filesystem::path& device_ca_dir = {});
 
 namespace detail {
 

@@ -312,6 +312,22 @@ ResetReport resetMasterKey(const liveqx::paths::Paths& paths,
         }
     }
 
+    // (4c) The device CA key is sealed with the old master key and can no
+    // longer be read. Move the directory aside (never delete: the operator
+    // may want to inspect it); the next start creates a fresh CA and players
+    // pair again.
+    if (fs::exists(paths.deviceCaDir(), ec)) {
+        const fs::path aside = paths.stateDir() /
+            ("device_ca.unusable." + std::to_string(unixSec()));
+        fs::rename(paths.deviceCaDir(), aside, ec);
+        if (ec) {
+            report.result = ResetResult::WipeFailed;
+            report.error  = "cannot move device CA aside: " + ec.message();
+            return report;
+        }
+        report.wiped.push_back("device_ca (moved aside)");
+    }
+
     // (5) Generate the new key and write it atomically.
     std::array<std::uint8_t, MasterKey::kKeyBytes> fresh{};
     randombytes_buf(fresh.data(), fresh.size());

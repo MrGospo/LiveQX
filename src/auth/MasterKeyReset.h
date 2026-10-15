@@ -22,6 +22,8 @@
 //        ldap_config.bind_password_encrypted
 //        smtp_config.password_encrypted
 //        mounts.cifs_password_encrypted (only if mounts.db exists)
+//      and move the device CA directory aside (its key is sealed with the
+//      old master key), if one exists.
 //      and DELETE FROM jwt_secret (so the next start regenerates it).
 //      Argon2id password hashes are not encrypted and stay intact —
 //      operators do NOT lose user accounts.

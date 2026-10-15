@@ -30,6 +30,7 @@
 #include "auth/MasterKey.h"
 #include "auth/MasterKeyReset.h"
 #include "mounts/MountsDb.h"
+#include "utils/DeviceCa.h"
 #include "utils/Paths.h"
 
 namespace fs = std::filesystem;
@@ -293,6 +294,43 @@ TEST_F(MasterKeyResetTest, ResetWipesMountCifsPasswords) {
     ASSERT_EQ(rows.size(), 1u);
     EXPECT_FALSE(rows[0].hasPassword());
     EXPECT_EQ(rows[0].cifs_username, "alice");   // only the secret is wiped
+}
+
+TEST_F(MasterKeyResetTest, ResetMovesDeviceCaAsideInsteadOfLeavingItUnreadable) {
+    const auto paths = makePaths();
+    writeKey(paths.masterKey(), 0x77);
+    {
+        sa::MasterKey mk(paths.masterKey().string());
+        ASSERT_TRUE(mk.load());
+        std::string err;
+        ASSERT_TRUE(liveqx::tls::DeviceCa::open(paths.deviceCaDir(), mk, err)) << err;
+    }
+    const auto report = sa::resetMasterKey(paths, /*confirmed=*/true);
+    ASSERT_EQ(report.result, sa::ResetResult::Success) << report.error;
+
+    // The old CA is not deleted (operator can inspect it) but is no longer
+    // at the live path, so the next start issues a fresh CA.
+    EXPECT_FALSE(fs::exists(paths.deviceCaDir()));
+    bool found_aside = false;
+    for (const auto& e : fs::directory_iterator(paths.stateDir())) {
+        const auto n = e.path().filename().string();
+        if (n.rfind("device_ca.unusable.", 0) == 0) found_aside = true;
+    }
+    EXPECT_TRUE(found_aside);
+    EXPECT_NE(std::find(report.wiped.begin(), report.wiped.end(),
+                        "device_ca (moved aside)"),
+              report.wiped.end());
+}
+
+TEST_F(MasterKeyResetTest, ResetWithoutDeviceCaTouchesNothing) {
+    const auto paths = makePaths();
+    writeKey(paths.masterKey(), 0x77);
+    const auto report = sa::resetMasterKey(paths, /*confirmed=*/true);
+    ASSERT_EQ(report.result, sa::ResetResult::Success) << report.error;
+    EXPECT_FALSE(fs::exists(paths.deviceCaDir()));
+    EXPECT_EQ(std::find(report.wiped.begin(), report.wiped.end(),
+                        "device_ca (moved aside)"),
+              report.wiped.end());
 }
 
 TEST_F(MasterKeyResetTest, ResetDoesNotCreateMountsDbWhenAbsent) {
