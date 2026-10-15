@@ -61,6 +61,7 @@
 #include "utils/Tls.h"
 #include "utils/TlsConfig.h"
 #include "api/TlsBootstrap.h"
+#include "auth/KeyProtectCli.h"
 #include "auth/MasterKeyBoot.h"
 
 #include <sodium.h>
@@ -173,6 +174,11 @@ int main(int argc, char* argv[]) {
     // hand. Without the second flag we print a warning and exit 1 — the
     // gate is intentional, see MasterKeyReset.h for the semantics.
     bool                do_reset_master_key  = false;
+    // Passphrase protection of the master key (auth/KeyProtectCli.h).
+    bool                do_protect_master_key   = false;
+    bool                do_unprotect_master_key = false;
+    bool                do_change_master_pass   = false;
+    bool                passphrase_from_stdin   = false;
     bool                confirm_reset        = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -206,6 +212,14 @@ int main(int argc, char* argv[]) {
             do_rotate_master_key = true;
         } else if (arg == "--reset-master-key") {
             do_reset_master_key = true;
+        } else if (arg == "--protect-master-key") {
+            do_protect_master_key = true;
+        } else if (arg == "--unprotect-master-key") {
+            do_unprotect_master_key = true;
+        } else if (arg == "--change-master-passphrase") {
+            do_change_master_pass = true;
+        } else if (arg == "--passphrase-stdin") {
+            passphrase_from_stdin = true;
         } else if (arg == "--confirm-reset") {
             confirm_reset = true;
         } else if (arg[0] != '-') {
@@ -226,7 +240,8 @@ int main(int argc, char* argv[]) {
     };
 
     if (do_print_bootstrap || do_reset_admin || do_rotate_master_key
-        || do_reset_master_key) {
+        || do_reset_master_key || do_protect_master_key
+        || do_unprotect_master_key || do_change_master_pass) {
         const json recovery_cfg = try_load_config(config_path);
         const auto recovery_paths = scp::Paths::resolve(path_args, recovery_cfg);
         const auto db_path  = recovery_paths.authDb();
@@ -235,6 +250,22 @@ int main(int argc, char* argv[]) {
             return liveqx::auth::printBootstrap(db_path);
         if (do_reset_admin)
             return liveqx::auth::resetAdmin(db_path, reset_admin_user);
+        if (do_protect_master_key || do_unprotect_master_key || do_change_master_pass) {
+            // Passphrase from the terminal (echo off) or, for scripts,
+            // one line per prompt from stdin. Never from argv.
+            const auto source = passphrase_from_stdin
+                ? liveqx::auth::makeStreamPassphraseSource(std::cin)
+                : liveqx::auth::makeTerminalPassphraseSource();
+            const auto& store = recovery_paths.masterKeyStore();
+            if (do_protect_master_key)
+                return liveqx::auth::protectMasterKey(
+                    key_path, recovery_paths.stateDir(), store, source);
+            if (do_unprotect_master_key)
+                return liveqx::auth::unprotectMasterKey(
+                    key_path, recovery_paths.stateDir(), store, source);
+            return liveqx::auth::changeMasterPassphrase(
+                key_path, recovery_paths.stateDir(), store, source);
+        }
         if (do_rotate_master_key)
             return liveqx::auth::rotateMasterKey(db_path, key_path,
                                                  recovery_paths.mountsDb(),
