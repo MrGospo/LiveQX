@@ -70,6 +70,7 @@ add_executable(liveqx-tests
     test_master_key.cpp
     test_key_wrap.cpp
     test_sealed_server.cpp
+    test_master_key_boot.cpp
     test_master_key_reset.cpp
     test_ldap_client.cpp
     test_smtp_client.cpp
@@ -168,6 +169,7 @@ add_executable(liveqx-tests
     ../src/auth/MasterKey.cpp
     ../src/auth/KeyWrap.cpp
     ../src/auth/SealedServer.cpp
+    ../src/auth/MasterKeyBoot.cpp
     ../src/auth/MasterKeyReset.cpp
     ../src/auth/LdapClient.cpp
     ../src/auth/LdapConfigRepo.cpp

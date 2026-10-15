@@ -177,13 +177,20 @@ bool SealedServer::start(std::string& err) {
         server_ = std::make_unique<httplib::Server>();
     }
     server_->set_payload_max_length(kMaxBodyBytes);
-    // httplib's default also sets SO_REUSEPORT, which lets a second process
-    // listen on the same port. Here a taken port must be an error, not a
-    // silently shared socket; SO_REUSEADDR alone still allows a quick restart.
+    // The real control API (httplib defaults) binds this same port right after
+    // we release it, and httplib's defaults set SO_REUSEPORT. Sockets left in
+    // TIME_WAIT by this server must therefore carry SO_REUSEPORT too, or the
+    // real server could not bind for about a minute. SO_REUSEADDR is added for
+    // a quick restart. A listener of some other program (without SO_REUSEPORT)
+    // still makes bind fail, which is what we want.
     server_->set_socket_options([](socket_t sock) {
         int yes = 1;
         ::setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
                      reinterpret_cast<const char*>(&yes), sizeof(yes));
+#ifdef SO_REUSEPORT
+        ::setsockopt(sock, SOL_SOCKET, SO_REUSEPORT,
+                     reinterpret_cast<const char*>(&yes), sizeof(yes));
+#endif
     });
     installHandlers();
 

@@ -61,6 +61,7 @@
 #include "utils/Tls.h"
 #include "utils/TlsConfig.h"
 #include "api/TlsBootstrap.h"
+#include "auth/MasterKeyBoot.h"
 
 #include <sodium.h>
 
@@ -362,6 +363,20 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT,  on_signal);
     std::signal(SIGTERM, on_signal);
 
+    // Master key. Everything below that touches a secret (auth, LDAP/SMTP,
+    // CIFS passwords, the audit chain, the device CA) needs it, so a
+    // passphrase-wrapped key stops the start here, serving only the unlock
+    // page on the API port, until the passphrase is entered. Channels are
+    // not loaded yet: while sealed, nothing plays.
+    liveqx::sysd::SystemdNotifier boot_notifier;
+    liveqx::auth::MasterKey master_key(paths.masterKey().string());
+    switch (liveqx::auth::bootMasterKey(
+        master_key, paths, cfg, [] { return !g_running.load(); }, &boot_notifier)) {
+        case liveqx::auth::BootResult::Ready:   break;
+        case liveqx::auth::BootResult::Aborted: return 0;
+        case liveqx::auth::BootResult::Failed:  return 1;
+    }
+
     Watchdog       watchdog;
     // fix35: channel root resolved through Paths (CLI > ENV > config >
     // default = state_dir/channels). The `channel_root_dir` config key
@@ -548,49 +563,11 @@ int main(int argc, char* argv[]) {
         // /readyz в зелёный.
         namespace sa = liveqx::auth;
         const std::string auth_db_path    = paths.authDb().string();
-        const std::string master_key_path = paths.masterKey().string();
 
         sa::AuthDb auth_db(auth_db_path);
         if (!auth_db.open()) {
             LOG_ERROR("Cannot open auth.db at {}", auth_db_path);
             return 1;
-        }
-        const std::string key_store = paths.masterKeyStore();
-        if (key_store != "file" && key_store != "creds" && key_store != "env") {
-            LOG_ERROR("master_key_store \"{}\" is not one of file, creds, env",
-                      key_store);
-            return 1;
-        }
-        sa::MasterKey master_key(master_key_path);
-        master_key.setStateDir(paths.stateDir().string());
-        // Keys delivered from outside must never be silently replaced by a
-        // freshly generated file: existing data would become unreadable.
-        master_key.setAutoGenerate(key_store == "file");
-        if (!master_key.load()) {
-            if (master_key.sealed()) {
-                LOG_ERROR("The master key at {} is passphrase-protected, and "
-                          "this build cannot ask for the passphrase at start "
-                          "yet", master_key_path);
-            } else {
-                LOG_ERROR("Cannot load master key from {}", master_key_path);
-            }
-            return 1;
-        }
-        {
-            const auto prot = master_key.getInfo().protection;
-            if ((key_store == "creds" && prot != "systemd_credential") ||
-                (key_store == "env" && prot != "env")) {
-                LOG_ERROR("master_key_store is \"{}\" but the key was loaded "
-                          "as \"{}\"; check the service unit", key_store, prot);
-                return 1;
-            }
-        }
-        if (master_key.getInfo().protection == "file_in_state") {
-            LOG_WARN("Master key is stored inside the state directory ({}): "
-                     "any copy of the state (backup, VM snapshot, disk image) "
-                     "carries the key together with the data it protects. "
-                     "Keep the key outside the state directory or deliver it "
-                     "through systemd-creds.", master_key_path);
         }
 
         // JWT signing secret: либо берём расшифрованный из БД, либо

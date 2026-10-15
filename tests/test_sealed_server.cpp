@@ -21,6 +21,9 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -322,18 +325,38 @@ TEST_F(SealedServerTest, WorksOverHttps) {
 }
 
 TEST_F(SealedServerTest, StartFailsWhenThePortIsTaken) {
-    httplib::Server blocker;
-    const int port = blocker.bind_to_any_port("127.0.0.1");
-    ASSERT_GT(port, 0);
-    std::thread t([&] { blocker.listen_after_bind(); });
-    blocker.wait_until_ready();
+    // Another program listening on the port (plain socket, no SO_REUSEPORT).
+    const int blocker = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    ASSERT_EQ(::bind(blocker, reinterpret_cast<sockaddr*>(&addr), sizeof addr), 0);
+    ASSERT_EQ(::listen(blocker, 1), 0);
+    socklen_t alen = sizeof addr;
+    ::getsockname(blocker, reinterpret_cast<sockaddr*>(&addr), &alen);
 
     auto o = plainOptions();
-    o.port = port;
+    o.port = ntohs(addr.sin_port);
     sa::SealedServer s(*key_, o);
     std::string err;
     EXPECT_FALSE(s.start(err));
     EXPECT_FALSE(err.empty());
-    blocker.stop();
-    t.join();
+    ::close(blocker);
+}
+
+TEST_F(SealedServerTest, PortIsReusableByTheRealServerRightAfterStop) {
+    sa::SealedServer s(*key_, plainOptions());
+    std::string err;
+    ASSERT_TRUE(s.start(err)) << err;
+    const int port = s.port();
+    {
+        httplib::Client c("127.0.0.1", port);
+        ASSERT_TRUE(c.Get("/api/seal/status"));
+    }
+    s.stop();
+
+    httplib::Server real;   // httplib defaults, as the control API uses
+    EXPECT_TRUE(real.bind_to_port("127.0.0.1", port))
+        << "connections left in TIME_WAIT must not block the next server";
 }
