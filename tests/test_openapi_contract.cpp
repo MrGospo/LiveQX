@@ -115,7 +115,10 @@ struct ContractFixture {
             /*gateways=*/nullptr,
             svc.get(),
             ldap_repo.get(),
-            smtp_repo.get());
+            smtp_repo.get(),
+            /*rbac=*/nullptr, /*events=*/nullptr, /*preview=*/nullptr,
+            /*stress=*/nullptr, /*plugins=*/nullptr,
+            mk.get());
         api->start();
         waitListening(port);
     }
@@ -362,4 +365,37 @@ TEST(OpenApiContract, SmtpConfigEmptyMatchesYaml) {
     // Асимметрия с LdapConfig: НЕТ поля `configured`.
     EXPECT_FALSE(body.contains("configured"))
         << "SmtpConfig must not have 'configured' (asymmetry vs LdapConfig)";
+}
+
+// ─── /api/auth/master-key/info → MasterKeyInfo ──────────────────────────────
+TEST(OpenApiContract, MasterKeyInfoMatchesYaml) {
+    ContractFixture f(nextPort());
+    auto r = f.client().Get("/api/auth/master-key/info");
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    auto body = json::parse(r->body);
+
+    // MasterKeyInfo: required=[fingerprint, algorithm, source, protection,
+    // created_at, last_rotated_at], additionalProperties:false
+    expectAllRequired(body,
+        {"fingerprint","algorithm","source","protection","created_at","last_rotated_at"},
+        "MasterKeyInfo");
+    EXPECT_EQ(body.size(), 6u) << body.dump();
+    EXPECT_EQ(body["fingerprint"].get<std::string>().size(), 16u);
+    EXPECT_EQ(body["algorithm"], "xsalsa20poly1305");
+    EXPECT_EQ(body["source"], "file");
+    // The state directory is unknown here, so the key counts as sitting next
+    // to the data (the conservative answer that raises the warning).
+    EXPECT_EQ(body["protection"], "file_in_state");
+    EXPECT_TRUE(body["created_at"].is_number_integer() || body["created_at"].is_null());
+    EXPECT_TRUE(body["last_rotated_at"].is_null());
+}
+
+TEST(OpenApiContract, MasterKeyInfoReportsAKeyOutsideTheStateDirectory) {
+    ContractFixture f(nextPort());
+    f.mk->setStateDir((std::filesystem::temp_directory_path() / "some-other-state-dir").string());
+    auto r = f.client().Get("/api/auth/master-key/info");
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    EXPECT_EQ(json::parse(r->body)["protection"], "external_file");
 }
