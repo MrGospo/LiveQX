@@ -59,35 +59,24 @@ NoNewPrivileges=true
 # shared would be overkill: liveqx does not call mount(2).
 MountFlags=slave
 
-# ── Master-key delivery via systemd-creds (production recommendation) ──────
-# By default the daemon auto-generates /var/lib/liveqx/master.key
-# (mode 0600) on first start. That works, but the key ends up on the same
-# disk as auth.db — anyone who steals a backup or VM snapshot gets both.
-#
-# Better: keep the key encrypted at rest with a TPM2-bound systemd-creds
-# blob, and let systemd hand the plaintext to the service via a tmpfs.
-# Setup once on the target host:
-#
-#     # 1. Generate a 32-byte random key in base64.
-#     KEY=$(openssl rand -base64 32)
-#
-#     # 2. Encrypt it under this host's TPM (or machine-id if no TPM).
-#     #    The output file can sit in /etc — without the TPM it is opaque.
-#     sudo mkdir -p /etc/credstore.encrypted
-#     echo -n "$KEY" | sudo systemd-creds encrypt --name=streaming_master_key \
-#         - /etc/credstore.encrypted/streaming_master_key
-#     unset KEY
-#
-# Then uncomment the two lines below. systemd will decrypt the credential
-# into $CREDENTIALS_DIRECTORY (tmpfs, 0400, only this service can read it)
-# and the daemon will pick it up via LIVEQX_MASTER_KEY_FILE.
-#
-# LoadCredentialEncrypted=streaming_master_key:/etc/credstore.encrypted/streaming_master_key
-# Environment=LIVEQX_MASTER_KEY_FILE=%d/streaming_master_key
-#
-# Migration from auto-generated key: see docs/AUTH.md §10 — you must
-# re-encrypt the existing master.key contents into the credstore (or
-# accept a hard reset of LDAP/SMTP/JWT secrets via auth-cli reset).
+# ── Master key ─────────────────────────────────────────────────────────────
+# Where the key lives is chosen by the installer (see `install.sh --help`):
+#   file        /etc/liveqx/master.key, root:liveqx 0640, config
+#               "master_key_path". Kept OUT of the state directory, so a backup
+#               or snapshot of the data does not carry the key. Default.
+#   creds       systemd credential (TPM2 when the host has one). The installer
+#               adds a drop-in, /etc/systemd/system/liveqx.service.d/master-key.conf,
+#               with LoadCredentialEncrypted= and LIVEQX_MASTER_KEY_FILE=%d/...
+#   passphrase  the key file is wrapped with a passphrase. The service starts
+#               "sealed" (READY is sent, only the unlock page is served) and
+#               waits for the passphrase on the API port.
+# Moving an existing key to `creds` or to /etc needs NO re-encryption: the same
+# 32 bytes are simply stored elsewhere (`install.sh migrate-master-key`).
+
+# The key lives in process memory: never write it into a core dump.
+LimitCORE=0
+# Hide other users' processes from /proc inside the service.
+ProtectProc=invisible
 
 # Logging — journald will absorb stdout/stderr. Status set via sd_notify
 # (STATUS=…) is visible in `systemctl status liveqx`.

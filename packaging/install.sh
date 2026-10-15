@@ -6,8 +6,10 @@
 #   install    — install (default)
 #   uninstall  — remove EVERYTHING (binaries, units, DB, configs, user)
 #   check      — check current installation state
+#   migrate-master-key — move an existing master key out of the state directory
 #
-# Usage: sudo ./packaging/install.sh [install|uninstall|check] [-y]
+# Usage: sudo ./packaging/install.sh [install|uninstall|check|migrate-master-key] [-y]
+#        [--master-key-store=file|creds|passphrase]
 #
 set -euo pipefail
 IFS=$'\n\t'
@@ -28,6 +30,14 @@ DOC_DIR="/usr/share/doc/liveqx"
 SYSTEMD_DIR="/etc/systemd/system"
 MOUNT_ROOT="/mnt/liveqx"
 RUNTIME_DIR="/run/liveqx"
+
+# Master key (see packaging/liveqx.service for the three storage modes).
+KEY_FILE="${CONF_DIR}/master.key"
+CRED_NAME="liveqx_master_key"
+CRED_DIR="/etc/credstore.encrypted"
+CRED_FILE="${CRED_DIR}/${CRED_NAME}"
+DROPIN_DIR="${SYSTEMD_DIR}/liveqx.service.d"
+DROPIN_FILE="${DROPIN_DIR}/master-key.conf"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -50,16 +60,26 @@ usage() {
 LiveQX Engine — installer
 
 Usage:
-    sudo $0 [install|uninstall|check] [options]
+    sudo $0 [install|uninstall|check|migrate-master-key] [options]
 
 Commands:
     install     Install LiveQX (default)
     uninstall   Fully remove LiveQX (DB, configs, liveqx user)
     check       Check installation state
+    migrate-master-key
+                Move the master key of an existing installation out of the
+                state directory into $KEY_FILE (same key, no re-encryption)
 
 Options:
     -y, --yes       Assume yes for all prompts
     -h, --help      Show this help
+    --master-key-store=file|creds|passphrase
+                    Where a NEW installation keeps the master key (default: file)
+                      file        $KEY_FILE (root:liveqx 0640), outside the state directory
+                      creds       systemd credential, TPM2-bound when the host has a TPM
+                                  (needs systemd 250 or newer)
+                      passphrase  key wrapped with a passphrase; the service starts
+                                  sealed and waits for the passphrase on the web page
 
 Before running install, make sure the following are built:
     build/liveqx               — main binary
@@ -78,16 +98,57 @@ EOF
 # ── Argument parsing ────────────────────────────────────────────────────────
 MODE="install"
 ASSUME_YES=0
+KEY_STORE="file"
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        install|uninstall|check) MODE="$1"; shift ;;
+        install|uninstall|check|migrate-master-key) MODE="$1"; shift ;;
+        --master-key-store=*) KEY_STORE="${1#*=}"; shift ;;
         -y|--yes)  ASSUME_YES=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown argument: $1 (see --help)" ;;
     esac
 done
 
+case "$KEY_STORE" in
+    file|creds|passphrase) ;;
+    *) die "--master-key-store must be file, creds or passphrase (got: $KEY_STORE)" ;;
+esac
+
 # ── Utilities ───────────────────────────────────────────────────────────────
+# Sets string keys in the JSON config:  cfg_set key=value [key=value ...]
+cfg_set() {
+    python3 - "$CONF_FILE" "$@" <<'PY'
+import json, sys
+p = sys.argv[1]
+with open(p) as f: cfg = json.load(f)
+for kv in sys.argv[2:]:
+    k, v = kv.split('=', 1)
+    cfg[k] = v
+with open(p, 'w') as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    f.write('\n')
+PY
+}
+
+# Removes keys from the JSON config:  cfg_unset key [key ...]
+cfg_unset() {
+    python3 - "$CONF_FILE" "$@" <<'PY'
+import json, sys
+p = sys.argv[1]
+with open(p) as f: cfg = json.load(f)
+for k in sys.argv[2:]:
+    cfg.pop(k, None)
+with open(p, 'w') as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    f.write('\n')
+PY
+}
+
+# Reads a config value (empty if absent):  cfg_get key
+cfg_get() {
+    python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ''))" "$CONF_FILE" "$1" 2>/dev/null || true
+}
+
 ask_yn() {
     local q="$1" def="${2:-n}" prompt ans
     if [[ "$ASSUME_YES" == "1" ]]; then
@@ -120,6 +181,76 @@ is_wsl() { grep -qiE "microsoft|wsl" /proc/version 2>/dev/null; }
 
 require_root() {
     [[ $EUID -eq 0 ]] || die "Run via sudo: sudo $0 $MODE"
+}
+
+# ════════════════════════════════════════════════════════════════════════════
+# MASTER KEY
+# ════════════════════════════════════════════════════════════════════════════
+# Creates the master key for a NEW installation in the chosen store. An
+# existing installation keeps whatever it has (changing it is
+# `migrate-master-key`, never a side effect of a reinstall).
+provision_master_key() {
+    step "Master key ($KEY_STORE)"
+
+    if [[ "$CONFIG_CREATED" != "1" ]]; then
+        if [[ -f "$STATE_DIR/state/master.key" && -z "$(cfg_get master_key_path)" ]]; then
+            warn "The master key sits in the state directory, next to the data it protects:"
+            warn "  $STATE_DIR/state/master.key"
+            warn "Any backup or snapshot of $STATE_DIR carries the key. Move it out with:"
+            warn "  sudo $0 migrate-master-key"
+        else
+            ok "Existing installation: master key setup left as it is"
+        fi
+        return 0
+    fi
+
+    case "$KEY_STORE" in
+        file|passphrase)
+            if [[ -e "$KEY_FILE" ]]; then
+                ok "Using the existing $KEY_FILE"
+            else
+                ( umask 077; head -c 32 /dev/urandom > "$KEY_FILE" )
+                chown root:"$LIVEQX_GROUP" "$KEY_FILE"
+                chmod 0640 "$KEY_FILE"
+                ok "Created $KEY_FILE (root:$LIVEQX_GROUP 0640, outside the state directory)"
+            fi
+            cfg_set "master_key_path=$KEY_FILE" "master_key_store=file"
+            if [[ "$KEY_STORE" == "passphrase" ]]; then
+                [[ -t 0 ]] || die "--master-key-store=passphrase needs a terminal to ask for the passphrase"
+                info "Choose a passphrase for the master key (at least 12 characters)."
+                info "The service will start sealed and ask for it on the web page after every restart."
+                "$BIN_DIR/liveqx" --config "$CONF_FILE" --protect-master-key \
+                    || die "Could not protect the master key with a passphrase"
+            fi
+            ;;
+        creds)
+            command -v systemd-creds >/dev/null 2>&1 \
+                || die "systemd-creds not found (needs systemd 250 or newer)"
+            local with_key="host"
+            if systemd-creds has-tpm2 >/dev/null 2>&1; then
+                with_key="host+tpm2"
+                info "TPM2 found: the credential will be bound to it"
+            else
+                warn "No TPM2: the credential is bound to this host's key stored under /var/lib/systemd."
+                warn "That protects a copied /etc and a copied state directory, NOT a copy of the whole disk."
+            fi
+            install -d -m 0700 "$CRED_DIR"
+            head -c 32 /dev/urandom \
+                | systemd-creds encrypt --with-key="$with_key" --name="$CRED_NAME" - "$CRED_FILE" \
+                || die "systemd-creds encrypt failed"
+            chmod 0600 "$CRED_FILE"
+            install -d -m 0755 "$DROPIN_DIR"
+            cat > "$DROPIN_FILE" <<UNIT
+[Service]
+LoadCredentialEncrypted=${CRED_NAME}:${CRED_FILE}
+Environment=LIVEQX_MASTER_KEY_FILE=%d/${CRED_NAME}
+UNIT
+            cfg_set "master_key_store=creds"
+            ok "Master key stored as a systemd credential: $CRED_FILE"
+            warn "The key exists nowhere else. To be able to restore on another host, keep an offline copy:"
+            warn "  sudo systemd-creds decrypt $CRED_FILE - | base64    # store the output safely"
+            ;;
+    esac
 }
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -266,7 +397,9 @@ EOF
 
     # ── Config ──
     step "Configuration"
+    CONFIG_CREATED=0
     if [[ ! -f "$CONF_FILE" ]]; then
+        CONFIG_CREATED=1
         install -m 0644 "$REPO_ROOT/config/default.json" "$CONF_FILE"
         API_PORT="$API_PORT" python3 - "$CONF_FILE" <<'PY'
 import json, os, sys
@@ -290,6 +423,9 @@ PY
     for d in SYSTEMD.md MOUNTS.md AUTH.md; do
         [[ -f "$REPO_ROOT/docs/$d" ]] && install -m 0644 "$REPO_ROOT/docs/$d" "$DOC_DIR/" || true
     done
+
+    # ── Master key ──
+    provision_master_key
 
     # ── Systemd units ──
     step "Systemd units"
@@ -323,6 +459,13 @@ PY
         err "liveqx.service failed to start"
         echo "    Log:  sudo journalctl -u liveqx -n 80 --no-pager"
         exit 1
+    fi
+
+    # A passphrase-protected key makes the service start sealed: it is alive
+    # but serves only the unlock page until the passphrase is entered.
+    local sealed=0
+    if [[ "$KEY_STORE" == "passphrase" && "$CONFIG_CREATED" == "1" ]]; then
+        sealed=1
     fi
 
     # The API defaults to HTTPS (auto), but TLS may be disabled — try both
@@ -359,6 +502,15 @@ PY
     echo "  Data:          $STATE_DIR"
     echo "  Shares:        $MOUNT_ROOT/<id>/"
 
+    if [[ "$sealed" == "1" ]]; then
+        echo
+        echo "${C_BLD}── The service is sealed ──${C_RST}"
+        echo "  The master key is protected by your passphrase. Open the address above and"
+        echo "  enter it; LiveQX starts after that and the administrator password appears"
+        echo "  in $STATE_DIR/state/initial_admin_password.txt."
+        echo "  This repeats after every restart of the service."
+    fi
+
     # ── Bootstrap password for the first admin ──
     # The file (0600, owner=liveqx) is created by the service on first start
     # and auto-removed on the first password change.
@@ -388,8 +540,12 @@ PY
     echo
     echo "${C_BLD}── Next steps ──${C_RST}"
     echo "  1. Open the Web UI and finish the initial setup"
-    echo "  2. For production, configure a TPM2 credstore for master.key"
-    echo "     (see comments in /etc/systemd/system/liveqx.service)"
+    echo "  2. Back up the master key SEPARATELY from the data (a copy of the data"
+    echo "     without the key is unreadable, and a key next to the data protects nothing):"
+    case "$KEY_STORE" in
+        file|passphrase) echo "       $KEY_FILE" ;;
+        creds)           echo "       sudo systemd-creds decrypt $CRED_FILE - | base64" ;;
+    esac
     echo "  3. CIFS shares are added via UI → Settings → Shares"
     echo
 }
@@ -404,7 +560,8 @@ cmd_uninstall() {
     warn "EVERYTHING except apt packages will be removed:"
     echo "    • Services: liveqx, liveqx-mountd, liveqx-mount-init"
     echo "    • Binary:   $BIN_DIR/liveqx, $BIN_DIR/liveqx-mountd"
-    echo "    • Config:   $CONF_DIR/  (including config.json)"
+    echo "    • Config:   $CONF_DIR/  (including config.json and master.key)"
+    echo "    • Key:      $CRED_FILE and the unit drop-in, if the key is a systemd credential"
     echo "    • Data:     $STATE_DIR/ (DB, master.key, channel state)"
     echo "    • UI:       $UI_DIR/"
     echo "    • Docs:     $DOC_DIR/"
@@ -458,6 +615,10 @@ cmd_uninstall() {
 
     step "Removing data, configs, UI"
     rm -rf "$STATE_DIR" "$CONF_DIR" "$UI_DIR" "$DOC_DIR" "$RUNTIME_DIR"
+    # Master key delivered as a systemd credential, and its unit drop-in.
+    rm -f  "$CRED_FILE"
+    rm -rf "$DROPIN_DIR"
+    systemctl daemon-reload
 
     # /mnt/liveqx directory — empty after umount, remove it
     if [[ -d "$MOUNT_ROOT" ]]; then
@@ -539,9 +700,68 @@ cmd_check() {
     echo
 }
 
+# ════════════════════════════════════════════════════════════════════════════
+# MIGRATE MASTER KEY
+# ════════════════════════════════════════════════════════════════════════════
+# Moves the key of an existing installation out of the state directory. The
+# SAME 32 bytes are stored in the new place, so nothing in the databases is
+# re-encrypted. The old file is removed only after the service has started
+# with the new location.
+cmd_migrate_master_key() {
+    [[ -f "$CONF_FILE" ]] || die "No $CONF_FILE — nothing to migrate"
+    [[ -z "$(cfg_get master_key_path)" ]] || die "master_key_path is already set in $CONF_FILE — already migrated?"
+    [[ "$(cfg_get master_key_store)" != "creds" ]] || die "The key is a systemd credential already"
+
+    local state_dir old
+    state_dir=$(cfg_get state_dir)
+    state_dir="${state_dir:-$STATE_DIR/state}"
+    old="$state_dir/master.key"
+    [[ -f "$old" ]] || die "No $old — the key is not a file in the state directory (nothing to migrate)"
+    [[ "$(head -c 7 "$old")" != "LQXKEY1" ]] || info "The key is passphrase-protected; it is moved as it is"
+
+    if [[ -e "$KEY_FILE" ]]; then
+        cmp -s "$old" "$KEY_FILE" || die "$KEY_FILE already exists and differs from $old — resolve by hand"
+    fi
+
+    step "Moving the master key to $KEY_FILE"
+    systemctl stop liveqx.service 2>/dev/null || true
+    if [[ ! -e "$KEY_FILE" ]]; then
+        ( umask 077; cp --no-preserve=all "$old" "$KEY_FILE" )
+        chown root:"$LIVEQX_GROUP" "$KEY_FILE"
+        chmod 0640 "$KEY_FILE"
+    fi
+    cmp -s "$old" "$KEY_FILE" || die "Copy of the key does not match the original; nothing was changed"
+    cfg_set "master_key_path=$KEY_FILE"
+    ok "Config now points at $KEY_FILE"
+
+    systemctl start liveqx.service || true
+    local up=0
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        sleep 1
+        if systemctl is-active --quiet liveqx; then up=1; break; fi
+    done
+    if [[ "$up" != "1" ]]; then
+        err "liveqx did not start with the key in the new place — rolling back"
+        cfg_unset master_key_path
+        systemctl restart liveqx.service || true
+        die "Rolled back; the key is still in $old. Look at: sudo journalctl -u liveqx -n 80 --no-pager"
+    fi
+    ok "liveqx.service is active with the key in $KEY_FILE"
+
+    shred -u "$old" 2>/dev/null || rm -f "$old"
+    ok "Removed $old"
+
+    echo
+    warn "Older backups and snapshots of $state_dir still contain the OLD copy of the key."
+    warn "To make them useless, rotate the key now (stop the service first):"
+    warn "  sudo systemctl stop liveqx && sudo liveqx --config $CONF_FILE --rotate-master-key && sudo systemctl start liveqx"
+    warn "Then back up $KEY_FILE separately from the data."
+}
+
 # ── Dispatcher ──────────────────────────────────────────────────────────────
 require_root
 case "$MODE" in
+    migrate-master-key) cmd_migrate_master_key ;;
     install)   cmd_install ;;
     uninstall) cmd_uninstall ;;
     check)     cmd_check ;;
