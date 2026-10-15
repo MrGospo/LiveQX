@@ -3,9 +3,12 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "auth/KeyWrap.h"
 
 namespace liveqx::auth {
 
@@ -60,12 +63,18 @@ int resetAdmin(const std::filesystem::path& auth_db_path,
 // `state_dir` — если задан, ротация отказывает при запущенной службе.
 // `key_store` — master_key_store из конфига; не "file" → отказ (ключ доставляется
 // снаружи и здесь не перезаписывается).
+// `passphrase` — источник парольной фразы для ключа, обёрнутого фразой
+// (LQXKEY1): нужен, чтобы открыть старый ключ; новый ключ данных оборачивается
+// той же фразой с параметрами `kdf`. Без источника такой ключ не ротируется.
 int rotateMasterKey(const std::filesystem::path& auth_db_path,
                     const std::filesystem::path& key_file_path,
                     const std::filesystem::path& mounts_db_path = {},
                     const std::filesystem::path& device_ca_dir = {},
                     const std::filesystem::path& state_dir = {},
-                    const std::string& key_store = "file");
+                    const std::string& key_store = "file",
+                    const std::function<std::optional<std::string>(std::string_view)>&
+                        passphrase = nullptr,
+                    const keywrap::KdfParams& kdf = keywrap::KdfParams::moderate());
 
 namespace detail {
 

@@ -23,6 +23,7 @@
 #include "auth/AuthDb.h"
 #include "auth/AuthService.h"
 #include "auth/JwtIssuer.h"
+#include "auth/KeyWrap.h"
 #include "auth/MasterKey.h"
 #include "auth/PasswordHasher.h"
 #include "mounts/MountsDb.h"
@@ -406,12 +407,15 @@ RotationRun runRotation(const std::filesystem::path& db,
                         const std::filesystem::path& mounts = {},
                         const std::filesystem::path& device_ca = {},
                         const std::filesystem::path& state_dir = {},
-                        const std::string& key_store = "file") {
+                        const std::string& key_store = "file",
+                        const std::function<std::optional<std::string>(std::string_view)>&
+                            passphrase = nullptr) {
     std::stringstream out, err;
     auto* old_out = std::cout.rdbuf(out.rdbuf());
     auto* old_err = std::cerr.rdbuf(err.rdbuf());
     RotationRun r;
-    r.rc = sa::rotateMasterKey(db, key, mounts, device_ca, state_dir, key_store);
+    r.rc = sa::rotateMasterKey(db, key, mounts, device_ca, state_dir, key_store,
+                               passphrase, sa::keywrap::KdfParams::minimal());
     std::cout.rdbuf(old_out);
     std::cerr.rdbuf(old_err);
     r.out = out.str();
@@ -648,6 +652,98 @@ TEST_F(RotateMasterKeyTest, RefusesKeyStoreItCannotRewrite) {
     EXPECT_EQ(run.rc, 1);
     EXPECT_NE(run.err.find("master_key_store"), std::string::npos) << run.err;
     EXPECT_EQ(readFileBytes(key_path()), key_before);
+}
+
+// ── passphrase-wrapped key ────────────────────────────────────────────────
+
+namespace {
+std::function<std::optional<std::string>(std::string_view)> fixedPass(std::string p) {
+    return [p](std::string_view) -> std::optional<std::string> { return p; };
+}
+}  // namespace
+
+TEST_F(RotateMasterKeyTest, RotatesAPassphraseWrappedKeyUnderTheSamePassphrase) {
+    constexpr const char* kPass = "a long enough passphrase";
+    std::vector<std::uint8_t> jwt_blob;
+    {
+        sa::MasterKey mk(key_path().string());
+        ASSERT_TRUE(mk.load());
+        jwt_blob = mk.encrypt("jwt-secret-value-32-bytes-long!!!!");
+        sa::AuthDb db(db_path());
+        ASSERT_TRUE(db.open());
+        ASSERT_TRUE(db.storeJwtSecret(jwt_blob, 1));
+    }
+    // Wrap the key file in place.
+    {
+        sa::keywrap::Key k{};
+        std::ifstream in(key_path(), std::ios::binary);
+        in.read(reinterpret_cast<char*>(k.data()), k.size());
+        in.close();
+        std::ofstream out(key_path(), std::ios::binary | std::ios::trunc);
+        out << sa::keywrap::wrap(k, kPass, sa::keywrap::KdfParams::minimal());
+    }
+    std::string old_fp;
+    {
+        sa::MasterKey mk(key_path().string());
+        std::string e;
+        ASSERT_FALSE(mk.load());
+        ASSERT_TRUE(mk.unlock(kPass, e));
+        old_fp = mk.fingerprint();
+    }
+
+    const auto run = runRotation(db_path(), key_path(), {}, {}, {}, "file", fixedPass(kPass));
+    ASSERT_EQ(run.rc, 0) << run.err;
+
+    sa::MasterKey fresh(key_path().string());
+    std::string e;
+    ASSERT_FALSE(fresh.load()) << "the rotated key must stay wrapped";
+    ASSERT_TRUE(fresh.sealed());
+    ASSERT_TRUE(fresh.unlock(kPass, e)) << "same passphrase must open it: " << e;
+    EXPECT_NE(fresh.fingerprint(), old_fp) << "the data key itself must change";
+
+    sa::AuthDb db(db_path());
+    ASSERT_TRUE(db.open());
+    const auto blob = db.readJwtSecret();
+    ASSERT_TRUE(blob.has_value());
+    EXPECT_EQ(fresh.decrypt(*blob).value_or(""), "jwt-secret-value-32-bytes-long!!!!");
+}
+
+TEST_F(RotateMasterKeyTest, WrappedKeyWithoutAPassphraseSourceIsRefusedAndUntouched) {
+    {
+        sa::MasterKey mk(key_path().string());
+        ASSERT_TRUE(mk.load());
+        sa::keywrap::Key k{};
+        std::ifstream in(key_path(), std::ios::binary);
+        in.read(reinterpret_cast<char*>(k.data()), k.size());
+        in.close();
+        std::ofstream out(key_path(), std::ios::binary | std::ios::trunc);
+        out << sa::keywrap::wrap(k, "a long enough passphrase",
+                                 sa::keywrap::KdfParams::minimal());
+    }
+    const auto before = readFileBytes(key_path());
+    const auto run = runRotation(db_path(), key_path());
+    EXPECT_EQ(run.rc, 1);
+    EXPECT_NE(run.err.find("passphrase"), std::string::npos) << run.err;
+    EXPECT_EQ(readFileBytes(key_path()), before);
+}
+
+TEST_F(RotateMasterKeyTest, WrappedKeyWithTheWrongPassphraseIsRefusedAndUntouched) {
+    {
+        sa::MasterKey mk(key_path().string());
+        ASSERT_TRUE(mk.load());
+        sa::keywrap::Key k{};
+        std::ifstream in(key_path(), std::ios::binary);
+        in.read(reinterpret_cast<char*>(k.data()), k.size());
+        in.close();
+        std::ofstream out(key_path(), std::ios::binary | std::ios::trunc);
+        out << sa::keywrap::wrap(k, "a long enough passphrase",
+                                 sa::keywrap::KdfParams::minimal());
+    }
+    const auto before = readFileBytes(key_path());
+    const auto run = runRotation(db_path(), key_path(), {}, {}, {}, "file",
+                                 fixedPass("not the passphrase at all"));
+    EXPECT_EQ(run.rc, 1);
+    EXPECT_EQ(readFileBytes(key_path()), before);
 }
 
 TEST_F(RotateMasterKeyTest, ResealsDeviceCaKeyUnderTheNewMasterKey) {

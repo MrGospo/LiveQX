@@ -250,12 +250,12 @@ int main(int argc, char* argv[]) {
             return liveqx::auth::printBootstrap(db_path);
         if (do_reset_admin)
             return liveqx::auth::resetAdmin(db_path, reset_admin_user);
+        // Passphrase from the terminal (echo off) or, for scripts, one line
+        // per prompt from stdin. Never from argv.
+        const auto source = passphrase_from_stdin
+            ? liveqx::auth::makeStreamPassphraseSource(std::cin)
+            : liveqx::auth::makeTerminalPassphraseSource();
         if (do_protect_master_key || do_unprotect_master_key || do_change_master_pass) {
-            // Passphrase from the terminal (echo off) or, for scripts,
-            // one line per prompt from stdin. Never from argv.
-            const auto source = passphrase_from_stdin
-                ? liveqx::auth::makeStreamPassphraseSource(std::cin)
-                : liveqx::auth::makeTerminalPassphraseSource();
             const auto& store = recovery_paths.masterKeyStore();
             if (do_protect_master_key)
                 return liveqx::auth::protectMasterKey(
@@ -271,7 +271,8 @@ int main(int argc, char* argv[]) {
                                                  recovery_paths.mountsDb(),
                                                  recovery_paths.deviceCaDir(),
                                                  recovery_paths.stateDir(),
-                                                 recovery_paths.masterKeyStore());
+                                                 recovery_paths.masterKeyStore(),
+                                                 source);
         if (do_reset_master_key) {
             // fix35 A3.13 — destructive master-key reset. The CLI is
             // responsible for printing the warning when the operator

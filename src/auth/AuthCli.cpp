@@ -165,7 +165,9 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
                     const std::filesystem::path& mounts_db_path,
                     const std::filesystem::path& device_ca_dir,
                     const std::filesystem::path& state_dir,
-                    const std::string& key_store) {
+                    const std::string& key_store,
+                    const std::function<std::optional<std::string>(std::string_view)>& passphrase,
+                    const keywrap::KdfParams& kdf) {
     namespace fs = std::filesystem;
 
     if (key_store != "file") {
@@ -203,13 +205,32 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
         return 1;
     }
     MasterKey old_key(key_file_path.string());
-    if (!old_key.load() || !old_key.loaded()) {
-        if (old_key.sealed()) {
+    // A passphrase-wrapped key is opened with the operator's passphrase; the
+    // new key is wrapped under the same one (the passphrase is not changed here).
+    std::string pass;
+    const bool wrapped = !old_key.load() && old_key.sealed();
+    if (wrapped) {
+        if (!passphrase) {
             std::cerr << "ERROR: the master key at " << key_file_path
-                      << " is passphrase-protected; rotating such a key is "
-                         "not supported yet\n";
+                      << " is passphrase-protected; run the rotation from a "
+                         "terminal or with --passphrase-stdin\n";
             return 1;
         }
+        auto p = passphrase("Current passphrase");
+        if (!p) {
+            std::cerr << "ERROR: the master key is passphrase-protected and no "
+                         "passphrase was supplied\n";
+            return 1;
+        }
+        pass = std::move(*p);
+        std::string unlock_err;
+        if (!old_key.unlock(pass, unlock_err)) {
+            std::cerr << "ERROR: " << unlock_err << "\n";
+            sodium_memzero(pass.data(), pass.size());
+            return 1;
+        }
+    }
+    if (!old_key.loaded()) {
         std::cerr << "ERROR: cannot load current master key from "
                   << key_file_path << "\n";
         return 1;
@@ -358,16 +379,35 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
     std::array<std::uint8_t, MasterKey::kKeyBytes> fresh{};
     randombytes_buf(fresh.data(), fresh.size());
 
+    // What goes into the file: the bare key, or — for a passphrase-protected
+    // key — the new key wrapped under the same passphrase.
+    std::string file_bytes(reinterpret_cast<const char*>(fresh.data()), fresh.size());
+    if (wrapped) {
+        keywrap::Key k{};
+        std::memcpy(k.data(), fresh.data(), k.size());
+        file_bytes = keywrap::wrap(k, pass, kdf);
+        sodium_memzero(k.data(), k.size());
+        if (file_bytes.empty()) {
+            std::cerr << "ERROR: cannot wrap the new master key\n";
+            sodium_memzero(fresh.data(), fresh.size());
+            sodium_memzero(pass.data(), pass.size());
+            return 1;
+        }
+    }
+
     int fd = ::open(tmp_path.c_str(),
                     O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) {
         std::cerr << "ERROR: cannot create " << tmp_path
                   << ": " << std::strerror(errno) << "\n";
         sodium_memzero(fresh.data(), fresh.size());
+        sodium_memzero(pass.data(), pass.size());
         return 1;
     }
-    const auto written = ::write(fd, fresh.data(), fresh.size());
-    if (written != static_cast<ssize_t>(MasterKey::kKeyBytes)) {
+    const auto written = ::write(fd, file_bytes.data(), file_bytes.size());
+    sodium_memzero(file_bytes.data(), file_bytes.size());
+    if (written <= 0 ||
+        (!wrapped && written != static_cast<ssize_t>(MasterKey::kKeyBytes))) {
         std::cerr << "ERROR: short write to " << tmp_path << "\n";
         ::close(fd);
         std::error_code ec;
@@ -387,7 +427,16 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
     // даёт нам тот же encrypt/decrypt-pipeline и проверяет, что файл
     // читается корректно (страховка от silent corruption).
     MasterKey new_key(tmp_path.string());
-    if (!new_key.load() || !new_key.loaded()) {
+    bool new_key_ok = false;
+    if (wrapped) {
+        std::string unlock_err;
+        new_key.load();   // false by design: the file is wrapped
+        new_key_ok = new_key.sealed() && new_key.unlock(pass, unlock_err);
+    } else {
+        new_key_ok = new_key.load() && new_key.loaded();
+    }
+    sodium_memzero(pass.data(), pass.size());
+    if (!new_key_ok) {
         std::cerr << "ERROR: cannot reload freshly-written master key at "
                   << tmp_path << "\n";
         std::error_code ec;
