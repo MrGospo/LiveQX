@@ -359,6 +359,7 @@ set(SOURCES
     src/auth/JwtIssuer.cpp
     src/auth/AuthService.cpp
     src/auth/MasterKey.cpp
+    src/auth/KeyWrap.cpp
     src/auth/MasterKeyReset.cpp
     src/auth/RbacMiddleware.cpp
     src/auth/AuthCli.cpp

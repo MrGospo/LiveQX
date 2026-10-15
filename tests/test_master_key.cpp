@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "auth/KeyWrap.h"
 #include "auth/MasterKey.h"
 
 namespace fs = std::filesystem;
@@ -384,6 +385,101 @@ TEST_F(MasterKeyTest, GetInfoEnvSourceHasNullCreatedAt) {
     EXPECT_FALSE(info.created_at.has_value());
     EXPECT_FALSE(info.last_rotated_at.has_value());
     EXPECT_EQ(info.fingerprint.size(), 16u);
+}
+
+// ─── passphrase-wrapped key file (LQXKEY1) ─────────────────────────────────
+
+namespace {
+
+// Wraps the bare key of an existing MasterKey in place; returns the file path.
+void wrapKeyFileInPlace(const fs::path& path, std::string_view passphrase) {
+    std::ifstream in(path, std::ios::binary);
+    sa::keywrap::Key k{};
+    in.read(reinterpret_cast<char*>(k.data()), k.size());
+    ASSERT_EQ(in.gcount(), static_cast<std::streamsize>(k.size()));
+    in.close();
+    const auto file = sa::keywrap::wrap(k, passphrase, sa::keywrap::KdfParams::minimal());
+    ASSERT_FALSE(file.empty());
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << file;
+}
+
+std::string slurp(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+}
+
+}  // namespace
+
+TEST_F(MasterKeyTest, WrappedFileLoadsAsSealedAndIsLeftUntouched) {
+    { sa::MasterKey mk(keyPath().string()); ASSERT_TRUE(mk.load()); }
+    wrapKeyFileInPlace(keyPath(), "unlock-me-please");
+    const auto before = slurp(keyPath());
+
+    sa::MasterKey mk(keyPath().string());
+    EXPECT_FALSE(mk.load()) << "a sealed key must not look like a loaded one";
+    EXPECT_TRUE(mk.sealed());
+    EXPECT_FALSE(mk.loaded());
+    EXPECT_EQ(slurp(keyPath()), before) << "load() must never overwrite a wrapped file";
+}
+
+TEST_F(MasterKeyTest, UnlockWithCorrectPassphraseGivesTheOriginalKey) {
+    std::vector<std::uint8_t> blob;
+    std::string fp;
+    {
+        sa::MasterKey mk(keyPath().string());
+        ASSERT_TRUE(mk.load());
+        blob = mk.encrypt("secret-from-before-wrapping");
+        fp = mk.fingerprint();
+    }
+    wrapKeyFileInPlace(keyPath(), "unlock-me-please");
+
+    sa::MasterKey mk(keyPath().string());
+    ASSERT_FALSE(mk.load());
+    std::string err;
+    ASSERT_TRUE(mk.unlock("unlock-me-please", err)) << err;
+    EXPECT_TRUE(mk.loaded());
+    EXPECT_FALSE(mk.sealed());
+    EXPECT_EQ(mk.fingerprint(), fp);
+    const auto plain = mk.decrypt(blob);
+    ASSERT_TRUE(plain.has_value()) << "data encrypted before wrapping must stay readable";
+    EXPECT_EQ(*plain, "secret-from-before-wrapping");
+}
+
+TEST_F(MasterKeyTest, UnlockWithWrongPassphraseStaysSealed) {
+    { sa::MasterKey mk(keyPath().string()); ASSERT_TRUE(mk.load()); }
+    wrapKeyFileInPlace(keyPath(), "unlock-me-please");
+
+    sa::MasterKey mk(keyPath().string());
+    ASSERT_FALSE(mk.load());
+    std::string err;
+    EXPECT_FALSE(mk.unlock("not-the-passphrase", err));
+    EXPECT_FALSE(err.empty());
+    EXPECT_TRUE(mk.sealed());
+    EXPECT_FALSE(mk.loaded());
+    EXPECT_TRUE(mk.encrypt("x").empty());
+}
+
+TEST_F(MasterKeyTest, UnlockOnABareKeyIsRefused) {
+    sa::MasterKey mk(keyPath().string());
+    ASSERT_TRUE(mk.load());
+    std::string err;
+    EXPECT_FALSE(mk.unlock("anything", err));
+    EXPECT_NE(err.find("not passphrase"), std::string::npos) << err;
+    EXPECT_TRUE(mk.loaded());
+}
+
+TEST_F(MasterKeyTest, ProtectionIsPassphraseForAWrappedKey) {
+    { sa::MasterKey mk(keyPath().string()); ASSERT_TRUE(mk.load()); }
+    wrapKeyFileInPlace(keyPath(), "unlock-me-please");
+
+    sa::MasterKey mk(keyPath().string());
+    ASSERT_FALSE(mk.load());
+    EXPECT_EQ(mk.getInfo().protection, "passphrase") << "also while sealed";
+    std::string err;
+    ASSERT_TRUE(mk.unlock("unlock-me-please", err)) << err;
+    EXPECT_EQ(mk.getInfo().protection, "passphrase");
+    EXPECT_EQ(mk.getInfo().source, "file");
 }
 
 // ─── auto-generation can be switched off ───────────────────────────────────

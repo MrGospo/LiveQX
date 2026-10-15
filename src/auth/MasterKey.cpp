@@ -34,6 +34,8 @@
 
 #include "auth/MasterKey.h"
 
+#include "auth/KeyWrap.h"
+
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
@@ -213,6 +215,33 @@ bool MasterKey::load() {
     {
         mode_t mode = 0;
         if (statFileMode(key_file_path_, mode)) {
+            // A passphrase-wrapped file (LQXKEY1) is not a key yet: remember
+            // it and let the caller unlock() it. Never fall through to
+            // auto-generation, which would replace it.
+            {
+                std::ifstream peek(key_file_path_, std::ios::binary);
+                std::string head(keywrap::kMagic.size(), '\0');
+                peek.read(head.data(), static_cast<std::streamsize>(head.size()));
+                head.resize(static_cast<std::size_t>(peek.gcount()));
+                if (keywrap::isWrapped(head)) {
+                    std::ifstream whole(key_file_path_, std::ios::binary);
+                    constexpr std::size_t kMaxWrapped = 16 * 1024;
+                    std::string content(kMaxWrapped + 1, '\0');
+                    whole.read(content.data(), static_cast<std::streamsize>(content.size()));
+                    content.resize(static_cast<std::size_t>(whole.gcount()));
+                    if (content.size() > kMaxWrapped) {
+                        LOG_ERROR("MasterKey: wrapped key file {} is larger than {} "
+                                  "bytes — refusing", key_file_path_, kMaxWrapped);
+                        return false;
+                    }
+                    wrapped_ = true;
+                    wrapped_file_ = std::move(content);
+                    source_ = Source::File;
+                    LOG_INFO("MasterKey: {} is passphrase-protected; waiting for "
+                             "the passphrase", key_file_path_);
+                    return false;
+                }
+            }
             // Жалуемся при слишком открытых правах, но не блокируем
             // запуск — на dev-машинах оператор иногда правит вручную.
             const auto perm_bits = mode & 0777;
@@ -389,7 +418,9 @@ MasterKey::Info MasterKey::getInfo() const {
         info.fingerprint = keyFingerprint(key_);
     }
 
-    switch (source_) {
+    if (wrapped_) {
+        info.protection = "passphrase";
+    } else switch (source_) {
         case Source::Env:
             info.protection = "env";
             break;
@@ -425,6 +456,32 @@ MasterKey::Info MasterKey::getInfo() const {
 
     info.last_rotated_at = latestBackupMtime(key_file_path_);
     return info;
+}
+
+bool MasterKey::unlock(std::string_view passphrase, std::string& err) {
+    err.clear();
+    if (!wrapped_) { err = "the master key is not passphrase protected"; return false; }
+    if (loaded_)   { err = "the master key is already unlocked"; return false; }
+    keywrap::Key k{};
+    const auto st = keywrap::unwrap(wrapped_file_, passphrase, k);
+    switch (st) {
+        case keywrap::UnwrapStatus::Ok:
+            break;
+        case keywrap::UnwrapStatus::WrongPassphrase:
+            err = "wrong passphrase (or the key file is damaged)";
+            return false;
+        case keywrap::UnwrapStatus::BadParams:
+            err = "the key file has unacceptable key-derivation parameters";
+            return false;
+        default:
+            err = "the key file is malformed";
+            return false;
+    }
+    std::memcpy(key_.data(), k.data(), kKeyBytes);
+    sodium_memzero(k.data(), k.size());
+    loaded_ = true;
+    LOG_INFO("MasterKey: unlocked from {}", key_file_path_);
+    return true;
 }
 
 std::array<std::uint8_t, 32> MasterKey::hmacSha256(std::string_view msg) const {

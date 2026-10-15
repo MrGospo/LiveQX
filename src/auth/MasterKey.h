@@ -94,11 +94,23 @@ public:
 
     bool loaded() const noexcept { return loaded_; }
 
+    // The key file is passphrase-wrapped (LQXKEY1, see auth/KeyWrap.h) and
+    // has not been opened yet. load() returns false in that case; the caller
+    // decides whether to wait for unlock() or to refuse to start.
+    bool sealed() const noexcept { return wrapped_ && !loaded_; }
+
+    // Opens a wrapped key file. Fails (with `err`) if the key is not
+    // wrapped, is already open, or the passphrase is wrong. K itself is
+    // unchanged by wrapping, so data encrypted earlier stays readable.
+    bool unlock(std::string_view passphrase, std::string& err);
+
 private:
     std::string key_file_path_;
     std::string state_dir_;
     std::string env_file_path_;  // set when source_ == EnvFile
     bool auto_generate_{true};
+    bool wrapped_{false};         // key file is an LQXKEY1 file
+    std::string wrapped_file_;    // its contents, kept for unlock()
     std::array<std::uint8_t, kKeyBytes> key_{};
     bool loaded_{false};
     Source source_{Source::Unknown};

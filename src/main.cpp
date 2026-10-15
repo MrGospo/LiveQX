@@ -566,7 +566,13 @@ int main(int argc, char* argv[]) {
         // freshly generated file: existing data would become unreadable.
         master_key.setAutoGenerate(key_store == "file");
         if (!master_key.load()) {
-            LOG_ERROR("Cannot load master key from {}", master_key_path);
+            if (master_key.sealed()) {
+                LOG_ERROR("The master key at {} is passphrase-protected, and "
+                          "this build cannot ask for the passphrase at start "
+                          "yet", master_key_path);
+            } else {
+                LOG_ERROR("Cannot load master key from {}", master_key_path);
+            }
             return 1;
         }
         {

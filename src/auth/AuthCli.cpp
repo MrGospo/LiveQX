@@ -204,6 +204,12 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
     }
     MasterKey old_key(key_file_path.string());
     if (!old_key.load() || !old_key.loaded()) {
+        if (old_key.sealed()) {
+            std::cerr << "ERROR: the master key at " << key_file_path
+                      << " is passphrase-protected; rotating such a key is "
+                         "not supported yet\n";
+            return 1;
+        }
         std::cerr << "ERROR: cannot load current master key from "
                   << key_file_path << "\n";
         return 1;
