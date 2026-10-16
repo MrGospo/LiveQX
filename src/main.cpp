@@ -1205,6 +1205,31 @@ int main(int argc, char* argv[]) {
                     dopt.key_path  = tls_bindings.key_path;
                     dopt.events    = &event_bus;
                     dopt.renew     = renew_service.get();
+                    // Refusals and renewals go into the same HMAC-chained trail
+                    // as the admin API; the UI is nudged to refetch over SSE.
+                    dopt.audit     = [&audit_logger, &event_bus](const liveqx::players::DeviceAuditEvent& e) {
+                        sad::AuditEvent ev;
+                        ev.category    = e.access_denial ? sad::Category::Access : sad::Category::Player;
+                        ev.action      = e.action;
+                        ev.actor_ip    = e.client_ip;
+                        ev.target_type = e.player_id.empty() ? "" : "player";
+                        ev.target_id   = e.player_id;
+                        ev.http_method = e.http_method;
+                        ev.http_path   = e.http_path;
+                        ev.http_status = e.http_status;
+                        ev.summary     = e.action + " -> " + std::to_string(e.http_status);
+                        json details = {{"reason", e.reason}, {"port", "device"}};
+                        if (e.suppressed > 0) details["suppressed"] = e.suppressed;
+                        ev.details_json = details.dump();
+                        const std::string cat = sad::categoryName(ev.category);
+                        audit_logger.log(std::move(ev));
+                        event_bus.publish(liveqx::events::EventType::AuditEvent, -1,
+                                          {{"category", cat}, {"action", e.action},
+                                           {"target_type", e.player_id.empty() ? "" : "player"},
+                                           {"target_id", e.player_id}, {"http_method", e.http_method},
+                                           {"http_path", e.http_path}, {"http_status", e.http_status},
+                                           {"request_id", ""}, {"actor_username", ""}});
+                    };
                     device_api = std::make_unique<liveqx::players::DeviceApi>(
                         players_db, cert_revocations, std::move(dopt));
                     if (!device_api->start()) {
@@ -1216,9 +1241,27 @@ int main(int argc, char* argv[]) {
             if (device_api) {
                 auto* api_ptr = device_api.get();
                 auto provider = device_ca_provider;
-                device_trust_thread = std::jthread([api_ptr, provider](std::stop_token st) {
+                const auto cert_file = tls_bindings.cert_path;
+                const auto key_file  = tls_bindings.key_path;
+                device_trust_thread = std::jthread([api_ptr, provider, cert_file, key_file](std::stop_token st) {
                     std::string loaded_for;
+                    // Re-issuing the server certificate (UI: regenerate / import)
+                    // changes these files; the device port follows by itself.
+                    auto stamp = [&] {
+                        std::error_code ec;
+                        const auto c = std::filesystem::last_write_time(cert_file, ec);
+                        const auto k = std::filesystem::last_write_time(key_file, ec);
+                        return std::make_pair(c.time_since_epoch().count(), k.time_since_epoch().count());
+                    };
+                    auto seen = stamp();
                     while (!st.stop_requested()) {
+                        if (const auto now_stamp = stamp(); now_stamp != seen) {
+                            // Give a writer that updates cert and key one after the other time to finish.
+                            std::this_thread::sleep_for(std::chrono::seconds(2));
+                            seen = stamp();
+                            if (!api_ptr->reloadServerCertificate())
+                                LOG_ERROR("Players: device port kept its old certificate");
+                        }
                         if (auto ca = provider()) {
                             const std::string pem = ca->certPem() + ca->chainPem() + ca->rootPem();
                             if (pem != loaded_for) {

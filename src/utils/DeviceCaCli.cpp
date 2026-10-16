@@ -166,8 +166,10 @@ int deviceCaImport(const fs::path& master_key_file, const fs::path& device_ca_di
         return fail(explain(err));
 
     std::cout << "device_ca_imported: true\n"
-              << "The new generation takes effect after you restart the LiveQX service; "
-                 "certificates already issued under earlier generations stay valid.\n";
+              << "A running server picks up the FIRST device CA by itself within seconds. "
+                 "A new generation replacing an existing one takes effect after you restart "
+                 "the LiveQX service; certificates already issued under earlier generations "
+                 "stay valid.\n";
     return 0;
 }
 

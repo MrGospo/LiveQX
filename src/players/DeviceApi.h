@@ -41,6 +41,20 @@ namespace httplib { class SSLServer; }
 
 namespace liveqx::players {
 
+// One entry for the audit trail. Successful heartbeats are NOT reported (they
+// are the normal state, kept in the status table); refusals and renewals are.
+struct DeviceAuditEvent {
+    std::string action;           // player.device_denied | player.renew | player.renew_denied | player.renew_failed
+    bool        access_denial{false};   // true -> category access, false -> player
+    std::string player_id;        // may be empty (no usable identity)
+    std::string client_ip;
+    std::string http_method;
+    std::string http_path;
+    int         http_status{0};
+    std::string reason;           // machine code or short note, never a secret
+    int         suppressed{0};    // identical events dropped since the last one reported
+};
+
 struct DeviceApiOptions {
     std::string           bind{"0.0.0.0"};
     int                   port{0};                 // 0 = any free port (tests)
@@ -51,6 +65,11 @@ struct DeviceApiOptions {
     events::EventBus*     events{nullptr};
     std::int64_t          min_heartbeat_interval_s{10};
     std::size_t           workers{16};
+    // Audit sink (null = no audit). Refusals are throttled per (action,
+    // identity, reason): a revoked screen retrying every minute is one row per
+    // window with a counter, not a flood.
+    std::function<void(const DeviceAuditEvent&)> audit;
+    std::int64_t          audit_throttle_s{600};
     // Certificate renewal; null = the route answers 503.
     RenewService*         renew{nullptr};
     std::int64_t          min_renew_interval_s{10};
@@ -74,6 +93,13 @@ public:
     // a restart, which is acceptable because revocation is decided separately.
     std::size_t addTrustAnchors(const std::string& pem);
 
+    // Picks up a re-issued server TLS certificate/key from disk. Implemented as
+    // a quick restart of the listener on the same port with the same trust
+    // anchors (changing a live SSL_CTX under concurrent handshakes is not
+    // safe); in-flight requests are dropped and devices retry. False if the
+    // new files are unusable — then the old listener is NOT torn down.
+    bool reloadServerCertificate();
+
     // "METHOD /path/{id}/..." for every route behind the gate.
     std::vector<std::string> routes() const;
     // How many times a route handler has run (tests: must stay 0 for
@@ -91,6 +117,14 @@ private:
     std::thread          thread_;
     int                  port_{0};
     std::atomic<std::size_t> handler_calls_{0};
+
+    void emitAudit(DeviceAuditEvent ev);
+    bool startListener();
+
+    std::mutex                                   audit_mu_;
+    struct Throttle { std::int64_t since{0}; int suppressed{0}; };
+    std::unordered_map<std::string, Throttle>    audit_throttle_;
+    std::string                                  trust_all_;       // every anchor ever added
 
     std::mutex                                   hb_mu_;
     std::unordered_map<std::string, std::int64_t> last_heartbeat_;

@@ -35,10 +35,17 @@
 
 #include <unistd.h>
 
+#include <openssl/ssl.h>
+
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <mutex>
+#include <thread>
 
 namespace fs  = std::filesystem;
 namespace tls = liveqx::tls;
@@ -113,6 +120,8 @@ protected:
     liveqx::events::EventBus bus_;
     Center center_, other_center_;
     std::unique_ptr<RenewService> renew_;
+    std::mutex audit_mu_;
+    std::vector<DeviceAuditEvent> audit_;
     std::unique_ptr<DeviceApi> api_;
     std::atomic<std::int64_t> now_{0};
 
@@ -145,6 +154,10 @@ protected:
 
         DeviceApiOptions o;
         o.renew      = renew_.get();
+        o.audit      = [this](const DeviceAuditEvent& e) {
+            std::lock_guard<std::mutex> lk(audit_mu_);
+            audit_.push_back(e);
+        };
         o.bind       = "127.0.0.1";
         o.port       = 0;
         o.cert_path  = srv / "server.crt";
@@ -205,6 +218,35 @@ protected:
         c->set_connection_timeout(3, 0);
         c->set_read_timeout(5, 0);
         return c;
+    }
+
+    std::vector<DeviceAuditEvent> auditSnapshot() {
+        std::lock_guard<std::mutex> lk(audit_mu_);
+        return audit_;
+    }
+
+    // Serial number of the certificate the port presents right now.
+    std::string serverSerial() {
+        SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+        BIO* bio = BIO_new_ssl_connect(ctx);
+        SSL* ssl = nullptr;
+        BIO_get_ssl(bio, &ssl);
+        BIO_set_conn_hostname(bio, ("127.0.0.1:" + std::to_string(api_->port())).c_str());
+        std::string out;
+        if (BIO_do_connect(bio) > 0) {
+            if (X509* c = SSL_get1_peer_certificate(ssl)) {
+                BIGNUM* bn = ASN1_INTEGER_to_BN(X509_get0_serialNumber(c), nullptr);
+                char* hex = BN_bn2hex(bn);
+                out = hex ? hex : "";
+                OPENSSL_free(hex);
+                BN_free(bn);
+                X509_free(c);
+            }
+        }
+        BIO_free_all(bio);
+        SSL_CTX_free(ctx);
+        return out;
     }
 
     static std::string path(const std::string& id, const char* tail) { return "/api/players/" + id + "/" + tail; }
@@ -545,5 +587,203 @@ TEST_F(DeviceApiTest, TheDeviceCaCanAppearWhileTheServerIsRunning) {
     auto after = clientWith(p);
     EXPECT_EQ(after->Patch(path(p.id, "heartbeat"), hb(), "application/json")->status, 204);
     EXPECT_EQ(api_->addTrustAnchors("not a pem"), 0u);
+}
+
+// ── audit of the device port ────────────────────────────────────────────────
+TEST_F(DeviceApiTest, ARefusalIsAuditedAsAnAccessEventWithItsReason) {
+    auto p = pair("Lobby");
+    ASSERT_TRUE(db_->revokePlayer(p.id, "stolen", now_));
+    auto cli = clientWith(p);
+    ASSERT_EQ(cli->Patch(path(p.id, "heartbeat"), hb(), "application/json")->status, 401);
+
+    auto a = auditSnapshot();
+    ASSERT_EQ(a.size(), 1u);
+    EXPECT_EQ(a[0].action, "player.device_denied");
+    EXPECT_TRUE(a[0].access_denial);
+    EXPECT_EQ(a[0].player_id, p.id);
+    EXPECT_EQ(a[0].reason, "cert_revoked");
+    EXPECT_EQ(a[0].http_status, 401);
+    EXPECT_EQ(a[0].client_ip, "127.0.0.1");
+}
+
+TEST_F(DeviceApiTest, ARefusalWithoutAnyIdentityIsAuditedByAddress) {
+    auto cli = anonymous();
+    ASSERT_EQ(cli->Patch(path("11111111-2222-4333-8444-555555555555", "heartbeat"), "{}", "application/json")->status, 401);
+    auto a = auditSnapshot();
+    ASSERT_EQ(a.size(), 1u);
+    EXPECT_EQ(a[0].reason, "cert_untrusted");
+    EXPECT_EQ(a[0].client_ip, "127.0.0.1");
+}
+
+TEST_F(DeviceApiTest, ARepeatedRefusalIsOneRowPerWindowWithACounter) {
+    auto p = pair("Lobby");
+    ASSERT_TRUE(db_->revokePlayer(p.id, "stolen", now_));
+    for (int i = 0; i < 5; ++i) {
+        auto cli = clientWith(p);
+        ASSERT_EQ(cli->Patch(path(p.id, "heartbeat"), hb(), "application/json")->status, 401);
+    }
+    EXPECT_EQ(auditSnapshot().size(), 1u) << "a revoked screen retrying must not flood the log";
+
+    now_ += 601;                                    // the window passes
+    auto cli = clientWith(p);
+    ASSERT_EQ(cli->Patch(path(p.id, "heartbeat"), hb(), "application/json")->status, 401);
+    auto a = auditSnapshot();
+    ASSERT_EQ(a.size(), 2u);
+    EXPECT_EQ(a[1].suppressed, 4) << "the next row says how many were folded in";
+}
+
+TEST_F(DeviceApiTest, DifferentReasonsAreNotFoldedTogether) {
+    auto a = pair("A");
+    auto b = pair("B");
+    ASSERT_TRUE(db_->revokePlayer(a.id, "x", now_));
+    auto ca = clientWith(a);
+    ASSERT_EQ(ca->Patch(path(a.id, "heartbeat"), hb(), "application/json")->status, 401);   // cert_revoked
+    auto cb = clientWith(b);
+    ASSERT_EQ(cb->Patch(path(a.id, "heartbeat"), hb(), "application/json")->status, 403);   // cn_mismatch
+    EXPECT_EQ(auditSnapshot().size(), 2u);
+}
+
+TEST_F(DeviceApiTest, NormalHeartbeatsAreNotAudited) {
+    auto p = pair("Lobby");
+    for (int i = 0; i < 3; ++i) {
+        now_ += 11;
+        auto cli = clientWith(p);
+        ASSERT_EQ(cli->Patch(path(p.id, "heartbeat"), hb(), "application/json")->status, 204);
+    }
+    EXPECT_TRUE(auditSnapshot().empty());
+}
+
+TEST_F(DeviceApiTest, ARenewalIsAuditedEveryTimeAndATooEarlyOneAsADenial) {
+    auto early = pair("Early");                                       // 365 days left
+    auto ce = clientWith(early);
+    ASSERT_EQ(ce->Post(path(early.id, "renew"), json{{"csr_pem", makeCsr(dir_ / "e.key")}}.dump(), "application/json")->status, 409);
+
+    auto ready = pair("Ready", *center_.ca, 0, 30);
+    auto cr = clientWith(ready);
+    ASSERT_EQ(cr->Post(path(ready.id, "renew"), json{{"csr_pem", makeCsr(dir_ / "r.key")}}.dump(), "application/json")->status, 200);
+
+    auto a = auditSnapshot();
+    ASSERT_EQ(a.size(), 2u);
+    EXPECT_EQ(a[0].action, "player.renew_denied");
+    EXPECT_TRUE(a[0].access_denial);
+    EXPECT_EQ(a[0].reason.find("not_after="), 0u);
+    EXPECT_EQ(a[1].action, "player.renew");
+    EXPECT_FALSE(a[1].access_denial);
+    EXPECT_EQ(a[1].player_id, ready.id);
+}
+
+// ── a re-issued server certificate ──────────────────────────────────────────
+TEST_F(DeviceApiTest, AReissuedServerCertificateIsPickedUpOnTheSamePortWithTheSameTrust) {
+    auto p = pair("Lobby");
+    const int port_before = api_->port();
+    const std::string before = serverSerial();
+    ASSERT_FALSE(before.empty());
+
+    // The administrator regenerates the server certificate (new serial, same files).
+    const fs::path srv = dir_ / "server_ca";
+    tls::SanList sans;
+    sans.dns_names = {"localhost"};
+    sans.ip_v4 = {"127.0.0.1"};
+    ASSERT_TRUE(tls::issueServerCert(srv, "localhost", sans).ok());
+
+    ASSERT_TRUE(api_->reloadServerCertificate());
+    EXPECT_EQ(api_->port(), port_before) << "players are configured with this port";
+    const std::string after = serverSerial();
+    EXPECT_FALSE(after.empty());
+    EXPECT_NE(after, before) << "the new certificate is the one presented";
+
+    auto cli = clientWith(p);
+    EXPECT_EQ(cli->Patch(path(p.id, "heartbeat"), hb(), "application/json")->status, 204)
+        << "client certificates are still trusted after the reload";
+}
+
+TEST_F(DeviceApiTest, ABrokenCertificatePairDoesNotTakeThePortDown) {
+    auto p = pair("Lobby");
+    const std::string before = serverSerial();
+    write(dir_ / "server_ca" / "server.key", "not a key");
+    EXPECT_FALSE(api_->reloadServerCertificate());
+    EXPECT_EQ(serverSerial(), before) << "the old certificate keeps being served";
+    auto cli = clientWith(p);
+    EXPECT_EQ(cli->Patch(path(p.id, "heartbeat"), hb(), "application/json")->status, 204);
+}
+
+// ── a thousand players ──────────────────────────────────────────────────────
+// B5: a fleet of 1000 screens sends one heartbeat a minute, so roughly 17 new
+// connections a second, each a full TLS handshake with a client certificate
+// (one request per connection). Here all 1000 arrive at once from 16 client
+// threads — a restart of the server is the worst moment in real life.
+TEST_F(DeviceApiTest, AThousandPlayersCanAllSendAHeartbeatAtOnce) {
+    constexpr int kPlayers = 1000;
+    constexpr int kClientThreads = 16;
+
+    const fs::path shared_key = dir_ / "load.key";
+    const std::string csr = makeCsr(shared_key);                   // one key pair; the certificates still differ
+    const std::string key_pem = slurp(shared_key);
+
+    struct Sim { std::string id; std::string cert_pem; };
+    std::vector<Sim> sims;
+    sims.reserve(kPlayers);
+    const auto t_setup = std::chrono::steady_clock::now();
+    for (int i = 0; i < kPlayers; ++i) {
+        auto c = db_->createPlayer("P" + std::to_string(i), std::nullopt, "strict", 7 * 86400, now_);
+        ASSERT_TRUE(c);
+        tls::IssuedClientCert cert;
+        std::string err;
+        ASSERT_TRUE(center_.ca->signClientCsr(csr, c->player.id, 365, cert, err)) << err;
+        auto claim = db_->claimToken(c->player.id, c->token, now_);
+        ASSERT_TRUE(claim.ok);
+        CertRow row;
+        row.serial_hex = cert.serial_hex; row.generation = cert.generation; row.player_id = c->player.id;
+        row.issued_at = now_; row.not_before = cert.not_before_unix; row.not_after = cert.not_after_unix;
+        ASSERT_TRUE(db_->finishEnrollment(claim.token_id, row, now_));
+        sims.push_back({c->player.id, cert.cert_pem});
+    }
+    const auto setup_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t_setup).count();
+
+    std::atomic<int> next{0}, ok{0}, failed{0};
+    std::vector<long> latencies_ms(kPlayers, -1);
+    const int port = api_->port();
+    const auto t0 = std::chrono::steady_clock::now();
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kClientThreads; ++t)
+        threads.emplace_back([&] {
+            for (int i; (i = next.fetch_add(1)) < kPlayers;) {
+                BIO* cb = BIO_new_mem_buf(sims[i].cert_pem.data(), static_cast<int>(sims[i].cert_pem.size()));
+                X509* cert = PEM_read_bio_X509(cb, nullptr, nullptr, nullptr);
+                BIO_free_all(cb);
+                BIO* kb = BIO_new_mem_buf(key_pem.data(), static_cast<int>(key_pem.size()));
+                EVP_PKEY* key = PEM_read_bio_PrivateKey(kb, nullptr, nullptr, nullptr);
+                BIO_free_all(kb);
+                httplib::SSLClient cli("127.0.0.1", port, cert, key);
+                X509_free(cert);
+                EVP_PKEY_free(key);
+                cli.enable_server_certificate_verification(false);
+                cli.set_connection_timeout(10, 0);
+                cli.set_read_timeout(20, 0);
+                const auto s = std::chrono::steady_clock::now();
+                auto r = cli.Patch("/api/players/" + sims[i].id + "/heartbeat", hb(), "application/json");
+                latencies_ms[i] = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - s).count();
+                (r && r->status == 204 ? ok : failed).fetch_add(1);
+            }
+        });
+    for (auto& t : threads) t.join();
+    const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+
+    std::sort(latencies_ms.begin(), latencies_ms.end());
+    std::cout << "[load] setup " << setup_ms << " ms; " << kPlayers << " heartbeats in " << total_ms
+              << " ms (" << (kPlayers * 1000.0 / std::max<long>(total_ms, 1)) << "/s); latency p50="
+              << latencies_ms[kPlayers / 2] << " ms p95=" << latencies_ms[kPlayers * 95 / 100]
+              << " ms max=" << latencies_ms.back() << " ms\n";
+
+    EXPECT_EQ(failed.load(), 0);
+    EXPECT_EQ(ok.load(), kPlayers);
+    EXPECT_EQ(db_->allStatuses().size(), static_cast<std::size_t>(kPlayers));
+    EXPECT_EQ(api_->handlerInvocations(), static_cast<std::size_t>(kPlayers));
+    // The fleet's real rate is ~17/s; here it is a burst, so the bar is generous
+    // but still proves the queue does not stall.
+    EXPECT_LT(total_ms, 60'000);
 }
 

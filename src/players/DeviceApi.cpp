@@ -123,6 +123,13 @@ std::vector<std::string> DeviceApi::routes() const {
 }
 
 bool DeviceApi::start() {
+    if (!startListener()) return false;
+    // A port chosen by the system stays the same across reloads.
+    opts_.port = port_;
+    return true;
+}
+
+bool DeviceApi::startListener() {
     server_ = std::make_unique<httplib::SSLServer>([this](SSL_CTX& ctx) {
         SSL_CTX_set_min_proto_version(&ctx, TLS1_2_VERSION);
         if (SSL_CTX_use_certificate_chain_file(&ctx, opts_.cert_path.c_str()) != 1 ||
@@ -150,7 +157,7 @@ bool DeviceApi::start() {
     }
 
     if (!opts_.trust_pem.empty()) addTrustAnchors(opts_.trust_pem);
-    else LOG_WARN("device api: no trust anchors yet — every client certificate is refused until the device CA is set up");
+    if (trust_all_.empty()) LOG_WARN("device api: no trust anchors yet — every client certificate is refused until the device CA is set up");
 
     server_->set_keep_alive_max_count(1);      // one request per connection (B5)
     server_->set_payload_max_length(kMaxBodyBytes);
@@ -162,8 +169,19 @@ bool DeviceApi::start() {
     // ── the gate ────────────────────────────────────────────────────────
     server_->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
         res.set_header("X-Server-Time", rfc3339(nowSeconds()));
+        std::string who = idInPath(req.path);       // best guess of the identity, refined below
         auto deny = [&](int status, const char* code) {
             reply(res, status, code);
+            DeviceAuditEvent ev;
+            ev.action        = "player.device_denied";
+            ev.access_denial = true;
+            ev.player_id     = who;
+            ev.client_ip     = req.remote_addr;
+            ev.http_method   = req.method;
+            ev.http_path     = req.path;
+            ev.http_status   = status;
+            ev.reason        = code;
+            emitAudit(std::move(ev));
             return httplib::Server::HandlerResponse::Handled;
         };
 
@@ -177,6 +195,7 @@ bool DeviceApi::start() {
         const std::string cn     = commonName(cert);
         const std::string serial = serialHex(cert);
         if (cn.empty() || serial.empty()) return deny(401, "cert_untrusted");
+        who = cn;
 
         if (const auto seg = idInPath(req.path); !seg.empty() && seg != cn) return deny(403, "cn_mismatch");
 
@@ -281,6 +300,19 @@ bool DeviceApi::start() {
             X509_free(cert);
         }
         const auto out = opts_.renew->renew({id, serial, csr});
+        {
+            DeviceAuditEvent ev;
+            ev.action        = out.audit_action;
+            ev.access_denial = out.audit_action.size() > 7 &&
+                               out.audit_action.compare(out.audit_action.size() - 7, 7, "_denied") == 0;
+            ev.player_id     = id;
+            ev.client_ip     = req.remote_addr;
+            ev.http_method   = req.method;
+            ev.http_path     = req.path;
+            ev.http_status   = out.status;
+            ev.reason        = out.audit_reason;
+            emitAudit(std::move(ev));
+        }
         res.status = out.status;
         res.set_content(out.body.dump(), "application/json");
     });
@@ -303,6 +335,7 @@ bool DeviceApi::start() {
 
 std::size_t DeviceApi::addTrustAnchors(const std::string& pem) {
     if (!server_ || pem.empty()) return 0;
+    if (trust_all_.find(pem) == std::string::npos) trust_all_ += pem;
     X509_STORE* store = SSL_CTX_get_cert_store(server_->ssl_context());
     BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
     std::size_t loaded = 0;
@@ -315,6 +348,55 @@ std::size_t DeviceApi::addTrustAnchors(const std::string& pem) {
     ERR_clear_error();                 // the end of the PEM bundle raises a benign error
     if (bio) BIO_free_all(bio);
     return loaded;
+}
+
+void DeviceApi::emitAudit(DeviceAuditEvent ev) {
+    if (!opts_.audit) return;
+    // Only the normal outcome of a renewal is reported every time; refusals and
+    // failures share one row per window.
+    if (ev.action != "player.renew") {
+        const std::int64_t now = nowSeconds();
+        const std::string key = ev.action + '|' + (ev.player_id.empty() ? ev.client_ip : ev.player_id) + '|' + ev.reason;
+        std::lock_guard<std::mutex> lk(audit_mu_);
+        if (audit_throttle_.size() > 5000) {
+            for (auto it = audit_throttle_.begin(); it != audit_throttle_.end();)
+                it = (now - it->second.since > opts_.audit_throttle_s) ? audit_throttle_.erase(it) : std::next(it);
+        }
+        auto& t = audit_throttle_[key];
+        if (t.since != 0 && now - t.since < opts_.audit_throttle_s) { ++t.suppressed; return; }
+        ev.suppressed = t.suppressed;
+        t.since = now;
+        t.suppressed = 0;
+    }
+    opts_.audit(ev);
+}
+
+bool DeviceApi::reloadServerCertificate() {
+    // Check the new files first: a broken pair must not take the port down.
+    {
+        SSL_CTX* probe = SSL_CTX_new(TLS_server_method());
+        const bool usable = probe &&
+            SSL_CTX_use_certificate_chain_file(probe, opts_.cert_path.c_str()) == 1 &&
+            SSL_CTX_use_PrivateKey_file(probe, opts_.key_path.c_str(), SSL_FILETYPE_PEM) == 1 &&
+            SSL_CTX_check_private_key(probe) == 1;
+        SSL_CTX_free(probe);
+        ERR_clear_error();
+        if (!usable) {
+            LOG_ERROR("device api: new server certificate/key are unusable — keeping the old one");
+            return false;
+        }
+    }
+    const std::string trust = trust_all_;
+    if (server_) server_->stop();
+    if (thread_.joinable()) thread_.join();
+    server_.reset();
+    opts_.trust_pem = trust;
+    if (!startListener()) {
+        LOG_ERROR("device api: could not restart the listener after the certificate change");
+        return false;
+    }
+    LOG_INFO("device api: server certificate reloaded on port {}", port_);
+    return true;
 }
 
 void DeviceApi::stop() {
