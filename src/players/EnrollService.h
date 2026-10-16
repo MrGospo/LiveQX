@@ -4,8 +4,9 @@
 // bootstrap token and a CSR gets a client certificate from the device CA.
 //
 // The service owns the policy, the HTTP layer only carries bytes:
-//   * rate limit per client address AND per player id, checked first, so a
-//     locked address never gets to learn anything about a token;
+//   * rate limit per client address, checked first, so a locked address never
+//     gets to learn anything about a token (not per player id: the id is
+//     public, and a per-id lock would let a stranger stall a pairing);
 //   * every token failure is the same 401 invalid_token for the caller — the
 //     real reason is returned only in `audit_reason`;
 //   * the token is claimed only after everything that can fail for server

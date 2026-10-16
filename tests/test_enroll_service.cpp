@@ -253,12 +253,14 @@ TEST_F(EnrollServiceTest, GuessingIsLimitedPerAddress) {
     EXPECT_EQ(svc_->enroll({p.player.id, p.token, makeCsr(), "198.51.100.7"}).status, 200);
 }
 
-TEST_F(EnrollServiceTest, GuessingIsLimitedPerPlayerAcrossAddresses) {
+TEST_F(EnrollServiceTest, AStrangerCannotLockAPlayerOutByKnowingItsId) {
+    // The id is not a secret (it is in the list, the package and the CN), the
+    // token has 256 bits. Throttling per id would only let a third party stop
+    // a legitimate pairing, so the limit is per address alone.
     auto p = newPlayer();
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < 10; ++i)
         EXPECT_EQ(svc_->enroll({p.player.id, "guess", makeCsr(), "192.0.2." + std::to_string(i + 1)}).status, 401);
-    auto out = svc_->enroll({p.player.id, p.token, makeCsr(), "192.0.2.99"});
-    EXPECT_EQ(out.status, 429) << "the player id is locked even from a fresh address";
+    EXPECT_EQ(svc_->enroll({p.player.id, p.token, makeCsr(), "192.0.2.99"}).status, 200);
 }
 
 TEST_F(EnrollServiceTest, ALockedAddressRecoversWithTime) {

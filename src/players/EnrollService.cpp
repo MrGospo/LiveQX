@@ -59,13 +59,13 @@ std::int64_t EnrollService::nowSeconds() const {
 EnrollOutcome EnrollService::enroll(const EnrollRequest& req) {
     const std::int64_t now = nowSeconds();
     const bool id_ok = looksLikeUuid(req.player_id);
-    // Ids that are not ids share one bucket, so the table cannot be inflated
-    // with junk keys.
-    const std::string ip_key     = "ip:" + (req.client_ip.empty() ? std::string("unknown") : req.client_ip);
-    const std::string player_key = "player:" + (id_ok ? req.player_id : std::string("invalid"));
+    // The limit is per client address only. The player id is not a secret, so
+    // throttling by it would let a stranger block a legitimate pairing; the
+    // token itself has 256 bits and cannot be guessed.
+    const std::string ip_key = "ip:" + (req.client_ip.empty() ? std::string("unknown") : req.client_ip);
 
     // 1. Rate limit — before anything is looked up.
-    const int wait = std::max(limiter_->retryAfter(ip_key), limiter_->retryAfter(player_key));
+    const int wait = limiter_->retryAfter(ip_key);
     if (wait > 0) {
         auto o = fail(429, "rate_limited", "player.enroll_denied", "rate_limited",
                       id_ok ? req.player_id : std::string{});
@@ -95,7 +95,6 @@ EnrollOutcome EnrollService::enroll(const EnrollRequest& req) {
     else       claim.reason = ClaimFailure::UnknownPlayer;
     if (!claim.ok) {
         limiter_->recordFailure(ip_key);
-        limiter_->recordFailure(player_key);
         return fail(401, "invalid_token", "player.enroll_denied",
                     id_ok ? reasonName(claim.reason) : "malformed_player_id",
                     id_ok ? req.player_id : std::string{});
@@ -123,7 +122,6 @@ EnrollOutcome EnrollService::enroll(const EnrollRequest& req) {
     }
 
     limiter_->recordSuccess(ip_key);
-    limiter_->recordSuccess(player_key);
 
     EnrollOutcome o;
     o.status = 200;

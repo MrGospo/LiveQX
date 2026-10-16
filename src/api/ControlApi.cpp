@@ -586,6 +586,7 @@ struct AuditReqCtx {
     std::string details_override;
     std::string target_type_override;
     std::string target_id_override;
+    std::optional<liveqx::audit::Category> category_override;
 };
 thread_local AuditReqCtx g_audit_ctx;
 
@@ -605,6 +606,13 @@ void setAuditContextOverride(std::string_view action,
         g_audit_ctx.target_type_override = std::string{target_type};
     if (!target_id.empty())
         g_audit_ctx.target_id_override = std::string{target_id};
+}
+
+// Files the current request's audit row under a category other than the one
+// its path implies (e.g. a refused pairing is an Access event even though
+// the route lives under /api/players).
+void setAuditCategoryOverride(liveqx::audit::Category c) {
+    g_audit_ctx.category_override = c;
 }
 
 // Login/refresh/logout stay reachable even when the audit backlog is
@@ -722,7 +730,7 @@ void installAuditPostHandler(httplib::Server& s,
                     now - g_audit_ctx.start).count();
 
             liveqx::audit::AuditEvent ev;
-            ev.category    = categoryForApiPath(req.path);
+            ev.category    = g_audit_ctx.category_override.value_or(categoryForApiPath(req.path));
             ev.action      = !g_audit_ctx.action_override.empty()
                              ? g_audit_ctx.action_override
                              : (req.method + " " + normaliseAuditPath(req.path));
@@ -3185,6 +3193,10 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         if (out.retry_after_s > 0) res.set_header("Retry-After", std::to_string(out.retry_after_s));
         // The token and the CSR never reach the audit row; only the verdict.
         setAuditContextOverride(out.audit_action, json{{"reason", out.audit_reason}}, "player", out.player_id);
+        // A refusal (bad token, rate limit, bad CSR) is an access event; our
+        // own failures (no CA, clock) stay with the module.
+        if (out.audit_action == "player.enroll_denied")
+            setAuditCategoryOverride(liveqx::audit::Category::Access);
         writeJson(res, out.status, out.body);
     });
 

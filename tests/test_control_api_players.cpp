@@ -26,6 +26,8 @@
 #include "api/ChannelManager.h"
 #include "api/ControlApi.h"
 #include "players/PlayersDb.h"
+#include "audit/AuditDb.h"
+#include "audit/AuditLogger.h"
 #include "players/EnrollService.h"
 #include "players/PlayersService.h"
 #include "auth/MasterKey.h"
@@ -51,6 +53,8 @@ struct PlayersApiFixture {
     std::unique_ptr<liveqx::auth::MasterKey> mk;
     std::shared_ptr<const liveqx::tls::DeviceCa> device_ca;
     std::unique_ptr<EnrollService> enroll;
+    std::unique_ptr<liveqx::audit::AuditDb> audit_db;
+    std::unique_ptr<liveqx::audit::AuditLogger> audit_logger;
     std::vector<CertRow>        crl_hook;
     ChannelManager              manager;
     std::unique_ptr<ControlApi> api;
@@ -78,6 +82,10 @@ struct PlayersApiFixture {
         auto ca = liveqx::tls::DeviceCa::open(tmp / "device_ca", *mk, err, true);
         EXPECT_TRUE(ca) << err;
         device_ca = std::shared_ptr<const liveqx::tls::DeviceCa>(std::move(ca));
+        audit_db = std::make_unique<liveqx::audit::AuditDb>(tmp / "audit.db", mk.get());
+        EXPECT_TRUE(audit_db->open());
+        audit_logger = std::make_unique<liveqx::audit::AuditLogger>(audit_db.get(), tmp / "audit-emergency.jsonl");
+        audit_logger->start();
         EnrollOptions eo;
         eo.ca = [this] { return device_ca; };
         enroll = std::make_unique<EnrollService>(*db, std::move(eo));
@@ -85,7 +93,7 @@ struct PlayersApiFixture {
         api = std::make_unique<ControlApi>(
             port, manager, nullptr, LivezOptions{}, nullptr, nullptr, nullptr, nullptr,
             /*rbac=*/nullptr, /*events=*/nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-            TlsBindings{}, nullptr, nullptr, nullptr, nullptr, nullptr,
+            TlsBindings{}, nullptr, nullptr, nullptr, audit_logger.get(), nullptr,
             with_service ? svc.get() : nullptr,
             with_service ? enroll.get() : nullptr);
         api->start();
@@ -100,6 +108,9 @@ struct PlayersApiFixture {
     ~PlayersApiFixture() {
         if (api) api->stop();
         api.reset();
+        if (audit_logger) audit_logger->stop();
+        audit_logger.reset();
+        audit_db.reset();
         enroll.reset();
         device_ca.reset();
         svc.reset();
@@ -510,4 +521,36 @@ TEST(ControlApiPlayers, EnrollWithoutTheModuleIs503) {
     auto r = cli.Post("/api/players/enroll", "{}", "application/json");
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 503);
+}
+
+// ─── Audit: where the enroll rows land ──────────────────────────────────────
+
+TEST(ControlApiPlayers, ADeniedEnrollIsFiledAsAccessAndASuccessAsPlayer) {
+    PlayersApiFixture f(kBasePort + 18);
+    f.configure();
+    auto pkg = f.create("Lobby");
+    auto bad = enrollBody(pkg);
+    bad["bootstrap_token"] = "nope";
+    auto cli = f.client();
+    ASSERT_EQ(cli.Post("/api/players/enroll", bad.dump(), "application/json")->status, 401);
+    ASSERT_EQ(cli.Post("/api/players/enroll", enrollBody(pkg).dump(), "application/json")->status, 200);
+    f.audit_logger->flushForTesting();
+
+    auto find = [&](const char* action) {
+        liveqx::audit::AuditFilter af;
+        af.action = action;
+        af.limit  = 8;
+        return f.audit_db->list(af);
+    };
+    auto denied = find("player.enroll_denied");
+    ASSERT_EQ(denied.size(), 1u);
+    EXPECT_EQ(denied[0].category, liveqx::audit::Category::Access)
+        << "a refused pairing is a refused access: it belongs where brute force is looked for";
+    EXPECT_NE(denied[0].details_json.find("token_mismatch"), std::string::npos);
+    EXPECT_EQ(denied[0].details_json.find("nope"), std::string::npos) << "the guess itself is never logged";
+
+    auto ok = find("player.enroll");
+    ASSERT_EQ(ok.size(), 1u);
+    EXPECT_EQ(ok[0].category, liveqx::audit::Category::Player);
+    EXPECT_EQ(ok[0].target_id, pkg["player_id"].get<std::string>());
 }
