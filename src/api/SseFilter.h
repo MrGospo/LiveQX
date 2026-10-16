@@ -16,6 +16,7 @@ namespace liveqx::api {
 // given event on its SSE stream. Visibility matrix:
 //
 //   AuditEvent             — Admin only (enterprise audit trail signal)
+//   Player*                — every signed-in role (players are not channel-scoped)
 //   PluginStatusChange     — Admin + Operator
 //   ChannelStateChange,
 //   OutputStateChange,

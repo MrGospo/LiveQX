@@ -127,3 +127,43 @@ TEST(SseFilter, DefaultSubscriptionIncludesOperationalEvents) {
     EXPECT_TRUE(sseEventInDefaultSubscription(EventType::StressRunFinished));
     EXPECT_TRUE(sseEventInDefaultSubscription(EventType::GatewayStateChange));
 }
+
+// ── player events (LiveQX-Player integration) ───────────────────────────────
+// A7: any signed-in user may list players, so any role may see their events;
+// players are not channel-scoped, so channel grants play no part.
+TEST(SseFilter, EveryRoleSeesPlayerEvents) {
+    for (EventType t : {EventType::PlayerRegistered, EventType::PlayerOnline,
+                        EventType::PlayerOffline, EventType::PlayerHeartbeat,
+                        EventType::PlayerVersionChanged}) {
+        EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Admin), evtFor(t)))    << liveqx::events::eventTypeName(t);
+        EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Operator), evtFor(t))) << liveqx::events::eventTypeName(t);
+        EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Viewer), evtFor(t)))   << liveqx::events::eventTypeName(t);
+    }
+}
+
+TEST(SseFilter, PlayerEventsNeedNoChannelGrant) {
+    // A viewer without any grant still sees them; channel_id is -1 for these.
+    EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Viewer),
+                                  evtFor(EventType::PlayerOnline, /*channel_id=*/-1)));
+}
+
+TEST(SseFilter, HeartbeatsAreNotInTheDefaultSubscription) {
+    // A thousand players beating every half minute would drown the events page.
+    EXPECT_FALSE(liveqx::api::sseEventInDefaultSubscription(EventType::PlayerHeartbeat));
+    EXPECT_TRUE(liveqx::api::sseEventInDefaultSubscription(EventType::PlayerRegistered));
+    EXPECT_TRUE(liveqx::api::sseEventInDefaultSubscription(EventType::PlayerOnline));
+    EXPECT_TRUE(liveqx::api::sseEventInDefaultSubscription(EventType::PlayerOffline));
+    EXPECT_TRUE(liveqx::api::sseEventInDefaultSubscription(EventType::PlayerVersionChanged));
+}
+
+TEST(SseFilter, PlayerEventNamesRoundTrip) {
+    for (EventType t : {EventType::PlayerRegistered, EventType::PlayerOnline,
+                        EventType::PlayerOffline, EventType::PlayerHeartbeat,
+                        EventType::PlayerVersionChanged}) {
+        const std::string name = liveqx::events::eventTypeName(t);
+        EXPECT_EQ(name.rfind("player_", 0), 0u) << name;
+        auto back = liveqx::events::parseEventType(name);
+        ASSERT_TRUE(back.has_value()) << name;
+        EXPECT_EQ(*back, t) << name;
+    }
+}

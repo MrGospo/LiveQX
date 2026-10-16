@@ -14,6 +14,14 @@ bool sseEventVisibleTo(const liveqx::auth::RequestContext& ctx,
         case EventType::StressRunFinished:
         case EventType::GatewayStateChange:
             return ctx.role == Role::Admin || ctx.role == Role::Operator;
+        case EventType::PlayerRegistered:
+        case EventType::PlayerOnline:
+        case EventType::PlayerOffline:
+        case EventType::PlayerHeartbeat:
+        case EventType::PlayerVersionChanged:
+            // Any signed-in user may list players (A7), and players belong to
+            // no channel, so there is nothing finer to filter on.
+            return true;
         case EventType::ChannelStateChange:
         case EventType::OutputStateChange:
         case EventType::ClipChange:
@@ -34,6 +42,10 @@ bool sseEventInDefaultSubscription(liveqx::events::EventType t) noexcept {
     switch (t) {
         case EventType::ClipChange:
             // Per-clip traffic — subscribed explicitly by the channel Log tab.
+            return false;
+        case EventType::PlayerHeartbeat:
+            // A thousand players beating every half minute would drown the
+            // events page; a client that wants them asks with ?types=.
             return false;
         default:
             return true;

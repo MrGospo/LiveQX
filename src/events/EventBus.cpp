@@ -16,6 +16,11 @@ const char* eventTypeName(EventType t) noexcept {
         case EventType::StressRunStarted:    return "stress_run_started";
         case EventType::StressRunFinished:   return "stress_run_finished";
         case EventType::GatewayStateChange:  return "gateway_state_change";
+        case EventType::PlayerRegistered:    return "player_registered";
+        case EventType::PlayerOnline:        return "player_online";
+        case EventType::PlayerOffline:       return "player_offline";
+        case EventType::PlayerHeartbeat:     return "player_heartbeat";
+        case EventType::PlayerVersionChanged:return "player_version_changed";
         case EventType::AuditEvent:          return "audit_event";
     }
     return "unknown";
@@ -31,6 +36,11 @@ std::optional<EventType> parseEventType(const std::string& s) noexcept {
     if (s == "stress_run_started")    return EventType::StressRunStarted;
     if (s == "stress_run_finished")   return EventType::StressRunFinished;
     if (s == "gateway_state_change")  return EventType::GatewayStateChange;
+    if (s == "player_registered")     return EventType::PlayerRegistered;
+    if (s == "player_online")         return EventType::PlayerOnline;
+    if (s == "player_offline")        return EventType::PlayerOffline;
+    if (s == "player_heartbeat")      return EventType::PlayerHeartbeat;
+    if (s == "player_version_changed")return EventType::PlayerVersionChanged;
     if (s == "audit_event")           return EventType::AuditEvent;
     return std::nullopt;
 }
