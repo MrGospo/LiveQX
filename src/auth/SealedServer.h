@@ -11,6 +11,11 @@
 //                                            passphrase field (RU/EN)
 //   everything else          -> 503 {"error":"sealed"}
 //
+// A second, local way in (`liveqx --unseal`, auth/UnsealCli.h): a Unix socket,
+// mode 0600, with a one-line JSON protocol. It shares the page's attempt
+// counting and one-at-a-time rule, and it works even when the API port cannot
+// be used.
+//
 // Once the key is unlocked, waitUnlocked() returns, the caller stops this
 // server and continues with the normal start on the same port.
 //
@@ -19,6 +24,7 @@
 // backs off exponentially after a few failures. During a lockout even the
 // correct passphrase is refused, so the server never acts as an oracle.
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
@@ -76,6 +82,8 @@ public:
         std::filesystem::path cert_path;           // both empty = plain HTTP
         std::filesystem::path key_path;
         int                   free_attempts{3};
+        // Unix socket for `liveqx --unseal`; empty = none.
+        std::filesystem::path unseal_socket;
     };
 
     SealedServer(MasterKey& key, Options options);
@@ -90,6 +98,9 @@ public:
     // The port actually bound (useful when Options::port was 0).
     int port() const noexcept { return port_; }
 
+    // True if the local unseal socket (Options::unseal_socket) is serving.
+    bool localSocketActive() const noexcept { return local_fd_ >= 0; }
+
     // Blocks until the key is unlocked (true) or `should_abort()` returns
     // true (false). Polls `should_abort` a few times per second.
     bool waitUnlocked(const std::function<bool()>& should_abort);
@@ -98,7 +109,19 @@ public:
     void stop();
 
 private:
+    enum class Attempt { Unlocked, Wrong, TooMany, Busy };
+    struct AttemptResult {
+        Attempt kind{Attempt::Wrong};
+        int     retry_after{0};
+    };
+
     void installHandlers();
+    // The shared rule for a passphrase attempt, whichever way it came in.
+    // `who` identifies the caller for the lockout (an IP address, or "local").
+    AttemptResult tryPassphrase(std::string& pass, const std::string& who);
+    bool startLocalSocket(std::string& err);
+    void serveLocalSocket();
+    void stopLocalSocket();
 
     MasterKey&                        key_;
     Options                           opts_;
@@ -110,6 +133,9 @@ private:
     std::mutex                        wait_mu_;
     std::condition_variable           wait_cv_;
     bool                              unlocked_{false};
+    int                               local_fd_{-1};
+    std::thread                       local_thread_;
+    std::atomic<bool>                 local_stop_{false};
 };
 
 }  // namespace liveqx::auth

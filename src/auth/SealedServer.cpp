@@ -4,14 +4,22 @@
 
 #include "auth/MasterKey.h"
 #include "utils/Log.h"
+#include "utils/UnixSocketAddress.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
 #include <sodium.h>
 
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 
 namespace liveqx::auth {
 namespace {
@@ -205,6 +213,15 @@ bool SealedServer::start(std::string& err) {
     }
     thread_ = std::thread([this] { server_->listen_after_bind(); });
     server_->wait_until_ready();
+    if (!opts_.unseal_socket.empty()) {
+        // The socket is the second way in. Failing to set it up must not take
+        // the first one (the web page) down with it.
+        std::string sock_err;
+        if (!startLocalSocket(sock_err)) {
+            LOG_WARN("sealed: the local unseal socket is not available ({}); "
+                     "the web page still works", sock_err);
+        }
+    }
     LOG_INFO("sealed: waiting for the master-key passphrase on {}:{} ({})",
              opts_.bind, port_, opts_.cert_path.empty() ? "http" : "https");
     return true;
@@ -221,15 +238,6 @@ void SealedServer::installHandlers() {
 
     server_->Post("/api/seal/unlock",
                   [this](const httplib::Request& req, httplib::Response& res) {
-        const std::string ip = req.remote_addr;
-
-        if (const int wait = limiter_.retryAfter(ip); wait > 0) {
-            res.set_header("Retry-After", std::to_string(wait));
-            sendJson(res, 429, {{"error", "too_many_attempts"},
-                                {"retry_after", wait}});
-            return;
-        }
-
         json body = json::parse(req.body, nullptr, false);
         if (body.is_discarded() || !body.is_object() ||
             !body.contains("passphrase") || !body["passphrase"].is_string()) {
@@ -237,40 +245,26 @@ void SealedServer::installHandlers() {
             return;
         }
         std::string pass = body["passphrase"].get<std::string>();
-
-        std::unique_lock<std::mutex> lk(unlock_mu_, std::try_to_lock);
-        if (!lk.owns_lock()) {
-            sodium_memzero(pass.data(), pass.size());
-            res.set_header("Retry-After", "1");
-            sendJson(res, 429, {{"error", "busy"}, {"retry_after", 1}});
-            return;
-        }
-
-        if (key_.loaded()) {   // someone else got there first
-            sodium_memzero(pass.data(), pass.size());
-            sendJson(res, 200, {{"ok", true}});
-            return;
-        }
-
-        std::string err;
-        const bool ok = key_.unlock(pass, err);
-        sodium_memzero(pass.data(), pass.size());
-        if (ok) {
-            limiter_.recordSuccess(ip);
-            LOG_INFO("sealed: unlocked by {}", ip);
-            {
-                std::lock_guard<std::mutex> wl(wait_mu_);
-                unlocked_ = true;
+        const auto r = tryPassphrase(pass, req.remote_addr);
+        switch (r.kind) {
+            case Attempt::Unlocked:
+                sendJson(res, 200, {{"ok", true}});
+                break;
+            case Attempt::TooMany:
+                res.set_header("Retry-After", std::to_string(r.retry_after));
+                sendJson(res, 429, {{"error", "too_many_attempts"},
+                                    {"retry_after", r.retry_after}});
+                break;
+            case Attempt::Busy:
+                res.set_header("Retry-After", "1");
+                sendJson(res, 429, {{"error", "busy"}, {"retry_after", 1}});
+                break;
+            case Attempt::Wrong: {
+                json out = {{"error", "wrong_passphrase"}};
+                if (r.retry_after > 0) out["retry_after"] = r.retry_after;
+                sendJson(res, 401, out);
+                break;
             }
-            wait_cv_.notify_all();
-            sendJson(res, 200, {{"ok", true}});
-        } else {
-            limiter_.recordFailure(ip);
-            LOG_WARN("sealed: failed unlock attempt from {}: {}", ip, err);
-            const int wait = limiter_.retryAfter(ip);
-            json out = {{"error", "wrong_passphrase"}};
-            if (wait > 0) out["retry_after"] = wait;
-            sendJson(res, 401, out);
         }
     });
 
@@ -299,6 +293,140 @@ void SealedServer::installHandlers() {
         });
 }
 
+SealedServer::AttemptResult SealedServer::tryPassphrase(std::string& pass,
+                                                         const std::string& who) {
+    AttemptResult out;
+    auto wipe = [&] { sodium_memzero(pass.data(), pass.size()); };
+
+    if (const int wait = limiter_.retryAfter(who); wait > 0) {
+        wipe();
+        out.kind = Attempt::TooMany;
+        out.retry_after = wait;
+        return out;
+    }
+
+    std::unique_lock<std::mutex> lk(unlock_mu_, std::try_to_lock);
+    if (!lk.owns_lock()) {
+        wipe();
+        out.kind = Attempt::Busy;
+        return out;
+    }
+
+    if (key_.loaded()) {   // someone else got there first
+        wipe();
+        out.kind = Attempt::Unlocked;
+        return out;
+    }
+
+    std::string err;
+    const bool ok = key_.unlock(pass, err);
+    wipe();
+    if (ok) {
+        limiter_.recordSuccess(who);
+        LOG_INFO("sealed: unlocked by {}", who);
+        {
+            std::lock_guard<std::mutex> wl(wait_mu_);
+            unlocked_ = true;
+        }
+        wait_cv_.notify_all();
+        out.kind = Attempt::Unlocked;
+        return out;
+    }
+    limiter_.recordFailure(who);
+    LOG_WARN("sealed: failed unlock attempt from {}: {}", who, err);
+    out.kind = Attempt::Wrong;
+    out.retry_after = limiter_.retryAfter(who);
+    return out;
+}
+
+bool SealedServer::startLocalSocket(std::string& err) {
+    const std::string path = opts_.unseal_socket.string();
+    util::UnixSocketAddress addr;
+    if (!addr.set(opts_.unseal_socket, err)) return false;
+
+    // The single-instance lock guarantees no other live server owns this
+    // path, so whatever is there is left over from a crashed run.
+    std::error_code ec;
+    std::filesystem::remove(opts_.unseal_socket, ec);
+
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) { err = std::string("socket: ") + std::strerror(errno); return false; }
+    // Created private from the start: only the service user and root connect.
+    const mode_t old_umask = ::umask(0177);
+    const int rc = ::bind(fd, addr.address(), addr.length());
+    ::umask(old_umask);
+    if (rc != 0 || ::listen(fd, 4) != 0) {
+        err = "cannot listen on " + path + ": " + std::strerror(errno);
+        ::close(fd);
+        std::filesystem::remove(opts_.unseal_socket, ec);
+        return false;
+    }
+    ::chmod(path.c_str(), 0600);
+    local_fd_ = fd;
+    local_stop_ = false;
+    local_thread_ = std::thread([this] { serveLocalSocket(); });
+    return true;
+}
+
+void SealedServer::serveLocalSocket() {
+    while (!local_stop_.load()) {
+        pollfd p{local_fd_, POLLIN, 0};
+        if (::poll(&p, 1, 100) <= 0) continue;
+        const int c = ::accept4(local_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+        if (c < 0) continue;
+
+        // One request line, then one reply line. Clients are local and rare,
+        // so connections are handled one after another.
+        std::string line;
+        char buf[512];
+        bool complete = false;
+        while (line.size() < kMaxBodyBytes) {
+            pollfd rp{c, POLLIN, 0};
+            if (::poll(&rp, 1, 2000) <= 0) break;
+            const ssize_t n = ::read(c, buf, sizeof buf);
+            if (n <= 0) break;
+            line.append(buf, static_cast<std::size_t>(n));
+            if (line.find('\n') != std::string::npos) { complete = true; break; }
+        }
+
+        json reply = {{"error", "bad_request"}};
+        if (complete) {
+            json req = json::parse(line.substr(0, line.find('\n')), nullptr, false);
+            if (!req.is_discarded() && req.is_object() && req.contains("passphrase") &&
+                req["passphrase"].is_string()) {
+                std::string pass = req["passphrase"].get<std::string>();
+                const auto r = tryPassphrase(pass, "local");
+                switch (r.kind) {
+                    case Attempt::Unlocked: reply = {{"ok", true}}; break;
+                    case Attempt::TooMany:
+                        reply = {{"error", "too_many_attempts"}, {"retry_after", r.retry_after}};
+                        break;
+                    case Attempt::Busy: reply = {{"error", "busy"}}; break;
+                    case Attempt::Wrong:
+                        reply = {{"error", "wrong_passphrase"}};
+                        if (r.retry_after > 0) reply["retry_after"] = r.retry_after;
+                        break;
+                }
+            }
+        }
+        sodium_memzero(line.data(), line.size());
+        const std::string out = reply.dump() + "\n";
+        (void)!::write(c, out.data(), out.size());
+        ::close(c);
+    }
+}
+
+void SealedServer::stopLocalSocket() {
+    local_stop_ = true;
+    if (local_thread_.joinable()) local_thread_.join();
+    if (local_fd_ >= 0) {
+        ::close(local_fd_);
+        local_fd_ = -1;
+        std::error_code ec;
+        std::filesystem::remove(opts_.unseal_socket, ec);
+    }
+}
+
 bool SealedServer::waitUnlocked(const std::function<bool()>& should_abort) {
     std::unique_lock<std::mutex> lk(wait_mu_);
     while (!unlocked_) {
@@ -309,6 +437,7 @@ bool SealedServer::waitUnlocked(const std::function<bool()>& should_abort) {
 }
 
 void SealedServer::stop() {
+    stopLocalSocket();
     if (server_) server_->stop();
     if (thread_.joinable()) thread_.join();
     server_.reset();

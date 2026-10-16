@@ -62,6 +62,7 @@
 #include "utils/TlsConfig.h"
 #include "api/TlsBootstrap.h"
 #include "auth/KeyProtectCli.h"
+#include "auth/UnsealCli.h"
 #include "utils/CredentialStore.h"
 #include "utils/DeviceCaCli.h"
 #include "auth/MasterKeyBoot.h"
@@ -182,6 +183,7 @@ int main(int argc, char* argv[]) {
     bool                do_change_master_pass   = false;
     bool                passphrase_from_stdin   = false;
     // Two-tier device CA ceremony (utils/DeviceCaCli.h).
+    bool                do_unseal         = false;
     bool                do_ca_root_init   = false;
     bool                do_ca_request     = false;
     bool                do_ca_root_sign   = false;
@@ -229,6 +231,8 @@ int main(int argc, char* argv[]) {
             do_change_master_pass = true;
         } else if (arg == "--passphrase-stdin") {
             passphrase_from_stdin = true;
+        } else if (arg == "--unseal") {
+            do_unseal = true;
         } else if (arg == "--device-ca-root-init") {
             do_ca_root_init = true;
         } else if (arg == "--device-ca-request") {
@@ -271,6 +275,7 @@ int main(int argc, char* argv[]) {
     if (do_print_bootstrap || do_reset_admin || do_rotate_master_key
         || do_reset_master_key || do_protect_master_key
         || do_unprotect_master_key || do_change_master_pass
+        || do_unseal
         || do_ca_root_init || do_ca_request || do_ca_root_sign || do_ca_import) {
         const json recovery_cfg = try_load_config(config_path);
         const auto recovery_paths = scp::Paths::resolve(path_args, recovery_cfg);
@@ -285,6 +290,9 @@ int main(int argc, char* argv[]) {
         const auto source = passphrase_from_stdin
             ? liveqx::auth::makeStreamPassphraseSource(std::cin)
             : liveqx::auth::makeTerminalPassphraseSource();
+        if (do_unseal)
+            return liveqx::auth::unsealViaSocket(
+                recovery_paths.stateDir() / "unseal.sock", source);
         if (do_ca_root_init || do_ca_request || do_ca_root_sign || do_ca_import) {
             namespace tlsns = liveqx::tls;
             const auto& store = recovery_paths.masterKeyStore();

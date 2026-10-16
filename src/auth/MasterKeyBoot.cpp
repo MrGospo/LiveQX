@@ -48,6 +48,9 @@ BootResult bootMasterKey(MasterKey& key,
         opts.port      = cfg.value("api_port", 8080);
         opts.cert_path = tls.cert_path;
         opts.key_path  = tls.key_path;
+        // The second way in, for `liveqx --unseal`. Private (0600) and inside
+        // the state directory, which only the service user and root can enter.
+        opts.unseal_socket = paths.stateDir() / "unseal.sock";
         SealedServer server(key, opts);
         std::string err;
         if (!server.start(err)) {

@@ -11,6 +11,7 @@
 //   * waitUnlocked() returns when unlocked or when asked to give up.
 
 #include "auth/SealedServer.h"
+#include "auth/UnsealCli.h"
 
 #include "api/TlsBootstrap.h"
 #include "auth/KeyWrap.h"
@@ -24,12 +25,17 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <cstring>
 #include <fstream>
+#include <iostream>
+#include <sstream>
 #include <thread>
 
 namespace fs = std::filesystem;
@@ -359,4 +365,170 @@ TEST_F(SealedServerTest, PortIsReusableByTheRealServerRightAfterStop) {
     httplib::Server real;   // httplib defaults, as the control API uses
     EXPECT_TRUE(real.bind_to_port("127.0.0.1", port))
         << "connections left in TIME_WAIT must not block the next server";
+}
+
+// ── the local unseal socket (liveqx --unseal) ───────────────────────────────
+namespace {
+
+struct UnsealRun {
+    int         rc{0};
+    std::string out;
+    std::string err;
+};
+
+sa::PassphraseSource oneAnswer(std::string a) {
+    return [a](std::string_view) -> std::optional<std::string> { return a; };
+}
+
+UnsealRun runUnseal(const fs::path& socket, std::string pass) {
+    std::stringstream o, e;
+    auto* oo = std::cout.rdbuf(o.rdbuf());
+    auto* oe = std::cerr.rdbuf(e.rdbuf());
+    UnsealRun r;
+    r.rc = sa::unsealViaSocket(socket, oneAnswer(std::move(pass)));
+    std::cout.rdbuf(oo);
+    std::cerr.rdbuf(oe);
+    r.out = o.str();
+    r.err = e.str();
+    return r;
+}
+
+}  // namespace
+
+TEST_F(SealedServerTest, LocalSocketUnlocksTheKey) {
+    auto o = plainOptions();
+    o.unseal_socket = root_ / "unseal.sock";
+    sa::SealedServer s(*key_, o);
+    std::string err;
+    ASSERT_TRUE(s.start(err)) << err;
+
+    const auto r = runUnseal(o.unseal_socket, kPass);
+    ASSERT_EQ(r.rc, 0) << r.err;
+    EXPECT_TRUE(key_->loaded());
+    EXPECT_TRUE(s.waitUnlocked([] { return false; }));
+}
+
+TEST_F(SealedServerTest, LocalSocketRefusesAWrongPassphrase) {
+    auto o = plainOptions();
+    o.unseal_socket = root_ / "unseal.sock";
+    sa::SealedServer s(*key_, o);
+    std::string err;
+    ASSERT_TRUE(s.start(err)) << err;
+
+    const auto r = runUnseal(o.unseal_socket, "not the passphrase");
+    EXPECT_EQ(r.rc, 1);
+    EXPECT_NE(r.err.find("wrong"), std::string::npos) << r.err;
+    EXPECT_FALSE(key_->loaded());
+}
+
+TEST_F(SealedServerTest, LocalSocketHasTheSameLockoutAsTheWebPage) {
+    auto o = plainOptions();
+    o.unseal_socket = root_ / "unseal.sock";
+    o.free_attempts = 2;
+    sa::SealedServer s(*key_, o);
+    std::string err;
+    ASSERT_TRUE(s.start(err)) << err;
+
+    EXPECT_EQ(runUnseal(o.unseal_socket, "wrong one").rc, 1);
+    EXPECT_EQ(runUnseal(o.unseal_socket, "wrong two").rc, 1);
+    const auto locked = runUnseal(o.unseal_socket, kPass);
+    EXPECT_EQ(locked.rc, 1) << "even the right passphrase waits out the lockout";
+    EXPECT_NE(locked.err.find("Too many"), std::string::npos) << locked.err;
+    EXPECT_FALSE(key_->loaded());
+}
+
+TEST_F(SealedServerTest, LocalSocketIsPrivateAndRemovedOnStop) {
+    auto o = plainOptions();
+    o.unseal_socket = root_ / "unseal.sock";
+    {
+        sa::SealedServer s(*key_, o);
+        std::string err;
+        ASSERT_TRUE(s.start(err)) << err;
+        struct stat st{};
+        ASSERT_EQ(::stat(o.unseal_socket.c_str(), &st), 0);
+        EXPECT_TRUE(S_ISSOCK(st.st_mode));
+        EXPECT_EQ(st.st_mode & 0777, 0600u) << "only the service user and root may connect";
+    }
+    EXPECT_FALSE(fs::exists(o.unseal_socket)) << "the socket file must not outlive the server";
+}
+
+TEST_F(SealedServerTest, LocalSocketReplacesAStaleFileFromACrashedRun) {
+    auto o = plainOptions();
+    o.unseal_socket = root_ / "unseal.sock";
+    { std::ofstream f(o.unseal_socket); f << "stale"; }
+    sa::SealedServer s(*key_, o);
+    std::string err;
+    ASSERT_TRUE(s.start(err)) << err;
+    EXPECT_EQ(runUnseal(o.unseal_socket, kPass).rc, 0);
+}
+
+TEST_F(SealedServerTest, LocalSocketWorksEvenWhenThePathIsLongerThanSunPath) {
+    // A state directory deep in a long path must not make the socket unusable.
+    const auto deep = root_ / std::string(120, 'x');
+    fs::create_directories(deep);
+    auto o = plainOptions();
+    o.unseal_socket = deep / "unseal.sock";
+    ASSERT_GT(o.unseal_socket.string().size(), 107u);
+    sa::SealedServer s(*key_, o);
+    std::string err;
+    ASSERT_TRUE(s.start(err)) << err;
+    EXPECT_TRUE(s.localSocketActive());
+    EXPECT_EQ(runUnseal(o.unseal_socket, kPass).rc, 0);
+}
+
+TEST_F(SealedServerTest, ABrokenLocalSocketDoesNotTakeTheWebPageDown) {
+    auto o = plainOptions();
+    o.unseal_socket = root_ / "no-such-directory" / "unseal.sock";
+    sa::SealedServer s(*key_, o);
+    std::string err;
+    ASSERT_TRUE(s.start(err)) << "the web page is the first way in: " << err;
+    EXPECT_FALSE(s.localSocketActive());
+
+    httplib::Client c("127.0.0.1", s.port());
+    auto r = post(c, json{{"passphrase", kPass}}.dump());
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 200);
+    EXPECT_TRUE(key_->loaded());
+}
+
+TEST_F(SealedServerTest, LocalSocketSurvivesGarbage) {
+    auto o = plainOptions();
+    o.unseal_socket = root_ / "unseal.sock";
+    sa::SealedServer s(*key_, o);
+    std::string err;
+    ASSERT_TRUE(s.start(err)) << err;
+
+    {   // a client that sends rubbish, then another that sends nothing at all
+        int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        std::strncpy(addr.sun_path, o.unseal_socket.c_str(), sizeof(addr.sun_path) - 1);
+        ASSERT_EQ(::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr), 0);
+        const char junk[] = "this is not json\n";
+        (void)!::write(fd, junk, sizeof junk - 1);
+        char buf[256];
+        ssize_t n = ::read(fd, buf, sizeof buf);
+        EXPECT_GT(n, 0);
+        EXPECT_NE(std::string(buf, static_cast<size_t>(n)).find("bad_request"), std::string::npos);
+        ::close(fd);
+    }
+    EXPECT_EQ(runUnseal(o.unseal_socket, kPass).rc, 0) << "the server must keep serving";
+}
+
+TEST(UnsealCli, ReportsAMissingSocketPlainly) {
+    std::stringstream e;
+    auto* oe = std::cerr.rdbuf(e.rdbuf());
+    const int rc = sa::unsealViaSocket("/nonexistent/dir/unseal.sock", oneAnswer("x"));
+    std::cerr.rdbuf(oe);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(e.str().find("not sealed"), std::string::npos) << e.str();
+}
+
+TEST(UnsealCli, ReportsNoPassphraseAvailable) {
+    std::stringstream e;
+    auto* oe = std::cerr.rdbuf(e.rdbuf());
+    const int rc = sa::unsealViaSocket("/nonexistent/unseal.sock",
+        [](std::string_view) -> std::optional<std::string> { return std::nullopt; });
+    std::cerr.rdbuf(oe);
+    EXPECT_EQ(rc, 1);
 }

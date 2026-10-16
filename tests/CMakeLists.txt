@@ -177,6 +177,7 @@ add_executable(liveqx-tests
     ../src/auth/MasterKey.cpp
     ../src/auth/KeyWrap.cpp
     ../src/auth/SealedServer.cpp
+    ../src/auth/UnsealCli.cpp
     ../src/auth/MasterKeyBoot.cpp
     ../src/auth/KeyProtectCli.cpp
     ../src/auth/MasterKeyReset.cpp
