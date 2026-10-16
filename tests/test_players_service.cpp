@@ -332,3 +332,17 @@ TEST_F(PlayersServiceTest, DeletingAPendingPlayerBurnsItsToken) {
     EXPECT_FALSE(db_->claimToken(r.player.id, r.package["bootstrap_token"], kT0 + 2).ok);
     EXPECT_TRUE(revoked_by_hook_.empty());
 }
+
+TEST_F(PlayersServiceTest, CaCertPemFollowsTheOverrideThenTheTlsDirectory) {
+    EXPECT_EQ(svc_->caCertPem(), slurp(tls_dir_ / "ca.crt"));
+    const fs::path other = dir_ / "other";
+    fs::create_directories(other);
+    ASSERT_TRUE(liveqx::tls::ensureCa(other, "Other CA").ok());
+    const std::string pem = slurp(other / "ca.crt");
+    ASSERT_EQ(svc_->updateSettings({{"ca_cert_pem", pem}}), "");
+    EXPECT_EQ(svc_->caCertPem(), pem);
+    fs::remove(tls_dir_ / "ca.crt");
+    ASSERT_EQ(svc_->updateSettings({{"ca_cert_pem", ""}}), "");
+    EXPECT_TRUE(svc_->caCertPem().empty()) << "no usable root -> empty, never garbage";
+}
+

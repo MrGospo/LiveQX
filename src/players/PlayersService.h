@@ -70,6 +70,10 @@ public:
     PlayersDb& db() noexcept { return db_; }
 
     PlayersSettings settings();
+
+    // The root players must trust for the server's TLS: the explicit override
+    // if set, else the server's own CA file. Empty if neither is usable.
+    std::string caCertPem();
     // JSON view of the settings (what GET /api/players/settings returns).
     static nlohmann::json toJson(const PlayersSettings& s);
 

@@ -48,7 +48,9 @@
 #include "mounts/MountManager.h"
 #include "mounts/MountdRpcClient.h"
 #include "mounts/MountsDb.h"
+#include "players/DeviceApi.h"
 #include "players/EnrollService.h"
+#include "players/RenewService.h"
 #include "players/PlayersDb.h"
 #include "players/RevocationList.h"
 #include "utils/DeviceCa.h"
@@ -942,6 +944,9 @@ int main(int argc, char* argv[]) {
         liveqx::players::RevocationList cert_revocations;
         std::unique_ptr<liveqx::players::PlayersService> players_service;
         std::unique_ptr<liveqx::players::EnrollService>  enroll_service;
+        std::unique_ptr<liveqx::players::RenewService>   renew_service;
+        std::unique_ptr<liveqx::players::DeviceApi>      device_api;        // started once TLS is resolved
+        std::function<std::shared_ptr<const liveqx::tls::DeviceCa>()> device_ca_provider;
         if (players_db.open()) {
             liveqx::players::PlayersServiceOptions po;
             po.ca_cert_path = paths.tlsDir() / "ca.crt";
@@ -976,8 +981,7 @@ int main(int argc, char* argv[]) {
             };
             auto ca_holder = std::make_shared<DeviceCaHolder>();
             const auto ca_dir = paths.deviceCaDir();
-            liveqx::players::EnrollOptions eo;
-            eo.ca = [ca_holder, ca_dir, &master_key]() -> std::shared_ptr<const liveqx::tls::DeviceCa> {
+            device_ca_provider = [ca_holder, ca_dir, &master_key]() -> std::shared_ptr<const liveqx::tls::DeviceCa> {
                 std::lock_guard<std::mutex> lk(ca_holder->mu);
                 if (ca_holder->ca) return ca_holder->ca;
                 const auto now = static_cast<std::int64_t>(std::time(nullptr));
@@ -991,13 +995,22 @@ int main(int argc, char* argv[]) {
                 ca_holder->ca = std::shared_ptr<const liveqx::tls::DeviceCa>(std::move(ca));
                 return ca_holder->ca;
             };
-            eo.clock_offset_s = [&time_repo]() -> std::optional<std::int64_t> {
+            auto clock_offset_s = [&time_repo]() -> std::optional<std::int64_t> {
                 auto cur = time_repo.load();
                 if (cur && cur->ntp.enabled && cur->ntp.last_offset_ms)
                     return *cur->ntp.last_offset_ms / 1000;
                 return std::nullopt;
             };
+            liveqx::players::EnrollOptions eo;
+            eo.ca             = device_ca_provider;
+            eo.clock_offset_s = clock_offset_s;
             enroll_service = std::make_unique<liveqx::players::EnrollService>(players_db, std::move(eo));
+
+            liveqx::players::RenewOptions ro;
+            ro.ca             = device_ca_provider;
+            ro.clock_offset_s = clock_offset_s;
+            ro.ca_cert_pem    = [&players_service] { return players_service->caCertPem(); };
+            renew_service = std::make_unique<liveqx::players::RenewService>(players_db, std::move(ro));
         } else {
             LOG_ERROR("Players: cannot open {} — player integration disabled",
                       paths.playersDb().string());
@@ -1166,6 +1179,61 @@ int main(int argc, char* argv[]) {
         // up a fresh ControlApi over the same shared dependencies. Every
         // iteration after the first re-arms g_running because SIGINT/
         // SIGTERM use the same flag for actual shutdown.
+
+        // Device port (A6): mTLS for heartbeat and renew, a separate listener
+        // that must not sit behind a reverse proxy. It needs the server's TLS
+        // certificate, so it starts only now that the TLS bindings are known.
+        // The device CA may not exist yet (no root ceremony): the port then
+        // refuses every certificate, and a small watcher adds the trust
+        // anchors as soon as the CA appears — no restart.
+        std::jthread device_trust_thread;
+        if (players_service && renew_service) {
+            json dev = json::object();
+            if (cfg.contains("players") && cfg["players"].is_object() &&
+                cfg["players"].contains("device_api") && cfg["players"]["device_api"].is_object())
+                dev = cfg["players"]["device_api"];
+            if (dev.value("enabled", true)) {
+                if (tls_bindings.cert_path.empty() || tls_bindings.key_path.empty()) {
+                    LOG_WARN("Players: device port not started — it needs the server's own TLS "
+                             "certificate (tls.mode auto or provided); players cannot connect");
+                } else {
+                    liveqx::players::DeviceApiOptions dopt;
+                    dopt.bind      = dev.value("bind", std::string{"0.0.0.0"});
+                    dopt.port      = dev.value("port", 8444);
+                    dopt.workers   = dev.value("workers", 16);
+                    dopt.cert_path = tls_bindings.cert_path;
+                    dopt.key_path  = tls_bindings.key_path;
+                    dopt.events    = &event_bus;
+                    dopt.renew     = renew_service.get();
+                    device_api = std::make_unique<liveqx::players::DeviceApi>(
+                        players_db, cert_revocations, std::move(dopt));
+                    if (!device_api->start()) {
+                        LOG_ERROR("Players: device port failed to start — players cannot connect");
+                        device_api.reset();
+                    }
+                }
+            }
+            if (device_api) {
+                auto* api_ptr = device_api.get();
+                auto provider = device_ca_provider;
+                device_trust_thread = std::jthread([api_ptr, provider](std::stop_token st) {
+                    std::string loaded_for;
+                    while (!st.stop_requested()) {
+                        if (auto ca = provider()) {
+                            const std::string pem = ca->certPem() + ca->chainPem() + ca->rootPem();
+                            if (pem != loaded_for) {
+                                LOG_INFO("Players: device CA trust anchors loaded ({} certificate(s))",
+                                         api_ptr->addTrustAnchors(pem));
+                                loaded_for = pem;
+                            }
+                        }
+                        for (int i = 0; i < 100 && !st.stop_requested(); ++i)
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                });
+            }
+        }
+
         std::atomic<bool> tls_reload_pending{false};
         do {
             ControlApi api(api_port, manager, &metrics, livez_opts, &gateways,

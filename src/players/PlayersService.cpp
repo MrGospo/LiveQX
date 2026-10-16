@@ -143,6 +143,12 @@ std::string PlayersService::updateSettings(const std::map<std::string, std::stri
     return db_.setSettings(patch) ? "" : "storage_error";
 }
 
+std::string PlayersService::caCertPem() {
+    const PlayersSettings s = settings();
+    std::string pem = !s.ca_cert_pem.empty() ? s.ca_cert_pem : slurp(opts_.ca_cert_path);
+    return parsesAsCertificate(pem) ? pem : std::string{};
+}
+
 std::string PlayersService::checkReady(const PlayersSettings& s, std::string& ca_pem) {
     if (s.server_url.empty() || s.device_api_url.empty() || s.mqtt_broker_url.empty())
         return "not_configured";
