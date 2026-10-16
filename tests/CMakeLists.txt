@@ -94,6 +94,7 @@ add_executable(liveqx-tests
     test_device_ca_two_tier.cpp
     test_device_ca_cli.cpp
     test_credential_rotation.cpp
+    test_pki_export.cpp
     test_tls_config.cpp
     test_ts_packet.cpp
     test_ts_psi_parser.cpp
