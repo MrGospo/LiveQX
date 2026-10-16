@@ -24,6 +24,7 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <thread>
 
 namespace fs = std::filesystem;
@@ -556,3 +557,24 @@ TEST_F(PlayersDbTest, MigrationIsIdempotent) {
     reopen();
     EXPECT_EQ(db_->schemaVersion(), PlayersDb::kSchemaVersion);
 }
+
+// ── all revoked certificates, whatever the CA generation ────────────────────
+TEST_F(PlayersDbTest, RevokedCertsListsEveryGenerationButNotLiveOnesOrExpiredOnes) {
+    const auto a = enrolled("A100", /*gen=*/1, "A");
+    const auto b = enrolled("B200", /*gen=*/2, "B");
+    const auto live = enrolled("C300", /*gen=*/1, "C");
+    ASSERT_TRUE(db_->revokePlayer(a, "x", kT0 + 20));
+    ASSERT_TRUE(db_->revokePlayer(b, "y", kT0 + 21));
+
+    auto all = db_->revokedCerts(kT0 + 30);
+    ASSERT_EQ(all.size(), 2u);
+    std::set<std::string> serials;
+    for (const auto& c : all) serials.insert(c.serial_hex);
+    EXPECT_EQ(serials, (std::set<std::string>{"A100", "B200"}));
+    EXPECT_FALSE(serials.count("C300")) << "a live certificate is not revoked";
+    (void)live;
+
+    // Past its notAfter a revoked certificate no longer matters (it is expired anyway).
+    EXPECT_TRUE(db_->revokedCerts(kT0 + 400LL * 86400).empty());
+}
+

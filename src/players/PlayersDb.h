@@ -176,6 +176,9 @@ public:
     // The next CRL number for a generation: 1, 2, 3 ... never repeats, never
     // goes down, survives restarts. 0 on failure.
     std::int64_t         nextCrlNumber(int generation);
+    // Every revoked certificate that has not expired yet, all CA generations
+    // together: what a revocation list is rebuilt from at startup.
+    std::vector<CertRow> revokedCerts(std::int64_t now = 0);
     // Deletes certificate records whose notAfter is before `now`. Returns how many.
     std::size_t          purgeExpiredCerts(std::int64_t now = 0);
 

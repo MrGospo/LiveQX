@@ -50,6 +50,7 @@
 #include "mounts/MountsDb.h"
 #include "players/EnrollService.h"
 #include "players/PlayersDb.h"
+#include "players/RevocationList.h"
 #include "utils/DeviceCa.h"
 #include "players/PlayersService.h"
 #include "plugins/PluginManager.h"
@@ -938,12 +939,21 @@ int main(int argc, char* argv[]) {
         // the module (the endpoints answer 503); it must not stop the
         // broadcast.
         liveqx::players::PlayersDb players_db(paths.playersDb());
+        liveqx::players::RevocationList cert_revocations;
         std::unique_ptr<liveqx::players::PlayersService> players_service;
         std::unique_ptr<liveqx::players::EnrollService>  enroll_service;
         if (players_db.open()) {
             liveqx::players::PlayersServiceOptions po;
             po.ca_cert_path = paths.tlsDir() / "ca.crt";
             po.events       = &event_bus;
+            // Revocation, layer 1: the in-process list is rebuilt from the
+            // database (the source of truth) and kept current by this hook.
+            // Layers 2 and 3 (broker, CRL file) join the same hook later.
+            LOG_INFO("Players: {} revoked certificate(s) loaded",
+                     cert_revocations.rebuildFrom(players_db));
+            po.on_certs_revoked = [&cert_revocations](const std::vector<liveqx::players::CertRow>& c) {
+                cert_revocations.add(c);
+            };
             po.ntp_hint     = [&time_repo]() -> std::vector<std::string> {
                 auto cur = time_repo.load();
                 if (cur && cur->ntp.enabled) return cur->ntp.servers;

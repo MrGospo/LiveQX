@@ -98,6 +98,7 @@ add_executable(liveqx-tests
     test_players_db.cpp
     test_players_service.cpp
     test_client_ip.cpp
+    test_revocation_list.cpp
     test_enroll_service.cpp
     test_pki_export.cpp
     test_tls_config.cpp
@@ -166,6 +167,7 @@ add_executable(liveqx-tests
     ../src/players/PlayersDb.cpp
     ../src/players/PlayersService.cpp
     ../src/players/EnrollService.cpp
+    ../src/players/RevocationList.cpp
     ../src/utils/TlsConfig.cpp
     ../src/utils/RuntimeLock.cpp
     ../src/metrics/ChannelProfiler.cpp

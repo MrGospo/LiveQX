@@ -734,6 +734,18 @@ std::vector<CertRow> PlayersDb::revokedSerials(int generation, std::int64_t now)
     return out;
 }
 
+std::vector<CertRow> PlayersDb::revokedCerts(std::int64_t now) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<CertRow> out;
+    if (!db_) return out;
+    Stmt s(db_, (std::string("SELECT ") + kCertCols +
+                 " FROM player_certs WHERE revoked_at IS NOT NULL AND not_after>=? "
+                 "ORDER BY generation, serial_hex").c_str());
+    s.i64(1, nowOr(now));
+    while (s.step() == SQLITE_ROW) out.push_back(readCert(s));
+    return out;
+}
+
 std::int64_t PlayersDb::nextCrlNumber(int generation) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!db_) return 0;

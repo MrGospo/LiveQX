@@ -252,6 +252,7 @@ set(SOURCES
     src/players/PlayersDb.cpp
     src/players/PlayersService.cpp
     src/players/EnrollService.cpp
+    src/players/RevocationList.cpp
     src/utils/TlsConfig.cpp
     src/utils/ClientIp.cpp
     src/utils/CpuAffinity.cpp
