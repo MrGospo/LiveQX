@@ -48,7 +48,9 @@
 #include "mounts/MountManager.h"
 #include "mounts/MountdRpcClient.h"
 #include "mounts/MountsDb.h"
+#include "players/EnrollService.h"
 #include "players/PlayersDb.h"
+#include "utils/DeviceCa.h"
 #include "players/PlayersService.h"
 #include "plugins/PluginManager.h"
 #include "preview/PreviewManager.h"
@@ -937,6 +939,7 @@ int main(int argc, char* argv[]) {
         // broadcast.
         liveqx::players::PlayersDb players_db(paths.playersDb());
         std::unique_ptr<liveqx::players::PlayersService> players_service;
+        std::unique_ptr<liveqx::players::EnrollService>  enroll_service;
         if (players_db.open()) {
             liveqx::players::PlayersServiceOptions po;
             po.ca_cert_path = paths.tlsDir() / "ca.crt";
@@ -949,6 +952,42 @@ int main(int argc, char* argv[]) {
             players_service = std::make_unique<liveqx::players::PlayersService>(
                 players_db, std::move(po));
             LOG_INFO("Players: db={}", paths.playersDb().string());
+
+            // The device CA exists only after the root-signing ceremony
+            // (--device-ca-*): the server never creates one by itself, so
+            // the key that signs everything is not generated on the server.
+            // Until then enroll answers 503 ca_unavailable. The CA is picked
+            // up lazily, so finishing the ceremony needs no restart; a
+            // failed look is not repeated more often than every 10 s.
+            struct DeviceCaHolder {
+                std::mutex mu;
+                std::shared_ptr<const liveqx::tls::DeviceCa> ca;
+                std::int64_t last_try{0};
+            };
+            auto ca_holder = std::make_shared<DeviceCaHolder>();
+            const auto ca_dir = paths.deviceCaDir();
+            liveqx::players::EnrollOptions eo;
+            eo.ca = [ca_holder, ca_dir, &master_key]() -> std::shared_ptr<const liveqx::tls::DeviceCa> {
+                std::lock_guard<std::mutex> lk(ca_holder->mu);
+                if (ca_holder->ca) return ca_holder->ca;
+                const auto now = static_cast<std::int64_t>(std::time(nullptr));
+                if (now - ca_holder->last_try < 10) return nullptr;
+                ca_holder->last_try = now;
+                std::string err;
+                auto ca = liveqx::tls::DeviceCa::open(ca_dir, master_key, err, /*allow_create=*/false);
+                if (!ca) return nullptr;
+                LOG_INFO("Device CA opened (generation {}, {})", ca->generation(),
+                         ca->twoTier() ? "two-tier" : "single");
+                ca_holder->ca = std::shared_ptr<const liveqx::tls::DeviceCa>(std::move(ca));
+                return ca_holder->ca;
+            };
+            eo.clock_offset_s = [&time_repo]() -> std::optional<std::int64_t> {
+                auto cur = time_repo.load();
+                if (cur && cur->ntp.enabled && cur->ntp.last_offset_ms)
+                    return *cur->ntp.last_offset_ms / 1000;
+                return std::nullopt;
+            };
+            enroll_service = std::make_unique<liveqx::players::EnrollService>(players_db, std::move(eo));
         } else {
             LOG_ERROR("Players: cannot open {} — player integration disabled",
                       paths.playersDb().string());
@@ -1124,7 +1163,8 @@ int main(int argc, char* argv[]) {
                            &event_bus, &preview, &stress_service, &plugins_mgr,
                            &master_key, &mounts_mgr, tls_bindings,
                            &time_repo, &time_src, sntp_client.get(),
-                           &audit_logger, &audit_rate, players_service.get());
+                           &audit_logger, &audit_rate, players_service.get(),
+                           enroll_service.get());
             api.setOnTlsReload([&]() {
                 tls_reload_pending.store(true, std::memory_order_release);
                 g_running.store(false, std::memory_order_release);

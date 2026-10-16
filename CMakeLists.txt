@@ -251,6 +251,7 @@ set(SOURCES
     src/utils/CredentialStore.cpp
     src/players/PlayersDb.cpp
     src/players/PlayersService.cpp
+    src/players/EnrollService.cpp
     src/utils/TlsConfig.cpp
     src/utils/CpuAffinity.cpp
     src/utils/LegacyMigration.cpp

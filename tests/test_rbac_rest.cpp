@@ -320,3 +320,12 @@ TEST(RbacRest, PlayersEndpointsNeedAToken) {
     EXPECT_EQ(cli.Get("/api/players")->status, 401);
     EXPECT_EQ(cli.Get("/api/players/settings")->status, 401);
 }
+
+TEST(RbacRest, EnrollIsOpenBecauseThePlayerHasNoAccountYet) {
+    // A player that is pairing has only a one-time token; no bearer.
+    RbacRestFixture f(nextPort());
+    auto cli = f.client();
+    auto r = cli.Post("/api/players/enroll", "{}", "application/json");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 503) << "past the role check, stopped by the missing module";
+}

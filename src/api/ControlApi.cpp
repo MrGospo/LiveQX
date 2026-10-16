@@ -1,6 +1,7 @@
 #include "api/ControlApi.h"
 
 #include <algorithm>
+#include <ctime>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -48,6 +49,7 @@ extern "C" {
 #include "plugins/PluginManager.h"
 #include "mounts/MountManager.h"
 #include "mounts/MountSpec.h"
+#include "players/EnrollService.h"
 #include "players/PlayersService.h"
 #include "audit/AuditDb.h"
 #include "audit/AuditLogger.h"
@@ -96,6 +98,7 @@ struct ControlApi::Impl {
     liveqx::audit::AuditLogger*            audit;
     liveqx::audit::AuditRateLimiter*       audit_rate;
     liveqx::players::PlayersService*       players;
+    liveqx::players::EnrollService*        enroll;
     TlsBindings                                    tls_bindings;
     std::function<void()>                          on_tls_reload;
     std::mutex                                     metrics_token_mu;
@@ -118,13 +121,14 @@ struct ControlApi::Impl {
          liveqx::audit::AuditLogger* al,
          liveqx::audit::AuditRateLimiter* arl,
          liveqx::players::PlayersService* pls,
+         liveqx::players::EnrollService* enr,
          const TlsBindings& tls)
         : bind_addr(tls.bind.empty() ? std::string{"0.0.0.0"} : tls.bind),
           manager(m), metrics(mc), livez(lz), gateways(gw), auth(a),
           ldap_repo(lr), smtp_repo(sr), rbac(rb), events(ev), preview(pv),
           stress(st), plugins(pl), master_key(mk), mounts(mn),
           time_repo(tr), time_src(ts), sntp(sn),
-          audit(al), audit_rate(arl), players(pls),
+          audit(al), audit_rate(arl), players(pls), enroll(enr),
           tls_bindings(tls) {
         if (!tls.cert_path.empty() && !tls.key_path.empty()) {
             auto* ssl = new httplib::SSLServer(
@@ -419,6 +423,10 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
 
     // Player integration. Viewers may look, only admins create, revoke,
     // delete or touch the settings: those decide who may connect.
+    // enroll is open on purpose: a player that is pairing has no account, only a
+    // one-time token in the body. Everything it can learn is bounded by
+    // EnrollService (uniform 401, rate limits).
+    rbac.registerEndpoint("POST /api/players/enroll",               rbacOpen());
     rbac.registerEndpoint("GET /api/players",                       rbacRole(RbacRole::Viewer));
     rbac.registerEndpoint("GET /api/players/{id}",                  rbacRole(RbacRole::Viewer));
     rbac.registerEndpoint("POST /api/players",                      rbacRole(RbacRole::Admin));
@@ -938,12 +946,13 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
                        liveqx::auth::ISntpClient* sntp,
                        liveqx::audit::AuditLogger* audit,
                        liveqx::audit::AuditRateLimiter* audit_rate,
-                       liveqx::players::PlayersService* players)
+                       liveqx::players::PlayersService* players,
+                       liveqx::players::EnrollService* enroll)
     : impl_(std::make_unique<Impl>(manager, metrics, livez, gateways, auth,
                                    ldap_repo, smtp_repo, rbac, events,
                                    preview, stress, plugins, master_key,
                                    mounts, time_repo, time_src, sntp,
-                                   audit, audit_rate, players, tls)),
+                                   audit, audit_rate, players, enroll, tls)),
       port_(port) {
     auto* impl = impl_.get();
     auto& s    = *impl_->server;
@@ -961,6 +970,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     auto* mk   = impl_->master_key;
     auto* mn   = impl_->mounts;
     auto* pls  = impl_->players;
+    auto* enr  = impl_->enroll;
     auto* tr   = impl_->time_repo;
     auto* ts   = impl_->time_src;
     auto* sn   = impl_->sntp;
@@ -3148,6 +3158,35 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         for (unsigned char ch : r) if (ch < 0x20 || ch == 0x7f) return std::nullopt;
         return r;
     };
+
+    // POST /api/players/enroll — A4. Open endpoint (see the RBAC note). Every
+    // answer, errors included, carries X-Server-Time (D-7).
+    s.Post("/api/players/enroll",
+           [enr, players_unavailable](const httplib::Request& req, httplib::Response& res) {
+        auto stampTime = [&res] {
+            std::time_t t = std::time(nullptr);
+            std::tm tm{};
+            gmtime_r(&t, &tm);
+            char buf[32];
+            std::strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm);
+            res.set_header("X-Server-Time", buf);
+        };
+        stampTime();
+        if (!enr) { players_unavailable(res); return; }
+        json body;
+        if (!parseJsonBody(req, res, body)) return;
+        auto str = [&body](const char* k) {
+            return body.is_object() && body.contains(k) && body[k].is_string()
+                       ? body[k].get<std::string>() : std::string{};
+        };
+        liveqx::players::EnrollRequest er{str("player_id"), str("bootstrap_token"), str("csr_pem"),
+                                          req.remote_addr};
+        auto out = enr->enroll(er);
+        if (out.retry_after_s > 0) res.set_header("Retry-After", std::to_string(out.retry_after_s));
+        // The token and the CSR never reach the audit row; only the verdict.
+        setAuditContextOverride(out.audit_action, json{{"reason", out.audit_reason}}, "player", out.player_id);
+        writeJson(res, out.status, out.body);
+    });
 
     s.Get("/api/players/settings",
           [pls, players_unavailable](const httplib::Request&, httplib::Response& res) {

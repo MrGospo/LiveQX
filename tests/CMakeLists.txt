@@ -97,6 +97,7 @@ add_executable(liveqx-tests
     test_credential_rotation.cpp
     test_players_db.cpp
     test_players_service.cpp
+    test_enroll_service.cpp
     test_pki_export.cpp
     test_tls_config.cpp
     test_ts_packet.cpp
@@ -162,6 +163,7 @@ add_executable(liveqx-tests
     ../src/utils/CredentialStore.cpp
     ../src/players/PlayersDb.cpp
     ../src/players/PlayersService.cpp
+    ../src/players/EnrollService.cpp
     ../src/utils/TlsConfig.cpp
     ../src/utils/RuntimeLock.cpp
     ../src/metrics/ChannelProfiler.cpp
@@ -436,6 +438,9 @@ add_executable(liveqx-itests
     ../src/utils/Tls.cpp
     ../src/players/PlayersDb.cpp
     ../src/players/PlayersService.cpp
+    ../src/players/EnrollService.cpp
+    ../src/utils/DeviceCa.cpp
+    ../src/auth/SealedServer.cpp
     ../src/utils/TlsConfig.cpp
     ../src/utils/NetIfaces.cpp
     ../src/utils/RuntimeLock.cpp

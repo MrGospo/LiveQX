@@ -26,7 +26,13 @@
 #include "api/ChannelManager.h"
 #include "api/ControlApi.h"
 #include "players/PlayersDb.h"
+#include "players/EnrollService.h"
 #include "players/PlayersService.h"
+#include "auth/MasterKey.h"
+#include "utils/DeviceCa.h"
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
 #include "utils/Tls.h"
 
 namespace {
@@ -42,6 +48,9 @@ struct PlayersApiFixture {
     fs::path                    tmp;
     std::unique_ptr<PlayersDb>  db;
     std::unique_ptr<PlayersService> svc;
+    std::unique_ptr<liveqx::auth::MasterKey> mk;
+    std::shared_ptr<const liveqx::tls::DeviceCa> device_ca;
+    std::unique_ptr<EnrollService> enroll;
     std::vector<CertRow>        crl_hook;
     ChannelManager              manager;
     std::unique_ptr<ControlApi> api;
@@ -63,11 +72,22 @@ struct PlayersApiFixture {
         };
         svc = std::make_unique<PlayersService>(*db, std::move(o));
 
+        mk = std::make_unique<liveqx::auth::MasterKey>((tmp / "master.key").string());
+        EXPECT_TRUE(mk->load());
+        std::string err;
+        auto ca = liveqx::tls::DeviceCa::open(tmp / "device_ca", *mk, err, true);
+        EXPECT_TRUE(ca) << err;
+        device_ca = std::shared_ptr<const liveqx::tls::DeviceCa>(std::move(ca));
+        EnrollOptions eo;
+        eo.ca = [this] { return device_ca; };
+        enroll = std::make_unique<EnrollService>(*db, std::move(eo));
+
         api = std::make_unique<ControlApi>(
             port, manager, nullptr, LivezOptions{}, nullptr, nullptr, nullptr, nullptr,
             /*rbac=*/nullptr, /*events=*/nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
             TlsBindings{}, nullptr, nullptr, nullptr, nullptr, nullptr,
-            with_service ? svc.get() : nullptr);
+            with_service ? svc.get() : nullptr,
+            with_service ? enroll.get() : nullptr);
         api->start();
         httplib::Client cli("127.0.0.1", port);
         for (int i = 0; i < 100; ++i) {
@@ -80,6 +100,8 @@ struct PlayersApiFixture {
     ~PlayersApiFixture() {
         if (api) api->stop();
         api.reset();
+        enroll.reset();
+        device_ca.reset();
         svc.reset();
         db.reset();
         std::error_code ec;
@@ -395,4 +417,97 @@ TEST(ControlApiPlayers, ResponsesMatchTheOpenApiRequiredFields) {
 
     auto rv = cli.Post(("/api/players/" + id + "/revoke-cert").c_str(), "", "application/json");
     expectKeys(json::parse(rv->body), {"revoked_certs"}, "RevokeResult");
+}
+
+// ─── POST /api/players/enroll (open endpoint, A4) ───────────────────────────
+
+namespace {
+std::string csrPem() {
+    EVP_PKEY* key = EVP_EC_gen("P-256");
+    X509_REQ* req = X509_REQ_new();
+    X509_REQ_set_pubkey(req, key);
+    X509_REQ_sign(req, key, EVP_sha256());
+    BIO* b = BIO_new(BIO_s_mem());
+    PEM_write_bio_X509_REQ(b, req);
+    char* d = nullptr;
+    long n = BIO_get_mem_data(b, &d);
+    std::string pem(d, static_cast<size_t>(n));
+    BIO_free_all(b);
+    X509_REQ_free(req);
+    EVP_PKEY_free(key);
+    return pem;
+}
+json enrollBody(const json& pkg, const std::string& csr = csrPem()) {
+    return {{"schema", 1}, {"player_id", pkg["player_id"]},
+            {"bootstrap_token", pkg["bootstrap_token"]}, {"csr_pem", csr}};
+}
+}  // namespace
+
+TEST(ControlApiPlayers, EnrollIssuesACertificateAndStampsTheServerTime) {
+    PlayersApiFixture f(kBasePort + 14);
+    f.configure();
+    auto pkg = f.create("Lobby");
+    auto cli = f.client();
+    auto r = cli.Post("/api/players/enroll", enrollBody(pkg).dump(), "application/json");
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    auto b = json::parse(r->body);
+    EXPECT_EQ(b["schema"], 1);
+    EXPECT_NE(b["client_cert_pem"].get<std::string>().find("BEGIN CERTIFICATE"), std::string::npos);
+    ASSERT_TRUE(r->has_header("X-Server-Time"));
+    const std::string t = r->get_header_value("X-Server-Time");
+    EXPECT_EQ(t.size(), 20u) << t;                       // 2026-10-14T12:00:00Z
+    EXPECT_EQ(t.back(), 'Z');
+    EXPECT_EQ(f.db->findPlayer(pkg["player_id"])->state, PlayerState::Active);
+}
+
+TEST(ControlApiPlayers, EnrollFailuresAreUniformAndStampedToo) {
+    PlayersApiFixture f(kBasePort + 15);
+    f.configure();
+    auto pkg = f.create("Lobby");
+    auto body = enrollBody(pkg);
+    body["bootstrap_token"] = "nope";
+    auto cli = f.client();
+    auto r = cli.Post("/api/players/enroll", body.dump(), "application/json");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 401);
+    EXPECT_EQ(json::parse(r->body), (json{{"error", "invalid_token"}}));
+    EXPECT_TRUE(r->has_header("X-Server-Time"));
+
+    r = cli.Post("/api/players/enroll", "{ nope", "application/json");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 400);
+    EXPECT_TRUE(r->has_header("X-Server-Time"));
+
+    r = cli.Post("/api/players/enroll",
+                 json{{"schema", 1}, {"player_id", 42}, {"bootstrap_token", json::array({1})},
+                      {"csr_pem", csrPem()}}.dump(),
+                 "application/json");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 401) << "wrongly typed fields are just a failed token";
+}
+
+TEST(ControlApiPlayers, EnrollRateLimitCarriesRetryAfter) {
+    PlayersApiFixture f(kBasePort + 16);
+    f.configure();
+    auto pkg = f.create("Lobby");
+    auto body = enrollBody(pkg);
+    body["bootstrap_token"] = "nope";
+    auto cli = f.client();
+    for (int i = 0; i < 3; ++i)
+        ASSERT_EQ(cli.Post("/api/players/enroll", body.dump(), "application/json")->status, 401);
+    auto r = cli.Post("/api/players/enroll", enrollBody(pkg).dump(), "application/json");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 429);
+    EXPECT_EQ(json::parse(r->body)["error"], "rate_limited");
+    ASSERT_TRUE(r->has_header("Retry-After"));
+    EXPECT_GT(std::stoi(r->get_header_value("Retry-After")), 0);
+}
+
+TEST(ControlApiPlayers, EnrollWithoutTheModuleIs503) {
+    PlayersApiFixture f(kBasePort + 17, /*with_service=*/false);
+    auto cli = f.client();
+    auto r = cli.Post("/api/players/enroll", "{}", "application/json");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 503);
 }

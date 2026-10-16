@@ -4289,6 +4289,84 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/players/enroll:
+    post:
+      tags: [Players]
+      summary: Pair a player (exchange a one-time token + CSR for a certificate)
+      description: |
+        Открытый endpoint: у привязываемого плеера ещё нет учётной записи,
+        только одноразовый `bootstrap_token` из пакета привязки. Плеер сам
+        создаёт ключ и CSR (ECDSA P-256 / SHA-256, не более 4096 байт);
+        сервер ключ не видит. CN сертификата всегда равен `player_id`, CN из
+        CSR игнорируется. Токен сгорает при первой успешной выдаче; CSR,
+        который не удалось подписать, токен не сжигает.
+
+        Все причины отказа по токену (неверный, просрочен, использован,
+        плеера нет или он отозван) намеренно неразличимы: `401 invalid_token`.
+        Попытки подбора ограничиваются по адресу клиента и по `player_id`
+        (`429`, заголовок `Retry-After`). Каждый ответ, включая ошибки,
+        содержит `X-Server-Time` (RFC 3339 UTC).
+
+        Центр устройств создаётся только церемонией (`--device-ca-*`), сам
+        сервер его не создаёт: до её завершения — `503 ca_unavailable`.
+        Если у сервера настроен NTP и его часы заметно расходятся с ним —
+        `503 server_clock_unsynced`.
+        Audit event: `player.enroll` / `player.enroll_denied` /
+        `player.enroll_failed` (причина — в details; токен и CSR не пишутся).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [player_id, bootstrap_token, csr_pem]
+              properties:
+                schema: { type: integer, example: 1 }
+                player_id: { type: string, format: uuid }
+                bootstrap_token: { type: string }
+                csr_pem: { type: string, maxLength: 4096 }
+      responses:
+        '200':
+          description: Certificate issued.
+          headers:
+            X-Server-Time:
+              schema: { type: string, format: date-time }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schema, client_cert_pem]
+                properties:
+                  schema: { type: integer, example: 1 }
+                  client_cert_pem: { type: string }
+                  client_chain_pem:
+                    type: string
+                    description: Промежуточный сертификат центра устройств; поля нет при одноуровневом центре.
+        '400':
+          description: '`invalid_json` или `invalid_csr`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: '`invalid_token` (причины не различаются).'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: '`rate_limited`; см. `Retry-After`.'
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: '`ca_unavailable`, `server_clock_unsynced` или модуль плееров не подключён.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/players/settings:
     get:
       tags: [Players]
