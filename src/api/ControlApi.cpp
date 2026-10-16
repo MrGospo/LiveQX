@@ -614,6 +614,7 @@ liveqx::audit::Category categoryForApiPath(std::string_view p) noexcept {
     if (p.rfind("/api/gateways", 0) == 0)      return C::Gateway;
     if (p.rfind("/api/plugins", 0) == 0)       return C::Plugin;
     if (p.rfind("/api/system/mounts", 0) == 0) return C::Mount;
+    if (p.rfind("/api/players", 0) == 0)       return C::Player;
     if (p.rfind("/api/system", 0) == 0)        return C::System;
     if (p.rfind("/api/channels", 0) == 0) {
         return p.find("/outputs") != std::string_view::npos
@@ -747,6 +748,7 @@ void installAuditPostHandler(httplib::Server& s,
                         case C::Output:  ev.target_type = "output";  break;
                         case C::Gateway: ev.target_type = "gateway"; break;
                         case C::Mount:   ev.target_type = "mount";   break;
+                        case C::Player:  ev.target_type = "player";  break;
                         case C::Plugin:  ev.target_type = "plugin";  break;
                         default: break;
                     }
@@ -3846,13 +3848,8 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
 
     s.Get("/api/audit/categories",
           [](const httplib::Request&, httplib::Response& res) {
-        using C = liveqx::audit::Category;
-        constexpr C kAll[] = {
-            C::Auth, C::Channel, C::Output, C::Gateway,
-            C::Plugin, C::Mount, C::System, C::Access,
-        };
         json arr = json::array();
-        for (auto c : kAll) {
+        for (auto c : liveqx::audit::kAllCategories) {
             arr.push_back({
                 {"name",           liveqx::audit::categoryName(c)},
                 {"retention_days", liveqx::audit::defaultRetentionDays(c)},

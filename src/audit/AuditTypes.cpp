@@ -12,6 +12,7 @@ const char* categoryName(Category c) noexcept {
         case Category::Mount:   return "mount";
         case Category::System:  return "system";
         case Category::Access:  return "access";
+        case Category::Player:  return "player";
     }
     return "system";
 }
@@ -25,6 +26,7 @@ std::optional<Category> categoryFromString(std::string_view s) noexcept {
     if (s == "mount")   return Category::Mount;
     if (s == "system")  return Category::System;
     if (s == "access")  return Category::Access;
+    if (s == "player")  return Category::Player;
     return std::nullopt;
 }
 
@@ -42,6 +44,8 @@ int defaultRetentionDays(Category c) noexcept {
         case Category::Mount:   return 90;
         case Category::System:  return 30;
         case Category::Access:  return 30;
+        // Pairing and revoking a device is an access decision: kept like logins.
+        case Category::Player:  return 365;
     }
     return 30;
 }

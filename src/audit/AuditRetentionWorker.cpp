@@ -9,11 +9,6 @@
 namespace liveqx::audit {
 namespace {
 
-constexpr Category kAllCategories[] = {
-    Category::Auth, Category::Channel, Category::Output, Category::Gateway,
-    Category::Plugin, Category::Mount, Category::System, Category::Access,
-};
-
 std::int64_t nowUnixMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();

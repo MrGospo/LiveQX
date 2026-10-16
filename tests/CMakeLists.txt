@@ -54,6 +54,7 @@ add_executable(liveqx-tests
     test_audit_db.cpp
     test_audit_logger.cpp
     test_audit_rate_limiter.cpp
+    test_audit_types.cpp
     test_audit_payload.cpp
     ../src/audit/AuditTypes.cpp
     ../src/audit/AuditDb.cpp

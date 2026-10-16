@@ -27,6 +27,16 @@ enum class Category {
     Mount,      // storage mounts CRUD
     System,     // system config, master-key rotation, service restart
     Access,     // rejected access — RBAC deny, rate-limit trip
+    Player,     // player (LiveQX-Player) pairing, revocation, settings
+};
+
+// Every category, once. Anything that needs "all of them" (retention worker,
+// the categories endpoint) iterates this, so a new category cannot be added to
+// the enum and forgotten in a hand-written copy of the list.
+inline constexpr Category kAllCategories[] = {
+    Category::Auth,   Category::Channel, Category::Output, Category::Gateway,
+    Category::Plugin, Category::Mount,   Category::System, Category::Access,
+    Category::Player,
 };
 
 const char* categoryName(Category c) noexcept;
@@ -59,7 +69,7 @@ struct AuditEvent {
     std::string                  actor_ip;
 
     // ── target (what was acted on) ──────────────────────────────────
-    // target_type: "channel"|"output"|"gateway"|"plugin"|"user"|"mount"|"system"|""
+    // target_type: "channel"|"output"|"gateway"|"plugin"|"user"|"mount"|"player"|"system"|""
     // target_id:   opaque string (channel_id, username, mount unit path…).
     std::string                  target_type;
     std::string                  target_id;

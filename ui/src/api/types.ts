@@ -183,7 +183,7 @@ export interface SseEvent {
 // Rows are hand-typed here because /api/audit/* is not (yet) in openapi.yaml.
 export type AuditCategory =
   'auth' | 'channel' | 'output' | 'gateway' |
-  'plugin' | 'mount' | 'system' | 'access';
+  'plugin' | 'mount' | 'system' | 'access' | 'player';
 
 export interface AuditTrailEvent {
   id:              number;
