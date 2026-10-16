@@ -17,6 +17,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -32,6 +33,7 @@
 #include "auth/JwtIssuer.h"
 #include "auth/MasterKey.h"
 #include "mounts/MountsDb.h"
+#include "utils/CredentialStore.h"
 #include "utils/DeviceCa.h"
 #include "utils/FileOwnership.h"
 #include "utils/RuntimeLock.h"
@@ -161,24 +163,293 @@ bool reencryptAll(const std::vector<RotationEntry>& entries,
 
 }  // namespace detail
 
-int rotateMasterKey(const std::filesystem::path& auth_db_path,
-                    const std::filesystem::path& key_file_path,
-                    const std::filesystem::path& mounts_db_path,
-                    const std::filesystem::path& device_ca_dir,
-                    const std::filesystem::path& state_dir,
-                    const std::string& key_store,
-                    const std::function<std::optional<std::string>(std::string_view)>& passphrase,
-                    const keywrap::KdfParams& kdf) {
-    namespace fs = std::filesystem;
+namespace {
 
-    if (key_store != "file") {
-        std::cerr << "ERROR: master_key_store is \"" << key_store
-                  << "\": the key is delivered from outside (systemd credential "
-                     "or environment) and cannot be rotated here. Create the new "
-                     "key in its store yourself and re-encrypt the secrets.\n";
-        return 1;
+namespace fs = std::filesystem;
+using FreshKey = std::array<std::uint8_t, MasterKey::kKeyBytes>;
+using PassphraseFn = std::function<std::optional<std::string>(std::string_view)>;
+
+// Renames `live` to a timestamped backup and `staged` into its place. If the
+// second step fails the databases are already on the new key, so say exactly
+// where everything is.
+bool commitReplace(const fs::path& live, const fs::path& staged, std::string& backup) {
+    const auto unix_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const fs::path bak_path = live.string() + ".bak." + std::to_string(unix_ns);
+    backup = bak_path.string();
+
+    std::error_code ec;
+    fs::rename(live, bak_path, ec);
+    if (ec) {
+        std::cerr << "ERROR: cannot back up the current key to " << bak_path
+                  << ": " << ec.message() << "\n";
+        // The staged file is NOT removed: it holds the key the secrets in the
+        // databases are already encrypted with.
+        std::cerr << "NOTE: the new key is at " << staged
+                  << ". The secrets are already encrypted with it - move it into "
+                     "place by hand: mv " << staged << " " << live << "\n";
+        return false;
+    }
+    fs::rename(staged, live, ec);
+    if (ec) {
+        std::cerr << "ERROR: cannot move the new key into place: " << ec.message() << "\n";
+        std::cerr << "NOTE: the backup is at " << bak_path << ", the new key at "
+                  << staged << ". The secrets are already encrypted with the new "
+                     "key - do NOT restore the backup without re-encrypting them.\n";
+        return false;
+    }
+    return true;
+}
+
+// Where the master key lives and how a rotated one takes its place. The
+// rotation itself (collect and check every secret, stage the new key, re-seal
+// and re-encrypt, commit) is the same for every kind of storage.
+class RotationKeyStore {
+public:
+    virtual ~RotationKeyStore() = default;
+    virtual std::string where() const = 0;
+    // Opens the current key. Prints the reason and returns nullptr on failure.
+    virtual std::unique_ptr<MasterKey> openCurrent() = 0;
+    // Writes the new key next to the current one without putting it in effect.
+    virtual bool stage(const FreshKey& fresh) = 0;
+    // Opens the staged key, proving it reads back.
+    virtual std::unique_ptr<MasterKey> openStaged() = 0;
+    virtual void discardStaged() = 0;
+    // Backs the current key up and puts the staged one in its place.
+    virtual bool commit(std::string& backup) = 0;
+};
+
+// A key file: bare, or wrapped with a passphrase (LQXKEY1).
+class FileKeyStore final : public RotationKeyStore {
+public:
+    FileKeyStore(fs::path key_file, PassphraseFn passphrase, keywrap::KdfParams kdf)
+        : key_file_(std::move(key_file)), tmp_(key_file_.string() + ".new"),
+          passphrase_(std::move(passphrase)), kdf_(kdf) {}
+    ~FileKeyStore() override { wipePass(); }
+
+    std::string where() const override { return key_file_.string(); }
+
+    std::unique_ptr<MasterKey> openCurrent() override {
+        // The old key is the starting point: there must be a file to move
+        // away from, not an empty source. The operator starts the server once
+        // (auto-generation) or provides the key by hand.
+        if (!fs::exists(key_file_)) {
+            std::cerr << "ERROR: master key file not found at " << key_file_ << "\n";
+            return nullptr;
+        }
+        auto old_key = std::make_unique<MasterKey>(key_file_.string());
+        // A passphrase-wrapped key is opened with the operator's passphrase;
+        // the new key is wrapped under the same one.
+        wrapped_ = !old_key->load() && old_key->sealed();
+        if (wrapped_) {
+            if (!passphrase_) {
+                std::cerr << "ERROR: the master key at " << key_file_
+                          << " is passphrase-protected; run the rotation from a "
+                             "terminal or with --passphrase-stdin\n";
+                return nullptr;
+            }
+            auto p = passphrase_("Current passphrase");
+            if (!p) {
+                std::cerr << "ERROR: the master key is passphrase-protected and no "
+                             "passphrase was supplied\n";
+                return nullptr;
+            }
+            pass_ = std::move(*p);
+            std::string unlock_err;
+            if (!old_key->unlock(pass_, unlock_err)) {
+                std::cerr << "ERROR: " << unlock_err << "\n";
+                wipePass();
+                return nullptr;
+            }
+        }
+        if (!old_key->loaded()) {
+            std::cerr << "ERROR: cannot load current master key from " << key_file_ << "\n";
+            return nullptr;
+        }
+
+        // The new key must land where the service reads it. An environment
+        // variable and a systemd credential are delivered from outside.
+        switch (old_key->source()) {
+            case MasterKey::Source::Env:
+                std::cerr << "ERROR: the key comes from LIVEQX_MASTER_KEY; it cannot "
+                             "be rotated here. Change the variable yourself and "
+                             "re-encrypt the secrets.\n";
+                return nullptr;
+            case MasterKey::Source::EnvFile: {
+                if (old_key->getInfo().protection == "systemd_credential") {
+                    std::cerr << "ERROR: the key is a systemd credential delivered to "
+                                 "this process; run the rotation with master_key_store "
+                                 "set to \"creds\" in the config instead.\n";
+                    return nullptr;
+                }
+                std::error_code eq_ec;
+                if (!fs::equivalent(old_key->envFilePath(), key_file_, eq_ec)) {
+                    std::cerr << "ERROR: the service reads its key from "
+                              << old_key->envFilePath() << " (LIVEQX_MASTER_KEY_FILE), "
+                              << "not from " << key_file_ << ".\n";
+                    return nullptr;
+                }
+                break;
+            }
+            default:
+                break;
+        }
+        return old_key;
     }
 
+    bool stage(const FreshKey& fresh) override {
+        std::error_code ec;
+        fs::remove(tmp_, ec);   // leftovers of somebody else's unfinished rotation
+
+        // What goes into the file: the bare key, or - for a passphrase-protected
+        // key - the new key wrapped under the same passphrase.
+        std::string bytes(reinterpret_cast<const char*>(fresh.data()), fresh.size());
+        if (wrapped_) {
+            keywrap::Key k{};
+            std::memcpy(k.data(), fresh.data(), k.size());
+            bytes = keywrap::wrap(k, pass_, kdf_);
+            sodium_memzero(k.data(), k.size());
+            if (bytes.empty()) {
+                std::cerr << "ERROR: cannot wrap the new master key\n";
+                return false;
+            }
+        }
+
+        // O_EXCL so we never write through somebody else's file.
+        const int fd = ::open(tmp_.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd < 0) {
+            std::cerr << "ERROR: cannot create " << tmp_ << ": " << std::strerror(errno) << "\n";
+            sodium_memzero(bytes.data(), bytes.size());
+            return false;
+        }
+        const auto written = ::write(fd, bytes.data(), bytes.size());
+        const bool short_write =
+            written <= 0 || (!wrapped_ && written != static_cast<ssize_t>(MasterKey::kKeyBytes));
+        sodium_memzero(bytes.data(), bytes.size());
+        if (short_write) {
+            std::cerr << "ERROR: short write to " << tmp_ << "\n";
+            ::close(fd);
+            fs::remove(tmp_, ec);
+            return false;
+        }
+        if (::fsync(fd) != 0) {
+            LOG_WARN("rotateMasterKey: fsync failed on {}: {}", tmp_.string(), std::strerror(errno));
+        }
+        // Same owner and mode as the key file being replaced (0600 stays 0600;
+        // root:liveqx 0640 in /etc/liveqx stays readable by the service).
+        util::copyOwnerAndMode(fd, key_file_);
+        ::close(fd);
+        return true;
+    }
+
+    std::unique_ptr<MasterKey> openStaged() override {
+        // Read it back through the MasterKey API: the same encrypt/decrypt
+        // pipeline, and proof that the file reads correctly (silent corruption).
+        auto key = std::make_unique<MasterKey>(tmp_.string());
+        bool ok = false;
+        if (wrapped_) {
+            std::string unlock_err;
+            key->load();   // false by design: the file is wrapped
+            ok = key->sealed() && key->unlock(pass_, unlock_err);
+        } else {
+            ok = key->load() && key->loaded();
+        }
+        wipePass();
+        if (!ok) {
+            std::cerr << "ERROR: cannot reload freshly-written master key at " << tmp_ << "\n";
+            return nullptr;
+        }
+        return key;
+    }
+
+    void discardStaged() override {
+        std::error_code ec;
+        fs::remove(tmp_, ec);
+    }
+
+    bool commit(std::string& backup) override { return commitReplace(key_file_, tmp_, backup); }
+
+private:
+    void wipePass() {
+        if (!pass_.empty()) sodium_memzero(pass_.data(), pass_.size());
+        pass_.clear();
+    }
+
+    fs::path             key_file_;
+    fs::path             tmp_;
+    PassphraseFn         passphrase_;
+    keywrap::KdfParams   kdf_;
+    std::string          pass_;
+    bool                 wrapped_{false};
+};
+
+// A systemd credential file (master_key_store = "creds").
+class CredentialKeyStore final : public RotationKeyStore {
+public:
+    CredentialKeyStore(fs::path file, std::string name, util::CredentialStore& store)
+        : file_(std::move(file)), staged_(file_.string() + ".new"),
+          name_(std::move(name)), store_(store) {}
+
+    std::string where() const override { return file_.string(); }
+
+    std::unique_ptr<MasterKey> openCurrent() override {
+        if (!fs::exists(file_)) {
+            std::cerr << "ERROR: master key credential not found at " << file_ << "\n";
+            return nullptr;
+        }
+        return readKey(file_, "cannot decrypt the master key credential");
+    }
+
+    bool stage(const FreshKey& fresh) override {
+        std::error_code ec;
+        fs::remove(staged_, ec);
+        std::string err;
+        if (!store_.encrypt(fresh, staged_, name_, err)) {
+            std::cerr << "ERROR: cannot encrypt the new master key: " << err << "\n";
+            fs::remove(staged_, ec);
+            return false;
+        }
+        util::copyOwnerAndModePath(file_, staged_);   // keep who may read it
+        return true;
+    }
+
+    std::unique_ptr<MasterKey> openStaged() override {
+        return readKey(staged_, "cannot read back the new master key credential");
+    }
+
+    void discardStaged() override {
+        std::error_code ec;
+        fs::remove(staged_, ec);
+    }
+
+    bool commit(std::string& backup) override { return commitReplace(file_, staged_, backup); }
+
+private:
+    std::unique_ptr<MasterKey> readKey(const fs::path& file, const char* what) {
+        util::CredentialStore::Key k{};
+        std::string err;
+        if (!store_.decrypt(file, name_, k, err)) {
+            std::cerr << "ERROR: " << what << " " << file << ": " << err << "\n";
+            return nullptr;
+        }
+        auto key = std::make_unique<MasterKey>("");
+        key->loadRaw(k);
+        sodium_memzero(k.data(), k.size());
+        return key;
+    }
+
+    fs::path                 file_;
+    fs::path                 staged_;
+    std::string              name_;
+    util::CredentialStore&   store_;
+};
+
+// The rotation, independent of where the key lives.
+int rotateImpl(RotationKeyStore& keys,
+               const fs::path& auth_db_path,
+               const fs::path& mounts_db_path,
+               const fs::path& device_ca_dir,
+               const fs::path& state_dir) {
     // Rotating under a running service breaks it: for a moment the DB
     // points at the new key while the process holds the old one.
     if (!state_dir.empty()) {
@@ -196,77 +467,13 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
         }
     }
 
-    // (1) Загружаем старый ключ. Если файла нет — отказ: ротация
-    // означает «переехать со старого на новый», и пустого источника
-    // быть не должно. Operator должен сначала запустить server один раз
-    // (auto-gen) или подложить ключ руками.
-    if (!fs::exists(key_file_path)) {
-        std::cerr << "ERROR: master key file not found at "
-                  << key_file_path << "\n";
-        return 1;
-    }
-    MasterKey old_key(key_file_path.string());
-    // A passphrase-wrapped key is opened with the operator's passphrase; the
-    // new key is wrapped under the same one (the passphrase is not changed here).
-    std::string pass;
-    const bool wrapped = !old_key.load() && old_key.sealed();
-    if (wrapped) {
-        if (!passphrase) {
-            std::cerr << "ERROR: the master key at " << key_file_path
-                      << " is passphrase-protected; run the rotation from a "
-                         "terminal or with --passphrase-stdin\n";
-            return 1;
-        }
-        auto p = passphrase("Current passphrase");
-        if (!p) {
-            std::cerr << "ERROR: the master key is passphrase-protected and no "
-                         "passphrase was supplied\n";
-            return 1;
-        }
-        pass = std::move(*p);
-        std::string unlock_err;
-        if (!old_key.unlock(pass, unlock_err)) {
-            std::cerr << "ERROR: " << unlock_err << "\n";
-            sodium_memzero(pass.data(), pass.size());
-            return 1;
-        }
-    }
-    if (!old_key.loaded()) {
-        std::cerr << "ERROR: cannot load current master key from "
-                  << key_file_path << "\n";
-        return 1;
-    }
+    // (1) Load the current key.
+    auto old_key_p = keys.openCurrent();
+    if (!old_key_p) return 1;
+    MasterKey& old_key = *old_key_p;
 
-    // The new key must land where the service reads it. Environment
-    // variable and systemd credential are delivered from outside.
-    switch (old_key.source()) {
-        case MasterKey::Source::Env:
-            std::cerr << "ERROR: the key comes from LIVEQX_MASTER_KEY; it cannot "
-                         "be rotated here. Change the variable yourself and "
-                         "re-encrypt the secrets.\n";
-            return 1;
-        case MasterKey::Source::EnvFile: {
-            if (old_key.getInfo().protection == "systemd_credential") {
-                std::cerr << "ERROR: the key is a systemd credential; it cannot "
-                             "be rotated here. Re-create the credential with "
-                             "systemd-creds and re-encrypt the secrets.\n";
-                return 1;
-            }
-            std::error_code eq_ec;
-            if (!fs::equivalent(old_key.envFilePath(), key_file_path, eq_ec)) {
-                std::cerr << "ERROR: the service reads its key from "
-                          << old_key.envFilePath() << " (LIVEQX_MASTER_KEY_FILE), "
-                          << "not from " << key_file_path << ".\n";
-                return 1;
-            }
-            break;
-        }
-        default:
-            break;
-    }
-
-    // (2) Открываем DB. AuthDb::open() создаст файл, если его нет —
-    // это ок, пустая БД — допустимый случай (нет блобов для re-encrypt'а).
+    // (2) Open the DB. AuthDb::open() creates the file if it is missing - fine,
+    // an empty database is valid (no blobs to re-encrypt).
     AuthDb db(auth_db_path);
     if (!db.open()) {
         std::cerr << "ERROR: cannot open auth.db at " << auth_db_path << "\n";
@@ -370,88 +577,26 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
         }
     }
 
-    // (4) Генерируем новый ключ, пишем во временный файл рядом со старым.
-    // O_EXCL чтобы не споткнуться на остатках от предыдущей попытки.
-    const fs::path tmp_path = key_file_path.string() + ".new";
-    {
-        std::error_code ec;
-        fs::remove(tmp_path, ec);  // на случай чужого недоведённого rotate
-    }
-    std::array<std::uint8_t, MasterKey::kKeyBytes> fresh{};
+    // (4) Generate the new key and stage it next to the current one.
+    FreshKey fresh{};
     randombytes_buf(fresh.data(), fresh.size());
-
-    // What goes into the file: the bare key, or — for a passphrase-protected
-    // key — the new key wrapped under the same passphrase.
-    std::string file_bytes(reinterpret_cast<const char*>(fresh.data()), fresh.size());
-    if (wrapped) {
-        keywrap::Key k{};
-        std::memcpy(k.data(), fresh.data(), k.size());
-        file_bytes = keywrap::wrap(k, pass, kdf);
-        sodium_memzero(k.data(), k.size());
-        if (file_bytes.empty()) {
-            std::cerr << "ERROR: cannot wrap the new master key\n";
-            sodium_memzero(fresh.data(), fresh.size());
-            sodium_memzero(pass.data(), pass.size());
-            return 1;
-        }
-    }
-
-    int fd = ::open(tmp_path.c_str(),
-                    O_WRONLY | O_CREAT | O_EXCL, 0600);
-    if (fd < 0) {
-        std::cerr << "ERROR: cannot create " << tmp_path
-                  << ": " << std::strerror(errno) << "\n";
-        sodium_memzero(fresh.data(), fresh.size());
-        sodium_memzero(pass.data(), pass.size());
-        return 1;
-    }
-    const auto written = ::write(fd, file_bytes.data(), file_bytes.size());
-    sodium_memzero(file_bytes.data(), file_bytes.size());
-    if (written <= 0 ||
-        (!wrapped && written != static_cast<ssize_t>(MasterKey::kKeyBytes))) {
-        std::cerr << "ERROR: short write to " << tmp_path << "\n";
-        ::close(fd);
-        std::error_code ec;
-        fs::remove(tmp_path, ec);
-        sodium_memzero(fresh.data(), fresh.size());
-        return 1;
-    }
-    if (::fsync(fd) != 0) {
-        LOG_WARN("rotateMasterKey: fsync failed on {}: {}",
-                 tmp_path.string(), std::strerror(errno));
-    }
-    // Same owner and mode as the key file being replaced (0600 stays 0600;
-    // root:liveqx 0640 in /etc/liveqx stays readable by the service).
-    util::copyOwnerAndMode(fd, key_file_path);
-    ::close(fd);
+    const bool staged = keys.stage(fresh);
     sodium_memzero(fresh.data(), fresh.size());
+    if (!staged) return 1;
 
-    // (5) Загружаем новый ключ через MasterKey API (re-read file) — это
-    // даёт нам тот же encrypt/decrypt-pipeline и проверяет, что файл
-    // читается корректно (страховка от silent corruption).
-    MasterKey new_key(tmp_path.string());
-    bool new_key_ok = false;
-    if (wrapped) {
-        std::string unlock_err;
-        new_key.load();   // false by design: the file is wrapped
-        new_key_ok = new_key.sealed() && new_key.unlock(pass, unlock_err);
-    } else {
-        new_key_ok = new_key.load() && new_key.loaded();
-    }
-    sodium_memzero(pass.data(), pass.size());
-    if (!new_key_ok) {
-        std::cerr << "ERROR: cannot reload freshly-written master key at "
-                  << tmp_path << "\n";
-        std::error_code ec;
-        fs::remove(tmp_path, ec);
+    // (5) Read the staged key back.
+    auto new_key_p = keys.openStaged();
+    if (!new_key_p) {
+        keys.discardStaged();
         return 1;
     }
+    MasterKey& new_key = *new_key_p;
 
     // (6) Re-encrypt every secret with the new key and store it. If a write
     // fails half way, reencryptAll puts back what was already written, so the
     // DB is never left half re-encrypted.
-    // IMPORTANT: between this step and the rename the DB points at the new
-    // key while the file still holds the old one; a running server would fail
+    // IMPORTANT: between this step and the commit the DB points at the new
+    // key while the old one is still in effect; a running server would fail
     // to decrypt in that window. So the rotation is an out-of-band procedure
     // with the service stopped (like printBootstrap / resetAdmin).
     // The device CA key is re-sealed first: resealAll decrypts everything with
@@ -463,8 +608,7 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
     if (has_device_ca &&
         !liveqx::tls::DeviceCa::resealAll(device_ca_dir, old_key, new_key, rotate_err)) {
         std::cerr << "ERROR: " << rotate_err << " — refusing to rotate\n";
-        std::error_code ec;
-        fs::remove(tmp_path, ec);
+        keys.discardStaged();
         return 1;
     }
     if (!detail::reencryptAll(entries, new_key, rotate_err, &rotated)) {
@@ -474,49 +618,20 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
             if (!liveqx::tls::DeviceCa::resealAll(device_ca_dir, new_key, old_key, back_err))
                 std::cerr << "ERROR: device CA could not be put back: " << back_err << "\n";
         }
-        std::error_code ec;
-        fs::remove(tmp_path, ec);
+        keys.discardStaged();
         return 1;
     }
     if (has_device_ca) rotated.push_back("device_ca");
 
-    // (7) Backup'им старый ключ и перемещаем `.new` на место. Если этот
-    // блок упадёт между rename'ом backup'а и rename'ом `.new`, то file
-    // отсутствует — operator увидит файл `.bak.<ts>` и `.new` рядом, может
-    // вручную восстановить.
-    const auto unix_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    const fs::path bak_path =
-        key_file_path.string() + ".bak." + std::to_string(unix_ns);
-
-    std::error_code ec;
-    fs::rename(key_file_path, bak_path, ec);
-    if (ec) {
-        std::cerr << "ERROR: cannot backup current key to " << bak_path
-                  << ": " << ec.message() << "\n";
-        // НЕ удаляем `.new` — он содержит ключ, которым уже зашифрованы
-        // секреты в БД. Operator должен вручную перенести `.new`
-        // на место (mv key.new key) либо откатить DB.
-        std::cerr << "NOTE: new key file is at " << tmp_path
-                  << ". Секреты в БД уже зашифрованы новым ключом — "
-                     "переместите файл вручную: mv " << tmp_path << " "
-                  << key_file_path << "\n";
-        return 1;
-    }
-    fs::rename(tmp_path, key_file_path, ec);
-    if (ec) {
-        std::cerr << "ERROR: cannot move new key into place: "
-                  << ec.message() << "\n";
-        std::cerr << "NOTE: backup is at " << bak_path
-                  << ", new key at " << tmp_path
-                  << ". DB blobs зашифрованы новым ключом — НЕ восстанавливайте "
-                     "backup без ручного re-decrypt'а.\n";
-        return 1;
-    }
+    // (7) Back the old key up and put the new one in its place. If this fails
+    // half way, the messages say where the backup and the new key are so the
+    // operator can finish by hand.
+    std::string backup;
+    if (!keys.commit(backup)) return 1;
 
     std::cout << "master_key_rotated: true\n";
-    std::cout << "key_file: " << key_file_path << "\n";
-    std::cout << "backup_file: " << bak_path << "\n";
+    std::cout << "key_file: " << keys.where() << "\n";
+    std::cout << "backup_file: " << backup << "\n";
     std::cout << "blobs_re_encrypted: ";
     if (rotated.empty()) {
         std::cout << "(none)";
@@ -529,6 +644,38 @@ int rotateMasterKey(const std::filesystem::path& auth_db_path,
     std::cout << "\n";
     std::cout.flush();
     return 0;
+}
+
+}  // namespace
+
+int rotateMasterKey(const std::filesystem::path& auth_db_path,
+                    const std::filesystem::path& key_file_path,
+                    const std::filesystem::path& mounts_db_path,
+                    const std::filesystem::path& device_ca_dir,
+                    const std::filesystem::path& state_dir,
+                    const std::string& key_store,
+                    const std::function<std::optional<std::string>(std::string_view)>& passphrase,
+                    const keywrap::KdfParams& kdf) {
+    if (key_store != "file") {
+        std::cerr << "ERROR: master_key_store is \"" << key_store
+                  << "\": the key is delivered from outside (systemd credential "
+                     "or environment) and cannot be rotated as a file. Create the "
+                     "new key in its store yourself and re-encrypt the secrets.\n";
+        return 1;
+    }
+    FileKeyStore keys(key_file_path, passphrase, kdf);
+    return rotateImpl(keys, auth_db_path, mounts_db_path, device_ca_dir, state_dir);
+}
+
+int rotateMasterKeyCredential(const std::filesystem::path& auth_db_path,
+                              const std::filesystem::path& credential_path,
+                              const std::string& credential_name,
+                              util::CredentialStore& credentials,
+                              const std::filesystem::path& mounts_db_path,
+                              const std::filesystem::path& device_ca_dir,
+                              const std::filesystem::path& state_dir) {
+    CredentialKeyStore keys(credential_path, credential_name, credentials);
+    return rotateImpl(keys, auth_db_path, mounts_db_path, device_ca_dir, state_dir);
 }
 
 }  // namespace liveqx::auth

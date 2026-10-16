@@ -62,6 +62,7 @@
 #include "utils/TlsConfig.h"
 #include "api/TlsBootstrap.h"
 #include "auth/KeyProtectCli.h"
+#include "utils/CredentialStore.h"
 #include "utils/DeviceCaCli.h"
 #include "auth/MasterKeyBoot.h"
 
@@ -320,6 +321,14 @@ int main(int argc, char* argv[]) {
                     key_path, recovery_paths.stateDir(), store, source);
             return liveqx::auth::changeMasterPassphrase(
                 key_path, recovery_paths.stateDir(), store, source);
+        }
+        if (do_rotate_master_key && recovery_paths.masterKeyStore() == "creds") {
+            auto creds = liveqx::util::makeSystemdCredentialStore();
+            return liveqx::auth::rotateMasterKeyCredential(
+                db_path, recovery_paths.masterKeyCredentialPath(),
+                recovery_paths.masterKeyCredentialName(), *creds,
+                recovery_paths.mountsDb(), recovery_paths.deviceCaDir(),
+                recovery_paths.stateDir());
         }
         if (do_rotate_master_key)
             return liveqx::auth::rotateMasterKey(db_path, key_path,

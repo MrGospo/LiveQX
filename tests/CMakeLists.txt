@@ -93,6 +93,7 @@ add_executable(liveqx-tests
     test_device_ca.cpp
     test_device_ca_two_tier.cpp
     test_device_ca_cli.cpp
+    test_credential_rotation.cpp
     test_tls_config.cpp
     test_ts_packet.cpp
     test_ts_psi_parser.cpp
@@ -154,6 +155,7 @@ add_executable(liveqx-tests
     ../src/utils/DeviceCa.cpp
     ../src/utils/DeviceRootCa.cpp
     ../src/utils/DeviceCaCli.cpp
+    ../src/utils/CredentialStore.cpp
     ../src/utils/TlsConfig.cpp
     ../src/utils/RuntimeLock.cpp
     ../src/metrics/ChannelProfiler.cpp

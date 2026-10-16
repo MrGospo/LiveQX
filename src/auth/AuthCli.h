@@ -13,6 +13,9 @@
 namespace liveqx::auth {
 
 class MasterKey;
+}  // namespace liveqx::auth
+namespace liveqx::util { class CredentialStore; }
+namespace liveqx::auth {
 
 // fix22 commit 10/24 — recovery-CLI поверх AuthService.
 //
@@ -98,5 +101,17 @@ bool reencryptAll(const std::vector<RotationEntry>& entries,
                   std::vector<std::string>*         done_labels = nullptr);
 
 }  // namespace detail
+
+// Rotation of a master key stored as a systemd credential (master_key_store =
+// "creds"). Same rules as rotateMasterKey: every secret is checked first, the
+// service must be stopped, the old credential is kept as `<file>.bak.<unix_ns>`.
+// `credential_name` is the name the credential was encrypted under.
+int rotateMasterKeyCredential(const std::filesystem::path& auth_db_path,
+                              const std::filesystem::path& credential_path,
+                              const std::string& credential_name,
+                              liveqx::util::CredentialStore& credentials,
+                              const std::filesystem::path& mounts_db_path = {},
+                              const std::filesystem::path& device_ca_dir = {},
+                              const std::filesystem::path& state_dir = {});
 
 }  // namespace liveqx::auth

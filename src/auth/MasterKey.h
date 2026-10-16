@@ -101,6 +101,10 @@ public:
 
     bool loaded() const noexcept { return loaded_; }
 
+    // Takes a key the caller obtained itself (for example by decrypting a
+    // systemd credential). For tools; the service loads through load().
+    void loadRaw(const std::array<std::uint8_t, kKeyBytes>& key);
+
     // The key file is passphrase-wrapped (LQXKEY1, see auth/KeyWrap.h) and
     // has not been opened yet. load() returns false in that case; the caller
     // decides whether to wait for unlock() or to refuse to start.

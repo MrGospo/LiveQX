@@ -157,6 +157,12 @@ Paths Paths::resolve(const Args&           cli,
     if (auto s = cfgString(cfg, "master_key_store"); s.has_value() && !s->empty()) {
         p.master_key_store_ = *s;
     }
+    if (auto s = cfgString(cfg, "master_key_credential_path"); s.has_value() && !s->empty()) {
+        p.master_key_credential_path_ = *s;
+    }
+    if (auto s = cfgString(cfg, "master_key_credential_name"); s.has_value() && !s->empty()) {
+        p.master_key_credential_name_ = *s;
+    }
 
     return p;
 }
@@ -169,6 +175,12 @@ std::filesystem::path Paths::authDb() const {
     return auth_db_override_.empty()
                ? state_dir_ / "auth.db"
                : auth_db_override_;
+}
+
+std::filesystem::path Paths::masterKeyCredentialPath() const {
+    return master_key_credential_path_.empty()
+               ? std::filesystem::path("/etc/credstore.encrypted") / master_key_credential_name_
+               : master_key_credential_path_;
 }
 
 std::filesystem::path Paths::masterKey() const {

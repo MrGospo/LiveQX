@@ -139,6 +139,14 @@ void MasterKey::lockMemory() {
     }
 }
 
+void MasterKey::loadRaw(const std::array<std::uint8_t, kKeyBytes>& key) {
+    key_ = key;
+    loaded_ = true;
+    wrapped_ = false;
+    source_ = Source::Unknown;
+    lockMemory();
+}
+
 bool MasterKey::load() {
     const bool ok = loadImpl();
     if (ok) lockMemory();

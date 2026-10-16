@@ -21,4 +21,14 @@ inline void copyOwnerAndMode(int fd, const std::filesystem::path& reference) {
     (void)::fchmod(fd, st.st_mode & 0777);
 }
 
+// The same for a file given by path (a file a tool did not open itself, e.g.
+// one written by systemd-creds).
+inline void copyOwnerAndModePath(const std::filesystem::path& reference,
+                                 const std::filesystem::path& target) {
+    struct stat st{};
+    if (::stat(reference.c_str(), &st) != 0) return;
+    (void)::chown(target.c_str(), st.st_uid, st.st_gid);
+    (void)::chmod(target.c_str(), st.st_mode & 0777);
+}
+
 }  // namespace liveqx::util

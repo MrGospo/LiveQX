@@ -248,6 +248,7 @@ set(SOURCES
     src/utils/DeviceCa.cpp
     src/utils/DeviceRootCa.cpp
     src/utils/DeviceCaCli.cpp
+    src/utils/CredentialStore.cpp
     src/utils/TlsConfig.cpp
     src/utils/CpuAffinity.cpp
     src/utils/LegacyMigration.cpp

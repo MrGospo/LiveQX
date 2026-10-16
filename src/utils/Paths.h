@@ -84,6 +84,11 @@ public:
     // credential) or "env" (LIVEQX_MASTER_KEY). From config `master_key_store`.
     // Rotation/reset rewrite only "file"; the others are delivered from outside.
     const std::string& masterKeyStore() const noexcept { return master_key_store_; }
+    // Where the installer puts the key when master_key_store is "creds", and the
+    // name it was encrypted under. Config `master_key_credential_path` /
+    // `master_key_credential_name` override the defaults.
+    std::filesystem::path masterKeyCredentialPath() const;
+    const std::string& masterKeyCredentialName() const noexcept { return master_key_credential_name_; }
     std::filesystem::path stressJson() const                  { return state_dir_ / "stress.json"; }
     std::filesystem::path initialAdminPasswordFile() const    { return state_dir_ / "initial_admin_password.txt"; }
     std::filesystem::path playbackDb() const                  { return state_dir_ / "playback.db"; }
@@ -139,6 +144,8 @@ private:
     std::filesystem::path auth_db_override_;
     std::filesystem::path master_key_override_;
     std::string           master_key_store_{"file"};
+    std::filesystem::path master_key_credential_path_;
+    std::string           master_key_credential_name_{"liveqx_master_key"};
 
     bool fhs_root_detected_{false};
 };
