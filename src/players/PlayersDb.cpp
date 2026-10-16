@@ -280,6 +280,14 @@ CREATE TABLE crl_state (
 );
 )SQL";
 
+// Version 1 -> 2: the module's settings.
+constexpr const char* kSchemaV2 = R"SQL(
+CREATE TABLE players_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+)SQL";
+
 }  // namespace
 
 const char* toString(PlayerState s) noexcept {
@@ -353,7 +361,8 @@ bool PlayersDb::open() {
         if (!tx.ok()) { sqlite3_close(raw); return false; }
         bool ok = true;
         if (version < 1) ok = ok && execSql(raw, kSchemaV1);
-        // Future versions: add `if (version < 2) ...` steps here, in order.
+        if (version < 2) ok = ok && execSql(raw, kSchemaV2);
+        // Future versions: add `if (version < 3) ...` steps here, in order.
         ok = ok && execSql(raw, ("PRAGMA user_version = " + std::to_string(kSchemaVersion) + ";").c_str());
         if (!ok || !tx.commit()) {
             LOG_ERROR("PlayersDb: migration {} -> {} failed", version, kSchemaVersion);
@@ -756,6 +765,38 @@ std::size_t PlayersDb::purgeExpiredCerts(std::int64_t now) {
     Stmt s(db_, "DELETE FROM player_certs WHERE not_after < ?");
     s.i64(1, nowOr(now));
     return s.exec() ? static_cast<std::size_t>(s.changes()) : 0;
+}
+
+// ─── settings ───────────────────────────────────────────────────────────────
+std::map<std::string, std::string> PlayersDb::settings() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::map<std::string, std::string> out;
+    if (!db_) return out;
+    Stmt s(db_, "SELECT key,value FROM players_settings");
+    while (s.step() == SQLITE_ROW) out[s.str(0)] = s.str(1);
+    return out;
+}
+
+bool PlayersDb::setSettings(const std::map<std::string, std::string>& values) {
+    for (const auto& [k, v] : values)
+        if (k.empty() || k.size() > 128 || v.size() > kMaxSettingBytes) return false;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+    Tx tx(db_);
+    if (!tx.ok()) return false;
+    for (const auto& [k, v] : values) {
+        if (v.empty()) {
+            Stmt s(db_, "DELETE FROM players_settings WHERE key=?");
+            s.text(1, k);
+            if (!s.exec()) return false;
+        } else {
+            Stmt s(db_, "INSERT INTO players_settings(key,value) VALUES(?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+            s.text(1, k).text(2, v);
+            if (!s.exec()) return false;
+        }
+    }
+    return tx.commit();
 }
 
 // ─── last known state and events ────────────────────────────────────────────

@@ -491,3 +491,68 @@ TEST_F(PlayersDbTest, EventsOutliveTheirPlayerUntilRetentionRemovesThem) {
     db_->purgeEventsOlderThan(kT0 + 10'000);
     EXPECT_TRUE(db_->events(id, 10).empty());
 }
+
+// ── settings and the version 1 -> 2 migration ───────────────────────────────
+TEST_F(PlayersDbTest, SettingsStartEmpty) {
+    EXPECT_TRUE(db_->settings().empty());
+}
+
+TEST_F(PlayersDbTest, SettingsAreSavedTogetherAndSurviveReopening) {
+    ASSERT_TRUE(db_->setSettings({{"server_url", "https://liveqx.example:8443"},
+                                  {"mqtt_broker_url", "mqtts://liveqx.example:8883"}}));
+    reopen();
+    auto s = db_->settings();
+    ASSERT_EQ(s.size(), 2u);
+    EXPECT_EQ(s["server_url"], "https://liveqx.example:8443");
+    EXPECT_EQ(s["mqtt_broker_url"], "mqtts://liveqx.example:8883");
+}
+
+TEST_F(PlayersDbTest, SavingSettingsReplacesTheValuesButKeepsTheOthers) {
+    ASSERT_TRUE(db_->setSettings({{"a", "1"}, {"b", "2"}}));
+    ASSERT_TRUE(db_->setSettings({{"b", "20"}, {"c", "3"}}));
+    auto s = db_->settings();
+    EXPECT_EQ(s["a"], "1");
+    EXPECT_EQ(s["b"], "20");
+    EXPECT_EQ(s["c"], "3");
+}
+
+TEST_F(PlayersDbTest, AnEmptyValueRemovesTheSetting) {
+    ASSERT_TRUE(db_->setSettings({{"server_url", "https://x.example"}}));
+    ASSERT_TRUE(db_->setSettings({{"server_url", ""}}));
+    EXPECT_EQ(db_->settings().count("server_url"), 0u);
+}
+
+TEST_F(PlayersDbTest, AnOversizedSettingIsRefusedAndNothingIsWritten) {
+    EXPECT_FALSE(db_->setSettings({{"ok", "1"}, {"big", std::string(40'000, 'x')}}));
+    EXPECT_TRUE(db_->settings().empty()) << "all or nothing";
+}
+
+TEST_F(PlayersDbTest, ADatabaseOfVersionOneIsMigratedKeepingItsData) {
+    // Build what a version-1 installation looks like: real data, no settings
+    // table, user_version 1.
+    const auto id = enrolled("MIG01");
+    ASSERT_TRUE(db_->nextCrlNumber(1) > 0);
+    db_.reset();
+    {
+        sqlite3* raw = nullptr;
+        ASSERT_EQ(sqlite3_open(path_.c_str(), &raw), SQLITE_OK);
+        ASSERT_EQ(sqlite3_exec(raw, "DROP TABLE players_settings; PRAGMA user_version = 1;",
+                               nullptr, nullptr, nullptr), SQLITE_OK);
+        sqlite3_close(raw);
+    }
+
+    PlayersDb upgraded(path_);
+    ASSERT_TRUE(upgraded.open());
+    EXPECT_EQ(upgraded.schemaVersion(), PlayersDb::kSchemaVersion);
+    ASSERT_TRUE(upgraded.findPlayer(id).has_value()) << "players survive the migration";
+    EXPECT_EQ(upgraded.certsOf(id).size(), 1u);
+    EXPECT_EQ(upgraded.nextCrlNumber(1), 2) << "CRL numbers must not restart";
+    EXPECT_TRUE(upgraded.setSettings({{"server_url", "https://x.example"}}))
+        << "the new table must exist after the migration";
+}
+
+TEST_F(PlayersDbTest, MigrationIsIdempotent) {
+    reopen();
+    reopen();
+    EXPECT_EQ(db_->schemaVersion(), PlayersDb::kSchemaVersion);
+}

@@ -16,6 +16,7 @@
 //   player_status  the last known state per player (not every heartbeat)
 //   player_events  state changes (enrolled, online, offline, revoked, ...)
 //   crl_state      the monotonic CRL number per CA generation
+//   players_settings  the module's key/value settings (schema version 2)
 //
 // Pairing tokens. The plaintext exists exactly once, in the return value of
 // createPlayer()/reissueToken(). claimToken() compares hashes in constant time
@@ -30,6 +31,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -111,10 +113,11 @@ struct EventRow {
 
 class PlayersDb {
 public:
-    static constexpr int kSchemaVersion = 1;
+    static constexpr int kSchemaVersion = 2;
     static constexpr std::size_t kMaxPayloadBytes = 64 * 1024;
     static constexpr std::size_t kMaxNameBytes = 120;
     static constexpr std::int64_t kMaxTokenTtlSeconds = 365LL * 86400;
+    static constexpr std::size_t kMaxSettingBytes = 32 * 1024;
 
     explicit PlayersDb(std::filesystem::path path);
     ~PlayersDb();
@@ -175,6 +178,15 @@ public:
     std::int64_t         nextCrlNumber(int generation);
     // Deletes certificate records whose notAfter is before `now`. Returns how many.
     std::size_t          purgeExpiredCerts(std::int64_t now = 0);
+
+    // ── settings ─────────────────────────────────────────────────────────
+    // Plain key/value storage for the module's settings (server URLs, token
+    // lifetime, ...). What the keys mean and which values are valid is the
+    // business of PlayersService; this layer only stores them.
+    std::map<std::string, std::string> settings();
+    // Upserts the given keys in one transaction; an empty value removes the
+    // key. A value over kMaxSettingBytes fails the whole call.
+    bool setSettings(const std::map<std::string, std::string>& values);
 
     // ── last known state and events ──────────────────────────────────────
     // One transaction. Rows for unknown players are skipped; an oversized
