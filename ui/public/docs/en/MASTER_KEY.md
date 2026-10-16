@@ -72,6 +72,14 @@ For scripts without a terminal add `--passphrase-stdin`: passphrases are read fr
 
 A service with a passphrase starts **sealed**: it is running but serves only a "The service is sealed" page. Open the usual LiveQX address in a browser and type the passphrase. The service then starts normally on the same address.
 
+If the page is unreachable (the port is taken, TLS did not come up), the passphrase can be typed on the server itself, with no network involved:
+
+```
+sudo liveqx --config /etc/liveqx/config.json --unseal
+```
+
+The command connects to a private `unseal.sock` in the state directory (only the service user and root can use it), asks for the passphrase without echo and follows the same brute-force rules. When the service is already running it tells you there is nothing to unseal.
+
 **Important:** until the passphrase is entered nothing works: channels are not loaded and nothing is on air. After a reboot or a power failure the broadcast will not come back by itself until someone types the passphrase. If the server must return to air unattended, choose the file or a systemd credential.
 
 Brute-force protection: after a few wrong attempts from one address, input is paused and the pauses grow up to 5 minutes. During a pause even the correct passphrase is refused.
@@ -90,7 +98,9 @@ The old key stays next to it as `master.key.bak.<time>` — keep or delete it de
 
 If the key is protected by a passphrase it is asked for, and the new key keeps the same passphrase.
 
-Rotation does not apply when the key is delivered from outside (an environment variable or a systemd credential): LiveQX cannot replace it there. Create the new key in its store and re-encrypt the secrets.
+**A key in a systemd credential** (`master_key_store` is `creds`) is rotated with the same command. LiveQX decrypts the current credential, creates a new key, encrypts it with `systemd-creds` (bound to the TPM2 when there is one) into a neighbouring file, re-encrypts the secrets and only then swaps the file. The old credential stays next to it as `liveqx_master_key.bak.<time>`.
+
+Rotation does not apply when the key is passed in an **environment variable**: LiveQX cannot replace its value. Set a new value yourself and re-encrypt the secrets.
 
 ## Reset
 

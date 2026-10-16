@@ -508,6 +508,8 @@ PY
         echo "  The master key is protected by your passphrase. Open the address above and"
         echo "  enter it; LiveQX starts after that and the administrator password appears"
         echo "  in $STATE_DIR/state/initial_admin_password.txt."
+        echo "  Or, on this server without the network:"
+        echo "    sudo liveqx --config $CONF_FILE --unseal"
         echo "  This repeats after every restart of the service."
     fi
 

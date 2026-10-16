@@ -339,6 +339,7 @@
     "rotationHint": "Rotation is CLI-only with the engine stopped. No REST endpoint by design.",
     "rotationHintFile": "The key is a file. Stop the service and run these commands (the data key changes, secrets are re-encrypted, the old key stays next to it as a .bak file):",
     "rotationHintPassphrase": "The key is protected by a passphrase. Stop the service and run these commands: you will be asked for the passphrase, and the new data key keeps the same one.",
+    "rotationHintCredential": "The key is a systemd credential. Stop the service and run these commands: the new key is encrypted with systemd-creds and the old credential stays next to it as a .bak file.",
     "rotationHintEnv": "The key is passed in the LIVEQX_MASTER_KEY environment variable. It cannot be rotated here: set a new value yourself and re-encrypt the secrets. See the knowledge base article \"Master key\".",
     "rotationHintEnvFile": "The key is passed as a separate file (usually a systemd credential). It cannot be rotated here: create a new credential and re-encrypt the secrets. See the knowledge base article \"Master key\"."
   },

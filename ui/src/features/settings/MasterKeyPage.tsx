@@ -113,6 +113,15 @@ export default function MasterKeyPage() {
               sudo systemctl start liveqx
             </div>
           </>
+        ) : data?.protection === 'systemd_credential' ? (
+          <>
+            <p className="text-sm text-[var(--text-muted)] mb-4">{t('masterKey.rotationHintCredential')}</p>
+            <div className="bg-canvas rounded-lg px-4 py-3 font-mono text-sm text-[var(--accent)] leading-relaxed">
+              sudo systemctl stop liveqx<br />
+              sudo liveqx --config /etc/liveqx/config.json --rotate-master-key<br />
+              sudo systemctl start liveqx
+            </div>
+          </>
         ) : data?.source === 'file' ? (
           <>
             <p className="text-sm text-[var(--text-muted)] mb-4">{t('masterKey.rotationHintFile')}</p>
