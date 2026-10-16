@@ -258,3 +258,65 @@ TEST(RbacRest, AnyAuthenticatedCanLogout) {
     EXPECT_NE(r->status, 401);
     EXPECT_NE(r->status, 403);
 }
+
+// ─── Players (/api/players): who may look, who may decide ───────────────────
+// The module is not wired in this fixture, so an allowed request ends in 503
+// (players_not_configured) — what matters here is 401/403 versus "got past
+// the role check".
+
+TEST(RbacRest, ViewerMayLookAtPlayersButNotChangeThem) {
+    RbacRestFixture f(nextPort());
+    auto cli   = f.client();
+    auto token = f.loginAs("pl_viewer", liveqx::auth::Role::Viewer);
+    const std::string id = "11111111-2222-4333-8444-555555555555";
+
+    EXPECT_EQ(cli.Get("/api/players", bearer(token))->status, 503);
+    EXPECT_EQ(cli.Get(("/api/players/" + id).c_str(), bearer(token))->status, 503);
+
+    EXPECT_EQ(cli.Post("/api/players", bearer(token), R"({"name":"x"})", "application/json")->status, 403);
+    EXPECT_EQ(cli.Delete(("/api/players/" + id).c_str(), bearer(token))->status, 403);
+    EXPECT_EQ(cli.Post(("/api/players/" + id + "/revoke-cert").c_str(), bearer(token), "{}",
+                       "application/json")->status, 403);
+    EXPECT_EQ(cli.Post(("/api/players/" + id + "/reissue-token").c_str(), bearer(token), "",
+                       "application/json")->status, 403);
+}
+
+TEST(RbacRest, PlayersSettingsAreAdminOnlyEvenThoughTheyLookLikeAnId) {
+    // "/api/players/settings" must not fall into the viewer-readable
+    // "/api/players/{id}" pattern.
+    RbacRestFixture f(nextPort());
+    auto cli    = f.client();
+    auto viewer = f.loginAs("pl_viewer2", liveqx::auth::Role::Viewer);
+    auto op     = f.loginAs("pl_operator", liveqx::auth::Role::Operator);
+    auto admin  = f.loginAs("pl_admin", liveqx::auth::Role::Admin);
+
+    EXPECT_EQ(cli.Get("/api/players/settings", bearer(viewer))->status, 403);
+    EXPECT_EQ(cli.Get("/api/players/settings", bearer(op))->status, 403);
+    EXPECT_EQ(cli.Put("/api/players/settings", bearer(viewer), "{}", "application/json")->status, 403);
+    EXPECT_EQ(cli.Get("/api/players/settings", bearer(admin))->status, 503);
+}
+
+TEST(RbacRest, OperatorCannotCreateOrRevokePlayers) {
+    RbacRestFixture f(nextPort());
+    auto cli   = f.client();
+    auto token = f.loginAs("pl_op2", liveqx::auth::Role::Operator);
+    EXPECT_EQ(cli.Post("/api/players", bearer(token), R"({"name":"x"})", "application/json")->status, 403);
+    EXPECT_EQ(cli.Post("/api/players/11111111-2222-4333-8444-555555555555/revoke-cert", bearer(token),
+                       "{}", "application/json")->status, 403);
+}
+
+TEST(RbacRest, AdminPassesTheRoleCheckOnPlayers) {
+    RbacRestFixture f(nextPort());
+    auto cli   = f.client();
+    auto token = f.loginAs("pl_admin2", liveqx::auth::Role::Admin);
+    auto r = cli.Post("/api/players", bearer(token), R"({"name":"x"})", "application/json");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 503);
+}
+
+TEST(RbacRest, PlayersEndpointsNeedAToken) {
+    RbacRestFixture f(nextPort());
+    auto cli = f.client();
+    EXPECT_EQ(cli.Get("/api/players")->status, 401);
+    EXPECT_EQ(cli.Get("/api/players/settings")->status, 401);
+}

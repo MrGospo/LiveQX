@@ -93,6 +93,8 @@ public:
     std::filesystem::path initialAdminPasswordFile() const    { return state_dir_ / "initial_admin_password.txt"; }
     std::filesystem::path playbackDb() const                  { return state_dir_ / "playback.db"; }
     std::filesystem::path mountsDb() const                    { return state_dir_ / "mounts.db"; }
+    // Player integration: players, pairing tokens (hashes), issued certificates.
+    std::filesystem::path playersDb() const                   { return state_dir_ / "players.db"; }
     // CA that issues player client certificates (utils/DeviceCa.h). Holds
     // the CA key sealed with the master key.
     std::filesystem::path deviceCaDir() const                 { return state_dir_ / "device_ca"; }

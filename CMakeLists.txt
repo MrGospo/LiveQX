@@ -250,6 +250,7 @@ set(SOURCES
     src/utils/DeviceCaCli.cpp
     src/utils/CredentialStore.cpp
     src/players/PlayersDb.cpp
+    src/players/PlayersService.cpp
     src/utils/TlsConfig.cpp
     src/utils/CpuAffinity.cpp
     src/utils/LegacyMigration.cpp

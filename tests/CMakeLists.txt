@@ -96,6 +96,7 @@ add_executable(liveqx-tests
     test_device_ca_cli.cpp
     test_credential_rotation.cpp
     test_players_db.cpp
+    test_players_service.cpp
     test_pki_export.cpp
     test_tls_config.cpp
     test_ts_packet.cpp
@@ -160,6 +161,7 @@ add_executable(liveqx-tests
     ../src/utils/DeviceCaCli.cpp
     ../src/utils/CredentialStore.cpp
     ../src/players/PlayersDb.cpp
+    ../src/players/PlayersService.cpp
     ../src/utils/TlsConfig.cpp
     ../src/utils/RuntimeLock.cpp
     ../src/metrics/ChannelProfiler.cpp
@@ -319,6 +321,7 @@ add_executable(liveqx-itests
     test_ndi_mock.cpp
     test_control_api_tls.cpp
     test_control_api_mounts.cpp
+    test_control_api_players.cpp
     test_metrics_mounts.cpp
     ../src/mounts/MountSpec.cpp
     ../src/mounts/RpcProtocol.cpp
@@ -431,6 +434,8 @@ add_executable(liveqx-itests
     ../src/utils/PathUtils.cpp
     ../src/utils/Paths.cpp
     ../src/utils/Tls.cpp
+    ../src/players/PlayersDb.cpp
+    ../src/players/PlayersService.cpp
     ../src/utils/TlsConfig.cpp
     ../src/utils/NetIfaces.cpp
     ../src/utils/RuntimeLock.cpp

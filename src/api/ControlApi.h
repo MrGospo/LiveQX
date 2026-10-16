@@ -24,6 +24,7 @@ namespace liveqx::preview { class PreviewManager; }
 namespace liveqx::stress  { class StressService; }
 namespace liveqx::plugins { class PluginManager; }
 namespace liveqx::mounts  { class MountManager; }
+namespace liveqx::players { class PlayersService; }
 namespace liveqx::audit   {
 class AuditLogger;
 class AuditRateLimiter;
@@ -115,7 +116,8 @@ public:
                liveqx::auth::TimeSourceManager* time_src  = nullptr,
                liveqx::auth::ISntpClient*       sntp      = nullptr,
                liveqx::audit::AuditLogger*      audit     = nullptr,
-               liveqx::audit::AuditRateLimiter* audit_rate = nullptr);
+               liveqx::audit::AuditRateLimiter* audit_rate = nullptr,
+               liveqx::players::PlayersService* players = nullptr);
     ~ControlApi();
 
     // fix35 A3.5–A3.9 — mount static UI (index.html + /assets/*) and wire

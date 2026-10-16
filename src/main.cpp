@@ -48,6 +48,8 @@
 #include "mounts/MountManager.h"
 #include "mounts/MountdRpcClient.h"
 #include "mounts/MountsDb.h"
+#include "players/PlayersDb.h"
+#include "players/PlayersService.h"
 #include "plugins/PluginManager.h"
 #include "preview/PreviewManager.h"
 #include "stress/StressConfig.h"
@@ -930,6 +932,28 @@ int main(int argc, char* argv[]) {
                  mounts_mgr.size());
         mounts_mgr.reconcileOnBoot();
 
+        // Player integration (phase 2). A store that will not open disables
+        // the module (the endpoints answer 503); it must not stop the
+        // broadcast.
+        liveqx::players::PlayersDb players_db(paths.playersDb());
+        std::unique_ptr<liveqx::players::PlayersService> players_service;
+        if (players_db.open()) {
+            liveqx::players::PlayersServiceOptions po;
+            po.ca_cert_path = paths.tlsDir() / "ca.crt";
+            po.events       = &event_bus;
+            po.ntp_hint     = [&time_repo]() -> std::vector<std::string> {
+                auto cur = time_repo.load();
+                if (cur && cur->ntp.enabled) return cur->ntp.servers;
+                return {};
+            };
+            players_service = std::make_unique<liveqx::players::PlayersService>(
+                players_db, std::move(po));
+            LOG_INFO("Players: db={}", paths.playersDb().string());
+        } else {
+            LOG_ERROR("Players: cannot open {} — player integration disabled",
+                      paths.playersDb().string());
+        }
+
         // Background pull of helper status. 30s cadence — same as the
         // helper's own watchdog touch; faster polling just thrashes
         // sqlite. jthread destructor request_stop+join's on scope exit.
@@ -1100,7 +1124,7 @@ int main(int argc, char* argv[]) {
                            &event_bus, &preview, &stress_service, &plugins_mgr,
                            &master_key, &mounts_mgr, tls_bindings,
                            &time_repo, &time_src, sntp_client.get(),
-                           &audit_logger, &audit_rate);
+                           &audit_logger, &audit_rate, players_service.get());
             api.setOnTlsReload([&]() {
                 tls_reload_pending.store(true, std::memory_order_release);
                 g_running.store(false, std::memory_order_release);

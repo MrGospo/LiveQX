@@ -48,6 +48,7 @@ extern "C" {
 #include "plugins/PluginManager.h"
 #include "mounts/MountManager.h"
 #include "mounts/MountSpec.h"
+#include "players/PlayersService.h"
 #include "audit/AuditDb.h"
 #include "audit/AuditLogger.h"
 #include "audit/AuditPayload.h"
@@ -94,6 +95,7 @@ struct ControlApi::Impl {
     liveqx::auth::ISntpClient*             sntp;
     liveqx::audit::AuditLogger*            audit;
     liveqx::audit::AuditRateLimiter*       audit_rate;
+    liveqx::players::PlayersService*       players;
     TlsBindings                                    tls_bindings;
     std::function<void()>                          on_tls_reload;
     std::mutex                                     metrics_token_mu;
@@ -115,13 +117,14 @@ struct ControlApi::Impl {
          liveqx::auth::ISntpClient* sn,
          liveqx::audit::AuditLogger* al,
          liveqx::audit::AuditRateLimiter* arl,
+         liveqx::players::PlayersService* pls,
          const TlsBindings& tls)
         : bind_addr(tls.bind.empty() ? std::string{"0.0.0.0"} : tls.bind),
           manager(m), metrics(mc), livez(lz), gateways(gw), auth(a),
           ldap_repo(lr), smtp_repo(sr), rbac(rb), events(ev), preview(pv),
           stress(st), plugins(pl), master_key(mk), mounts(mn),
           time_repo(tr), time_src(ts), sntp(sn),
-          audit(al), audit_rate(arl),
+          audit(al), audit_rate(arl), players(pls),
           tls_bindings(tls) {
         if (!tls.cert_path.empty() && !tls.key_path.empty()) {
             auto* ssl = new httplib::SSLServer(
@@ -413,6 +416,17 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     rbac.registerEndpoint("DELETE /api/system/mounts/{id}", rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("POST /api/system/mounts/{id}/sync",
                           rbacRole(RbacRole::Admin));
+
+    // Player integration. Viewers may look, only admins create, revoke,
+    // delete or touch the settings: those decide who may connect.
+    rbac.registerEndpoint("GET /api/players",                       rbacRole(RbacRole::Viewer));
+    rbac.registerEndpoint("GET /api/players/{id}",                  rbacRole(RbacRole::Viewer));
+    rbac.registerEndpoint("POST /api/players",                      rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("DELETE /api/players/{id}",               rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("POST /api/players/{id}/revoke-cert",     rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("POST /api/players/{id}/reissue-token",   rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("GET /api/players/settings",              rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("PUT /api/players/settings",              rbacRole(RbacRole::Admin));
 
     // fix33 — server time / NTP config. GET — Operator (mostly read для
     // overview), PUT/POST/test — Admin (правка системного clock-источника).
@@ -923,12 +937,13 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
                        liveqx::auth::TimeSourceManager* time_src,
                        liveqx::auth::ISntpClient* sntp,
                        liveqx::audit::AuditLogger* audit,
-                       liveqx::audit::AuditRateLimiter* audit_rate)
+                       liveqx::audit::AuditRateLimiter* audit_rate,
+                       liveqx::players::PlayersService* players)
     : impl_(std::make_unique<Impl>(manager, metrics, livez, gateways, auth,
                                    ldap_repo, smtp_repo, rbac, events,
                                    preview, stress, plugins, master_key,
                                    mounts, time_repo, time_src, sntp,
-                                   audit, audit_rate, tls)),
+                                   audit, audit_rate, players, tls)),
       port_(port) {
     auto* impl = impl_.get();
     auto& s    = *impl_->server;
@@ -945,6 +960,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     auto* pl   = impl_->plugins;
     auto* mk   = impl_->master_key;
     auto* mn   = impl_->mounts;
+    auto* pls  = impl_->players;
     auto* tr   = impl_->time_repo;
     auto* ts   = impl_->time_src;
     auto* sn   = impl_->sntp;
@@ -3082,6 +3098,224 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
                        json{{"id", id}, {"found", m.has_value()}});
         if (!m) { writeJson(res, 404, {{"error","not_found"}}); return; }
         writeJson(res, 200, mountPublicJson(*m));
+    });
+
+    // ─── Player integration (/api/players) ──────────────────────────────────
+    // Domain logic lives in players::PlayersService; these handlers only
+    // translate HTTP <-> service and set the audit row. The bootstrap token
+    // is in the answer of create / reissue-token and nowhere else.
+    auto players_unavailable = [](httplib::Response& res) {
+        writeJson(res, 503, {{"error", "players_not_configured"}});
+    };
+    auto playersStatusFor = [](const std::string& code) {
+        if (code == "not_found") return 404;
+        if (code == "not_configured" || code == "ca_unavailable" || code == "not_pending") return 409;
+        if (code == "storage_error") return 500;
+        return 400;
+    };
+    auto playerJson = [](const liveqx::players::PlayerRow& p,
+                         const std::optional<liveqx::players::StatusRow>& st) {
+        json j = {{"id", p.id},
+                  {"name", p.name},
+                  {"state", liveqx::players::toString(p.state)},
+                  {"clock_policy", p.clock_policy},
+                  {"created_at", p.created_at}};
+        if (p.created_by)   j["created_by"]   = *p.created_by;
+        if (p.activated_at) j["activated_at"] = *p.activated_at;
+        if (p.revoked_at)   j["revoked_at"]   = *p.revoked_at;
+        if (!p.revoke_reason.empty()) j["revoke_reason"] = p.revoke_reason;
+        if (st) {
+            json s = {{"online", st->online}, {"version", st->version}, {"updated_at", st->updated_at}};
+            if (!st->payload_json.empty()) {
+                auto parsed = json::parse(st->payload_json, nullptr, false);
+                if (!parsed.is_discarded()) s["state"] = std::move(parsed);
+            }
+            j["status"] = std::move(s);
+        }
+        return j;
+    };
+    auto auditPlayer = [](std::string_view action, const json& details, const std::string& id) {
+        setAuditContextOverride(action, details, "player", id);
+    };
+    // Optional free-text reason: absent -> fallback; over 200 bytes or with
+    // control characters -> nullopt (the caller answers invalid_reason).
+    auto playerReason = [](const json& v, const std::string& fallback) -> std::optional<std::string> {
+        if (v.is_null()) return fallback;
+        if (!v.is_string()) return std::nullopt;
+        std::string r = v.get<std::string>();
+        if (r.empty()) return fallback;
+        if (r.size() > 200) return std::nullopt;
+        for (unsigned char ch : r) if (ch < 0x20 || ch == 0x7f) return std::nullopt;
+        return r;
+    };
+
+    s.Get("/api/players/settings",
+          [pls, players_unavailable](const httplib::Request&, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        writeJson(res, 200, liveqx::players::PlayersService::toJson(pls->settings()));
+    });
+
+    s.Put("/api/players/settings",
+          [pls, players_unavailable, auditPlayer](const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        json body;
+        if (!parseJsonBody(req, res, body)) return;
+        if (!body.is_object()) { writeJson(res, 400, {{"error", "invalid_body"}}); return; }
+        std::map<std::string, std::string> patch;
+        json keys = json::array();
+        for (auto it = body.begin(); it != body.end(); ++it) {
+            if (it->is_string())                    patch[it.key()] = it->get<std::string>();
+            else if (it->is_number_integer())       patch[it.key()] = std::to_string(it->get<std::int64_t>());
+            else if (it->is_null())                 patch[it.key()] = "";
+            else { writeJson(res, 400, {{"error", "invalid_value"}, {"key", it.key()}}); return; }
+            keys.push_back(it.key());
+        }
+        const std::string err = pls->updateSettings(patch);
+        if (!err.empty()) {
+            writeJson(res, err == "storage_error" ? 500 : 400, {{"error", err}});
+            return;
+        }
+        // Keys only: the CA override is a certificate, not worth copying into the log.
+        auditPlayer("player.settings_update", json{{"keys", keys}}, "");
+        writeJson(res, 200, liveqx::players::PlayersService::toJson(pls->settings()));
+    });
+
+    s.Post("/api/players",
+           [pls, players_unavailable, playersStatusFor, auditPlayer, mountActorOf]
+           (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        json body;
+        if (!parseJsonBody(req, res, body)) return;
+        if (!body.is_object()) { writeJson(res, 400, {{"error", "invalid_body"}}); return; }
+        std::string name;
+        if (body.contains("name")) {
+            if (!body["name"].is_string()) { writeJson(res, 400, {{"error", "invalid_name"}}); return; }
+            name = body["name"].get<std::string>();
+        }
+        std::optional<std::string> policy;
+        if (body.contains("clock_policy") && !body["clock_policy"].is_null()) {
+            if (!body["clock_policy"].is_string()) {
+                writeJson(res, 400, {{"error", "invalid_clock_policy"}});
+                return;
+            }
+            policy = body["clock_policy"].get<std::string>();
+        }
+        const auto [actor_id, actor_name] = mountActorOf(req);
+        auto r = pls->create(name, actor_id, policy);
+        if (!r.ok) { writeJson(res, playersStatusFor(r.error), {{"error", r.error}}); return; }
+        auditPlayer("player.register",
+                    json{{"name", r.player.name}, {"clock_policy", r.player.clock_policy}},
+                    r.player.id);
+        writeJson(res, 201, r.package);
+    });
+
+    s.Get("/api/players",
+          [pls, players_unavailable, playerJson](const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        liveqx::players::ListFilter f;
+        if (req.has_param("state")) {
+            auto st = liveqx::players::parsePlayerState(req.get_param_value("state"));
+            if (!st) { writeJson(res, 400, {{"error", "invalid_state"}}); return; }
+            f.state = st;
+        }
+        auto num = [&](const char* k, std::int64_t def, std::int64_t lo, std::int64_t hi)
+            -> std::optional<std::int64_t> {
+            if (!req.has_param(k)) return def;
+            const std::string v = req.get_param_value(k);
+            if (v.empty() || v.size() > 9 ||
+                !std::all_of(v.begin(), v.end(), [](unsigned char c) { return std::isdigit(c); }))
+                return std::nullopt;
+            const std::int64_t n = std::stoll(v);
+            if (n < lo || n > hi) return std::nullopt;
+            return n;
+        };
+        auto limit  = num("limit", 200, 1, 1000);
+        auto offset = num("offset", 0, 0, 1'000'000);
+        if (!limit || !offset) { writeJson(res, 400, {{"error", "invalid_paging"}}); return; }
+        f.limit = *limit;
+        f.offset = *offset;
+
+        std::map<std::string, liveqx::players::StatusRow> statuses;
+        for (auto& st : pls->db().allStatuses()) statuses.emplace(st.player_id, st);
+        json arr = json::array();
+        for (const auto& p : pls->db().listPlayers(f)) {
+            std::optional<liveqx::players::StatusRow> st;
+            if (auto it = statuses.find(p.id); it != statuses.end()) st = it->second;
+            arr.push_back(playerJson(p, st));
+        }
+        writeJson(res, 200, json{{"players", std::move(arr)}});
+    });
+
+    s.Get(R"(/api/players/([^/]+))",
+          [pls, players_unavailable, playerJson](const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        const std::string id = req.matches[1];
+        auto p = pls->db().findPlayer(id);
+        if (!p) { writeJson(res, 404, {{"error", "not_found"}}); return; }
+        json j = playerJson(*p, pls->db().status(id));
+        json certs = json::array();
+        for (const auto& c : pls->db().certsOf(id)) {
+            json cj = {{"serial", c.serial_hex}, {"generation", c.generation},
+                       {"issued_at", c.issued_at}, {"not_before", c.not_before},
+                       {"not_after", c.not_after}};
+            if (c.revoked_at) {
+                cj["revoked_at"] = *c.revoked_at;
+                if (!c.revoke_reason.empty()) cj["revoke_reason"] = c.revoke_reason;
+            }
+            certs.push_back(std::move(cj));
+        }
+        j["certificates"] = std::move(certs);
+        json evs = json::array();
+        for (const auto& e : pls->db().events(id, 50))
+            evs.push_back({{"id", e.id}, {"ts", e.ts}, {"kind", e.kind}, {"details", e.details}});
+        j["events"] = std::move(evs);
+        writeJson(res, 200, j);
+    });
+
+    s.Post(R"(/api/players/([^/]+)/reissue-token)",
+           [pls, players_unavailable, playersStatusFor, auditPlayer]
+           (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        const std::string id = req.matches[1];
+        auto r = pls->reissueToken(id);
+        if (!r.ok) { writeJson(res, playersStatusFor(r.error), {{"error", r.error}}); return; }
+        auditPlayer("player.token_reissue", json{{"name", r.player.name}}, id);
+        writeJson(res, 200, r.package);
+    });
+
+    s.Post(R"(/api/players/([^/]+)/revoke-cert)",
+           [pls, players_unavailable, auditPlayer, playerReason]
+           (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        json body;
+        if (!parseJsonBody(req, res, body)) return;
+        if (!body.is_object()) { writeJson(res, 400, {{"error", "invalid_body"}}); return; }
+        auto reason = playerReason(body.value("reason", json(nullptr)), "revoked_by_admin");
+        if (!reason) { writeJson(res, 400, {{"error", "invalid_reason"}}); return; }
+        const std::string id = req.matches[1];
+        auto out = pls->revoke(id, *reason);
+        if (!out.found) { writeJson(res, 404, {{"error", "not_found"}}); return; }
+        auditPlayer("player.revoke",
+                    json{{"reason", *reason}, {"revoked_certs", out.revoked_certs}}, id);
+        writeJson(res, 200, json{{"revoked_certs", out.revoked_certs}});
+    });
+
+    s.Delete(R"(/api/players/([^/]+))",
+             [pls, players_unavailable, auditPlayer, playerReason]
+             (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        auto reason = playerReason(req.has_param("reason") ? json(req.get_param_value("reason"))
+                                                           : json(nullptr),
+                                   "deleted_by_admin");
+        if (!reason) { writeJson(res, 400, {{"error", "invalid_reason"}}); return; }
+        const std::string id = req.matches[1];
+        std::string name;
+        if (auto p = pls->db().findPlayer(id)) name = p->name;
+        auto out = pls->remove(id, *reason);
+        if (!out.found) { writeJson(res, 404, {{"error", "not_found"}}); return; }
+        auditPlayer("player.delete",
+                    json{{"name", name}, {"reason", *reason}, {"revoked_certs", out.revoked_certs}}, id);
+        writeJson(res, 200, json{{"revoked_certs", out.revoked_certs}});
     });
 
     // ─── Auth endpoints (fix22 c5/24) ───────────────────────────────────────
