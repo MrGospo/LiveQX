@@ -115,6 +115,26 @@ TEST_F(TlsBootstrapTest, BehindProxyIsPlainHttp) {
     EXPECT_TRUE(b.cert_path.empty());
 }
 
+TEST_F(TlsBootstrapTest, BehindProxyPassesTheTrustedProxyListOn) {
+    bool failed = false;
+    const auto b = resolveTlsBindings(
+        {{"tls", {{"mode", "behind_proxy"}, {"trust_proxy_cidrs", {"10.0.0.0/8", "192.0.2.1"}}}}},
+        makePaths(), "127.0.0.1", failed);
+    EXPECT_FALSE(failed);
+    EXPECT_EQ(b.trust_proxy_cidrs, (std::vector<std::string>{"10.0.0.0/8", "192.0.2.1"}));
+}
+
+TEST_F(TlsBootstrapTest, TrustedProxiesAreHonouredOnlyBehindAProxy) {
+    // In any other mode the server terminates TLS itself and the peer IS the
+    // client: a forwarded-for header there can only be a forgery.
+    bool failed = false;
+    const auto b = resolveTlsBindings(
+        {{"tls", {{"mode", "auto"}, {"trust_proxy_cidrs", {"10.0.0.0/8"}}}}},
+        makePaths(), "0.0.0.0", failed);
+    EXPECT_FALSE(failed);
+    EXPECT_TRUE(b.trust_proxy_cidrs.empty());
+}
+
 TEST_F(TlsBootstrapTest, InvalidTlsSectionFails) {
     bool failed = false;
     resolveTlsBindings({{"tls", {{"mode", "bogus"}}}}, makePaths(), "0.0.0.0", failed);

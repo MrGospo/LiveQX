@@ -50,6 +50,7 @@ extern "C" {
 #include "mounts/MountManager.h"
 #include "mounts/MountSpec.h"
 #include "players/EnrollService.h"
+#include "utils/ClientIp.h"
 #include "players/PlayersService.h"
 #include "audit/AuditDb.h"
 #include "audit/AuditLogger.h"
@@ -100,6 +101,7 @@ struct ControlApi::Impl {
     liveqx::players::PlayersService*       players;
     liveqx::players::EnrollService*        enroll;
     TlsBindings                                    tls_bindings;
+    liveqx::net::TrustedProxies                    proxies;
     std::function<void()>                          on_tls_reload;
     std::mutex                                     metrics_token_mu;
 
@@ -130,6 +132,12 @@ struct ControlApi::Impl {
           time_repo(tr), time_src(ts), sntp(sn),
           audit(al), audit_rate(arl), players(pls), enroll(enr),
           tls_bindings(tls) {
+        if (!tls.trust_proxy_cidrs.empty()) {
+            std::vector<std::string> bad;
+            proxies = liveqx::net::TrustedProxies::parse(tls.trust_proxy_cidrs, &bad);
+            for (const auto& b : bad)
+                LOG_WARN("tls: trust_proxy_cidrs entry '{}' is not a valid address or CIDR — ignored", b);
+        }
         if (!tls.cert_path.empty() && !tls.key_path.empty()) {
             auto* ssl = new httplib::SSLServer(
                 tls.cert_path.string().c_str(),
@@ -827,8 +835,25 @@ void installAuditPostHandler(httplib::Server& s,
 // whichever pre-handler is installed (rbac-aware or audit-only) so the
 // post-handler always sees a fresh context.
 bool resetAuditContextForRequest(const httplib::Request& req,
-                                 liveqx::audit::AuditLogger* audit) {
+                                 liveqx::audit::AuditLogger* audit,
+                                 const liveqx::net::TrustedProxies& proxies) {
     g_audit_ctx = {};
+    // Behind a reverse proxy the TCP peer is the proxy. Replace it, once and
+    // before anything reads it (rate limits, audit rows, handlers), with the
+    // client address taken from X-Forwarded-For — believed only from trusted
+    // proxies. httplib hands pre-routing handlers a const Request, but the
+    // object is a mutable local of the connection loop, so writing to it is
+    // well-defined; this is the one place where the address is decided.
+    if (!proxies.empty()) {
+        std::string xff;
+        auto range = req.headers.equal_range("X-Forwarded-For");
+        for (auto it = range.first; it != range.second; ++it) {
+            if (!xff.empty()) xff += ", ";
+            xff += it->second;
+        }
+        auto& mutable_req = const_cast<httplib::Request&>(req);
+        mutable_req.remote_addr = proxies.resolve(req.remote_addr, xff);
+    }
     if (audit) {
         g_audit_ctx.start       = std::chrono::steady_clock::now();
         g_audit_ctx.request_id  = generateAuditRequestId();
@@ -850,11 +875,12 @@ bool resetAuditContextForRequest(const httplib::Request& req,
 // sole job is to populate g_audit_ctx so the post-handler can emit rows.
 // Never rejects a request — mutation gating happens in the RBAC path.
 void installAuditPreHandler(httplib::Server& s,
-                            liveqx::audit::AuditLogger* audit) {
+                            liveqx::audit::AuditLogger* audit,
+                            const liveqx::net::TrustedProxies& proxies) {
     s.set_pre_routing_handler(
-        [audit](const httplib::Request& req,
+        [audit, &proxies](const httplib::Request& req,
                 httplib::Response&) {
-            resetAuditContextForRequest(req, audit);
+            resetAuditContextForRequest(req, audit, proxies);
             return httplib::Server::HandlerResponse::Unhandled;
         });
 }
@@ -862,12 +888,13 @@ void installAuditPreHandler(httplib::Server& s,
 void installRbacPreHandler(httplib::Server& s,
                            liveqx::auth::RbacMiddleware& rbac,
                            liveqx::audit::AuditLogger* audit,
-                           liveqx::audit::AuditRateLimiter* audit_rate) {
+                           liveqx::audit::AuditRateLimiter* audit_rate,
+                           const liveqx::net::TrustedProxies& proxies) {
     using Decision = liveqx::auth::RbacMiddleware::Decision;
     s.set_pre_routing_handler(
-        [&rbac, audit, audit_rate](const httplib::Request& req,
+        [&rbac, audit, audit_rate, &proxies](const httplib::Request& req,
                                    httplib::Response& res) {
-            const bool is_api = resetAuditContextForRequest(req, audit);
+            const bool is_api = resetAuditContextForRequest(req, audit, proxies);
             if (!is_api) {
                 return httplib::Server::HandlerResponse::Unhandled;
             }
@@ -5492,11 +5519,11 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     // токен. Open-правила выше это покрывают.
     if (auto* rbac = impl_->rbac) {
         registerRbacRules(*rbac);
-        installRbacPreHandler(s, *rbac, impl_->audit, impl_->audit_rate);
+        installRbacPreHandler(s, *rbac, impl_->audit, impl_->audit_rate, impl_->proxies);
     } else if (impl_->audit) {
         // No RBAC but audit is on — still need a pre-handler to reset
         // g_audit_ctx per request so the post-handler can emit rows.
-        installAuditPreHandler(s, impl_->audit);
+        installAuditPreHandler(s, impl_->audit, impl_->proxies);
     }
     if (impl_->audit) {
         installAuditPostHandler(s, impl_->auth, impl_->audit, impl_->events);

@@ -253,6 +253,7 @@ set(SOURCES
     src/players/PlayersService.cpp
     src/players/EnrollService.cpp
     src/utils/TlsConfig.cpp
+    src/utils/ClientIp.cpp
     src/utils/CpuAffinity.cpp
     src/utils/LegacyMigration.cpp
     src/utils/NetIfaces.cpp

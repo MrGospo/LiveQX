@@ -60,7 +60,7 @@ struct PlayersApiFixture {
     std::unique_ptr<ControlApi> api;
     int                         port;
 
-    PlayersApiFixture(int p, bool with_service = true)
+    PlayersApiFixture(int p, bool with_service = true, TlsBindings tls = {})
         : manager(nullptr, fs::path{}), port(p) {
         static std::atomic<int> seq{0};
         tmp = fs::temp_directory_path() /
@@ -93,7 +93,7 @@ struct PlayersApiFixture {
         api = std::make_unique<ControlApi>(
             port, manager, nullptr, LivezOptions{}, nullptr, nullptr, nullptr, nullptr,
             /*rbac=*/nullptr, /*events=*/nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-            TlsBindings{}, nullptr, nullptr, nullptr, audit_logger.get(), nullptr,
+            tls, nullptr, nullptr, nullptr, audit_logger.get(), nullptr,
             with_service ? svc.get() : nullptr,
             with_service ? enroll.get() : nullptr);
         api->start();
@@ -553,4 +553,75 @@ TEST(ControlApiPlayers, ADeniedEnrollIsFiledAsAccessAndASuccessAsPlayer) {
     ASSERT_EQ(ok.size(), 1u);
     EXPECT_EQ(ok[0].category, liveqx::audit::Category::Player);
     EXPECT_EQ(ok[0].target_id, pkg["player_id"].get<std::string>());
+}
+
+// ─── Behind a reverse proxy ─────────────────────────────────────────────────
+// The test client connects from 127.0.0.1, which plays the proxy.
+
+namespace {
+TlsBindings behindProxy(std::vector<std::string> trusted) {
+    TlsBindings t;
+    t.mode = "behind_proxy";
+    t.trust_proxy_cidrs = std::move(trusted);
+    return t;
+}
+httplib::Headers xff(const std::string& v) { return {{"X-Forwarded-For", v}}; }
+}  // namespace
+
+TEST(ControlApiPlayers, BehindATrustedProxyEachClientHasItsOwnRateLimit) {
+    PlayersApiFixture f(kBasePort + 19, true, behindProxy({"127.0.0.1"}));
+    f.configure();
+    auto pkg = f.create("Lobby");
+    auto bad = enrollBody(pkg);
+    bad["bootstrap_token"] = "nope";
+    auto cli = f.client();
+    for (int i = 0; i < 3; ++i)
+        ASSERT_EQ(cli.Post("/api/players/enroll", xff("198.51.100.1"), bad.dump(), "application/json")->status, 401);
+    EXPECT_EQ(cli.Post("/api/players/enroll", xff("198.51.100.1"), enrollBody(pkg).dump(), "application/json")->status, 429)
+        << "the guessing client is locked";
+    EXPECT_EQ(cli.Post("/api/players/enroll", xff("198.51.100.2"), enrollBody(pkg).dump(), "application/json")->status, 200)
+        << "another client behind the same proxy is not";
+}
+
+TEST(ControlApiPlayers, WithoutTrustTheProxyHeaderChangesNothing) {
+    // behind_proxy but no trusted list: everyone is the proxy, and a forged
+    // header must not buy a fresh rate-limit bucket.
+    PlayersApiFixture f(kBasePort + 20, true, behindProxy({}));
+    f.configure();
+    auto pkg = f.create("Lobby");
+    auto bad = enrollBody(pkg);
+    bad["bootstrap_token"] = "nope";
+    auto cli = f.client();
+    for (int i = 0; i < 3; ++i)
+        ASSERT_EQ(cli.Post("/api/players/enroll", xff("198.51.100." + std::to_string(i)), bad.dump(), "application/json")->status, 401);
+    EXPECT_EQ(cli.Post("/api/players/enroll", xff("203.0.113.99"), enrollBody(pkg).dump(), "application/json")->status, 429);
+}
+
+TEST(ControlApiPlayers, AHeaderFromAPeerThatIsNotTrustedIsIgnored) {
+    PlayersApiFixture f(kBasePort + 21, true, behindProxy({"10.0.0.0/8"}));   // 127.0.0.1 not in it
+    f.configure();
+    auto pkg = f.create("Lobby");
+    auto bad = enrollBody(pkg);
+    bad["bootstrap_token"] = "nope";
+    auto cli = f.client();
+    for (int i = 0; i < 3; ++i)
+        ASSERT_EQ(cli.Post("/api/players/enroll", xff("198.51.100." + std::to_string(i)), bad.dump(), "application/json")->status, 401);
+    EXPECT_EQ(cli.Post("/api/players/enroll", xff("203.0.113.99"), enrollBody(pkg).dump(), "application/json")->status, 429);
+}
+
+TEST(ControlApiPlayers, TheAuditTrailNamesTheRealClientBehindAProxy) {
+    PlayersApiFixture f(kBasePort + 22, true, behindProxy({"127.0.0.1"}));
+    f.configure();
+    auto pkg = f.create("Lobby");
+    auto bad = enrollBody(pkg);
+    bad["bootstrap_token"] = "nope";
+    auto cli = f.client();
+    ASSERT_EQ(cli.Post("/api/players/enroll", xff("6.6.6.6, 198.51.100.7"), bad.dump(), "application/json")->status, 401);
+    f.audit_logger->flushForTesting();
+    liveqx::audit::AuditFilter af;
+    af.action = "player.enroll_denied";
+    af.limit  = 4;
+    auto rows = f.audit_db->list(af);
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_EQ(rows[0].actor_ip, "198.51.100.7") << "rightmost entry, not the forged leading one";
 }

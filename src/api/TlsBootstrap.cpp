@@ -110,14 +110,13 @@ TlsBindings resolveTlsBindings(const nlohmann::json& cfg,
     case sct::Mode::BehindProxy: {
         if (tcfg.trust_proxy_cidrs.empty()) {
             LOG_WARN("tls: behind_proxy mode without "
-                     "trust_proxy_cidrs — X-Forwarded-* will not be "
-                     "honoured (safe default)");
+                     "trust_proxy_cidrs — every client will look like the "
+                     "proxy (shared rate limits, proxy address in the audit "
+                     "trail); X-Forwarded-For is not honoured");
         } else {
-            LOG_WARN("tls: behind_proxy mode — trust_proxy_cidrs "
-                     "configured ({} entry/ies) but enforcement is "
-                     "deferred to a follow-up commit; treating "
-                     "every X-Forwarded-* as untrusted",
-                     tcfg.trust_proxy_cidrs.size());
+            out.trust_proxy_cidrs = tcfg.trust_proxy_cidrs;
+            LOG_INFO("tls: behind_proxy mode — X-Forwarded-For honoured from "
+                     "{} trusted proxy entry/ies", tcfg.trust_proxy_cidrs.size());
         }
         LOG_INFO("tls: serving plain HTTP (TLS terminates upstream)");
         break;

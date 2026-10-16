@@ -62,6 +62,9 @@ struct TlsBindings {
     std::string              mode{"disabled"};     // auto|provided|behind_proxy|disabled
     std::vector<std::string> san_extra;            // operator-supplied SANs
     std::string              bind{"0.0.0.0"};      // listen address (v4 or v6)
+    // behind_proxy only: peers allowed to say who the client is through
+    // X-Forwarded-For (utils/ClientIp.h). Empty = the header is ignored.
+    std::vector<std::string> trust_proxy_cidrs;
 };
 
 // HTTP front-end for ChannelManager. Endpoints:
