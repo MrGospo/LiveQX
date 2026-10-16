@@ -255,6 +255,7 @@ set(SOURCES
     src/players/RevocationList.cpp
     src/players/DeviceApi.cpp
     src/players/RenewService.cpp
+    src/players/PresenceService.cpp
     src/utils/TlsConfig.cpp
     src/utils/ClientIp.cpp
     src/utils/CpuAffinity.cpp

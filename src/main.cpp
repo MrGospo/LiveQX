@@ -50,6 +50,7 @@
 #include "mounts/MountsDb.h"
 #include "players/DeviceApi.h"
 #include "players/EnrollService.h"
+#include "players/PresenceService.h"
 #include "players/RenewService.h"
 #include "players/PlayersDb.h"
 #include "players/RevocationList.h"
@@ -945,6 +946,7 @@ int main(int argc, char* argv[]) {
         std::unique_ptr<liveqx::players::PlayersService> players_service;
         std::unique_ptr<liveqx::players::EnrollService>  enroll_service;
         std::unique_ptr<liveqx::players::RenewService>   renew_service;
+        std::unique_ptr<liveqx::players::PresenceService> presence_service;
         std::unique_ptr<liveqx::players::DeviceApi>      device_api;        // started once TLS is resolved
         std::function<std::shared_ptr<const liveqx::tls::DeviceCa>()> device_ca_provider;
         if (players_db.open()) {
@@ -1011,6 +1013,25 @@ int main(int argc, char* argv[]) {
             ro.clock_offset_s = clock_offset_s;
             ro.ca_cert_pem    = [&players_service] { return players_service->caCertPem(); };
             renew_service = std::make_unique<liveqx::players::RenewService>(players_db, std::move(ro));
+
+            // Presence: online while heartbeats keep coming, offline after the
+            // configured number of missed intervals plus a grace (A8).
+            // players.presence: heartbeat_interval_s (60), missed_intervals (3),
+            // grace_s (15), flush_interval_s (5).
+            json pcfg = json::object();
+            if (cfg.contains("players") && cfg["players"].is_object() &&
+                cfg["players"].contains("presence") && cfg["players"]["presence"].is_object())
+                pcfg = cfg["players"]["presence"];
+            liveqx::players::PresenceOptions pr;
+            pr.offline_after_s  = std::clamp<std::int64_t>(pcfg.value("heartbeat_interval_s", 60), 5, 3600) *
+                                  std::clamp<std::int64_t>(pcfg.value("missed_intervals", 3), 1, 20) +
+                                  std::clamp<std::int64_t>(pcfg.value("grace_s", 15), 0, 600);
+            pr.flush_interval_s = std::clamp<std::int64_t>(pcfg.value("flush_interval_s", 5), 0, 300);
+            pr.events           = &event_bus;
+            const auto pr_offline_after_s = pr.offline_after_s;
+            presence_service = std::make_unique<liveqx::players::PresenceService>(players_db, std::move(pr));
+            presence_service->start();
+            LOG_INFO("Players: presence — offline after {} s of silence", pr_offline_after_s);
         } else {
             LOG_ERROR("Players: cannot open {} — player integration disabled",
                       paths.playersDb().string());
@@ -1205,6 +1226,7 @@ int main(int argc, char* argv[]) {
                     dopt.key_path  = tls_bindings.key_path;
                     dopt.events    = &event_bus;
                     dopt.renew     = renew_service.get();
+                    dopt.presence  = presence_service.get();
                     // Refusals and renewals go into the same HMAC-chained trail
                     // as the admin API; the UI is nudged to refetch over SSE.
                     dopt.audit     = [&audit_logger, &event_bus](const liveqx::players::DeviceAuditEvent& e) {

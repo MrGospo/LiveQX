@@ -130,6 +130,18 @@ bool DeviceApi::start() {
 }
 
 bool DeviceApi::startListener() {
+    if (!presence_) {
+        if (opts_.presence) {
+            presence_ = opts_.presence;
+        } else {
+            PresenceOptions po;
+            po.flush_interval_s = 0;
+            po.events           = opts_.events;
+            po.now              = opts_.now;
+            own_presence_ = std::make_unique<PresenceService>(db_, std::move(po));
+            presence_     = own_presence_.get();
+        }
+    }
     server_ = std::make_unique<httplib::SSLServer>([this](SSL_CTX& ctx) {
         SSL_CTX_set_min_proto_version(&ctx, TLS1_2_VERSION);
         if (SSL_CTX_use_certificate_chain_file(&ctx, opts_.cert_path.c_str()) != 1 ||
@@ -247,25 +259,9 @@ bool DeviceApi::startListener() {
         if (body.contains("version") && body["version"].is_string())
             version = cleanText(body["version"].get<std::string>(), 64);
 
-        const auto previous = db_.status(id);
-        StatusRow row;
-        row.player_id    = id;
-        row.updated_at   = now;
-        row.online       = true;
-        row.version      = version;
-        row.payload_json = sanitiseHeartbeat(body).dump();
-        if (!db_.applyStatuses({row})) { reply(res, 500, "internal_error"); return; }
-
-        if (previous && !previous->version.empty() && !version.empty() && previous->version != version) {
-            db_.addEvent(id, "version_changed", json{{"from", previous->version}, {"to", version}}.dump(), now);
-            if (opts_.events) {
-                std::string name;
-                if (auto p = db_.findPlayer(id)) name = p->name;
-                opts_.events->publish(events::EventType::PlayerVersionChanged, -1,
-                                      {{"player_id", id}, {"name", name},
-                                       {"from", previous->version}, {"to", version}});
-            }
-        }
+        // Online/offline, version changes and the batched status write all
+        // live in PresenceService.
+        presence_->onHeartbeat(id, version, sanitiseHeartbeat(body).dump());
         res.status = 204;
     });
 

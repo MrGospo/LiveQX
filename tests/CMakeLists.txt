@@ -101,6 +101,7 @@ add_executable(liveqx-tests
     test_revocation_list.cpp
     test_device_api.cpp
     test_renew_service.cpp
+    test_presence.cpp
     test_enroll_service.cpp
     test_pki_export.cpp
     test_tls_config.cpp
@@ -172,6 +173,7 @@ add_executable(liveqx-tests
     ../src/players/RevocationList.cpp
     ../src/players/DeviceApi.cpp
     ../src/players/RenewService.cpp
+    ../src/players/PresenceService.cpp
     ../src/utils/TlsConfig.cpp
     ../src/utils/RuntimeLock.cpp
     ../src/metrics/ChannelProfiler.cpp

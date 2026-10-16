@@ -23,6 +23,7 @@
 
 #include "events/EventBus.h"
 #include "players/PlayersDb.h"
+#include "players/PresenceService.h"
 #include "players/RenewService.h"
 #include "players/RevocationList.h"
 
@@ -70,6 +71,10 @@ struct DeviceApiOptions {
     // window with a counter, not a flood.
     std::function<void(const DeviceAuditEvent&)> audit;
     std::int64_t          audit_throttle_s{600};
+    // Who is online and what changed. Null: the port keeps a private
+    // write-through one (every heartbeat stored at once, no offline sweeper) —
+    // fine for tests, not for a fleet.
+    PresenceService*      presence{nullptr};
     // Certificate renewal; null = the route answers 503.
     RenewService*         renew{nullptr};
     std::int64_t          min_renew_interval_s{10};
@@ -120,6 +125,9 @@ private:
 
     void emitAudit(DeviceAuditEvent ev);
     bool startListener();
+
+    PresenceService*                             presence_{nullptr};
+    std::unique_ptr<PresenceService>             own_presence_;
 
     std::mutex                                   audit_mu_;
     struct Throttle { std::int64_t since{0}; int suppressed{0}; };
