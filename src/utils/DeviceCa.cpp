@@ -287,6 +287,7 @@ struct DeviceCa::Impl {
 
 DeviceCa::DeviceCa(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 DeviceCa::~DeviceCa() = default;
+BrokerIdentity::~BrokerIdentity() { OPENSSL_cleanse(key_pem.data(), key_pem.size()); }
 
 int DeviceCa::generation() const noexcept { return impl_->generation; }
 const std::string& DeviceCa::certPem() const noexcept { return impl_->cert_pem; }
@@ -699,6 +700,134 @@ bool DeviceCa::importIntermediate(const fs::path& dir, const liveqx::auth::Maste
     return true;
 }
 
+
+// ─── the server's certificate for the broker ────────────────────────────────
+namespace {
+
+constexpr int kBrokerIdentityValidityDays = 365;
+constexpr std::int64_t kBrokerIdentityRenewBeforeSec = 30LL * 86400;
+
+std::int64_t asn1ToEpoch(const ASN1_TIME* t) {
+    std::tm tm{};
+    if (!t || ASN1_TIME_to_tm(t, &tm) != 1) return 0;
+    return static_cast<std::int64_t>(timegm(&tm));
+}
+
+// A usable stored identity, or nullopt (the caller then issues a new one).
+bool loadBrokerIdentity(const fs::path& idir, const liveqx::auth::MasterKey& key, X509* ca_cert,
+                        int ca_generation, std::int64_t now, BrokerIdentity& out) {
+    auto chain = readFile(idir / "client.crt");
+    auto blob  = readFile(idir / "client.key.enc");
+    if (!chain || !blob) return false;
+    Cert leaf = certFromPem(*chain);
+    if (!leaf) { ERR_clear_error(); return false; }
+    std::vector<std::uint8_t> sealed(blob->begin(), blob->end());
+    auto plain = key.decrypt(sealed);
+    if (!plain) return false;                                   // tampered, or the wrong master key
+    Pkey pkey = keyFromPem(*plain);
+    OPENSSL_cleanse(plain->data(), plain->size());
+    if (!pkey) { ERR_clear_error(); return false; }
+
+    char cn[128]{};
+    X509_NAME_get_text_by_NID(X509_get_subject_name(leaf.get()), NID_commonName, cn, sizeof cn);
+    const std::int64_t not_after = asn1ToEpoch(X509_get0_notAfter(leaf.get()));
+    const bool ok =
+        std::strcmp(cn, kBrokerClientCn) == 0 &&
+        X509_check_private_key(leaf.get(), pkey.get()) == 1 &&                  // it is this key's certificate
+        X509_verify(leaf.get(), X509_get0_pubkey(ca_cert)) == 1 &&               // issued by the CURRENT CA
+        not_after - now >= kBrokerIdentityRenewBeforeSec;
+    ERR_clear_error();
+    if (!ok) return false;
+
+    SecretPem pem;
+    if (!keyToPem(pkey.get(), pem)) return false;
+    out.cert_chain_pem = *chain;
+    out.key_pem        = pem.s;
+    out.serial_hex     = serialToHex(X509_get0_serialNumber(leaf.get()));
+    out.generation     = ca_generation;
+    out.not_after_unix = not_after;
+    return !out.serial_hex.empty();
+}
+
+}  // namespace
+
+bool DeviceCa::ensureBrokerIdentity(const fs::path& dir, const liveqx::auth::MasterKey& key,
+                                    const DeviceCa& ca, BrokerIdentity& out, std::string& err,
+                                    std::int64_t now_unix) {
+    err.clear();
+    const std::int64_t now = now_unix ? now_unix : wallNow();
+    const fs::path idir = dir / "broker_client";
+    X509* ca_cert = ca.impl_->cert.get();
+
+    if (loadBrokerIdentity(idir, key, ca_cert, ca.impl_->generation, now, out)) return true;
+
+    // Issue a new one.
+    Pkey pkey(EVP_EC_gen("P-256"));
+    if (!pkey) { err = "EVP_EC_gen: " + sslErr(); return false; }
+    Cert cert(X509_new());
+    if (!cert) { err = "internal_error"; return false; }
+    X509_set_version(cert.get(), 2);
+    auto serial = randomSerial();
+    if (!serial || !X509_set_serialNumber(cert.get(), serial.get())) { err = "internal_error"; return false; }
+    X509_NAME* subj = X509_get_subject_name(cert.get());
+    X509_NAME_add_entry_by_txt(subj, "CN", MBSTRING_ASC,
+                               reinterpret_cast<const unsigned char*>(kBrokerClientCn),
+                               -1, -1, 0);
+    X509_set_issuer_name(cert.get(), X509_get_subject_name(ca_cert));
+
+    const std::int64_t nb = now - kNotBeforeSkewSec;
+    std::int64_t na = now + std::int64_t{kBrokerIdentityValidityDays} * 86400;
+    // Never beyond its issuer: with a CA that ends sooner, the certificate ends with it.
+    if (const std::int64_t ca_end = asn1ToEpoch(X509_get0_notAfter(ca_cert)); ca_end > 0 && na > ca_end) na = ca_end;
+    if (na - now < kBrokerIdentityRenewBeforeSec) { err = "ca_validity_too_short"; return false; }
+    if (!setTime(X509_set1_notBefore, cert.get(), nb) || !setTime(X509_set1_notAfter, cert.get(), na) ||
+        !X509_set_pubkey(cert.get(), pkey.get())) {
+        ERR_clear_error();
+        err = "internal_error";
+        return false;
+    }
+    if (!addExt(cert.get(), ca_cert, NID_basic_constraints, "critical,CA:FALSE") ||
+        !addExt(cert.get(), ca_cert, NID_key_usage, "critical,digitalSignature") ||
+        !addExt(cert.get(), ca_cert, NID_ext_key_usage, "clientAuth") ||
+        !addExt(cert.get(), ca_cert, NID_subject_key_identifier, "hash") ||
+        !addExt(cert.get(), ca_cert, NID_authority_key_identifier, "keyid")) {
+        ERR_clear_error();
+        err = "internal_error";
+        return false;
+    }
+    if (!X509_sign(cert.get(), ca.impl_->key.get(), EVP_sha256())) {
+        ERR_clear_error();
+        err = "internal_error";
+        return false;
+    }
+
+    SecretPem pem;
+    if (!keyToPem(pkey.get(), pem)) { err = "serialize key"; return false; }
+    auto blob = key.encrypt(pem.s);
+    if (blob.empty()) { err = "cannot seal the broker identity key"; return false; }
+    const std::string chain = certToPem(cert.get()) + (ca.impl_->two_tier ? ca.impl_->cert_pem : std::string{});
+
+    std::error_code ec;
+    fs::create_directories(idir, ec);
+    if (ec) { err = "create_directories: " + ec.message(); return false; }
+    fs::permissions(idir, fs::perms::owner_all, fs::perm_options::replace, ec);
+    const auto mode = fs::perms::owner_read | fs::perms::owner_write;
+    // The key first: a crash in between leaves a certificate that does not fit it,
+    // which the next start notices and replaces.
+    if (!atomicWrite(idir / "client.key.enc",
+                     std::string_view(reinterpret_cast<const char*>(blob.data()), blob.size()), mode, err) ||
+        !atomicWrite(idir / "client.crt", chain, mode, err))
+        return false;
+
+    out.cert_chain_pem = chain;
+    out.key_pem        = pem.s;
+    out.serial_hex     = serialToHex(serial.get());
+    out.generation     = ca.impl_->generation;
+    out.not_after_unix = na;
+    if (out.serial_hex.empty()) { err = "internal_error"; return false; }
+    return true;
+}
+
 bool DeviceCa::resealAll(const fs::path& dir, const liveqx::auth::MasterKey& old_key,
                          const liveqx::auth::MasterKey& new_key, std::string& err) {
     err.clear();
@@ -732,6 +861,32 @@ bool DeviceCa::resealAll(const fs::path& dir, const liveqx::auth::MasterKey& old
         OPENSSL_cleanse(plain->data(), plain->size());
         if (it.new_blob.empty()) {
             err = "device CA " + gdir.filename().string() + " key cannot be re-sealed";
+            return false;
+        }
+        items.push_back(std::move(it));
+    }
+
+    // The server's certificate for the broker has its own sealed key, handled in
+    // the same all-or-nothing step.
+    if (const fs::path bkey = dir / "broker_client" / "client.key.enc"; fs::exists(bkey, ec)) {
+        Item it;
+        it.path = bkey;
+        auto blob = readFile(it.path);
+        if (!blob) {
+            err = "broker identity key is unreadable";
+            return false;
+        }
+        it.old_blob = std::move(*blob);
+        std::vector<std::uint8_t> sealed(it.old_blob.begin(), it.old_blob.end());
+        auto plain = old_key.decrypt(sealed);
+        if (!plain) {
+            err = "broker identity key cannot be decrypted";
+            return false;
+        }
+        it.new_blob = new_key.encrypt(*plain);
+        OPENSSL_cleanse(plain->data(), plain->size());
+        if (it.new_blob.empty()) {
+            err = "broker identity key cannot be re-sealed";
             return false;
         }
         items.push_back(std::move(it));

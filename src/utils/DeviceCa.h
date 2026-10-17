@@ -54,6 +54,27 @@ struct RevokedCert {
     std::int64_t revoked_at_unix{0};
 };
 
+// The server's own client certificate for the MQTT broker. The server is a
+// client of the broker; the broker trusts the device CA for client
+// certificates, so this certificate comes from the same CA but is NOT a player:
+// the CN is the fixed name below, never shaped like a player id.
+inline constexpr const char* kBrokerClientCn = "liveqx-server";
+
+struct BrokerIdentity {
+    std::string  cert_chain_pem;     // leaf, then the intermediate (two-tier): what the client presents
+    std::string  key_pem;            // PKCS#8 PEM of the leaf key — SECRET, in memory only
+    std::string  serial_hex;
+    int          generation{0};      // CA generation that issued it
+    std::int64_t not_after_unix{0};
+
+    BrokerIdentity() = default;
+    BrokerIdentity(const BrokerIdentity&)            = delete;
+    BrokerIdentity& operator=(const BrokerIdentity&) = delete;
+    BrokerIdentity(BrokerIdentity&&) noexcept            = default;
+    BrokerIdentity& operator=(BrokerIdentity&&) noexcept = default;
+    ~BrokerIdentity();
+};
+
 class DeviceCa {
 public:
     // Opens the CA in `dir`. With `allow_create`, a directory without any
@@ -141,10 +162,26 @@ public:
                      std::string& err,
                      std::int64_t now_unix = 0) const;
 
+    // The server's certificate for the broker (CN `kBrokerClientCn`, clientAuth
+    // only, CA:FALSE). Kept in <dir>/broker_client/ with its key sealed by the
+    // master key (client.key.enc) and the certificate chain (client.crt).
+    // Reused while it is good; issued anew when missing, unreadable, tampered,
+    // not matching its key, not issued by the CURRENT CA, or within 30 days of
+    // its end. Valid for a year (never beyond its CA). `now_unix` 0 = the clock.
+    // Master key rotation re-seals the key through resealAll.
+    static bool ensureBrokerIdentity(const std::filesystem::path& dir,
+                                     const liveqx::auth::MasterKey& key,
+                                     const DeviceCa& ca,
+                                     BrokerIdentity& out,
+                                     std::string& err,
+                                     std::int64_t now_unix = 0);
+
     // Re-seals the CA key of every generation under `new_key`; used by master
     // key rotation. Each blob is decrypted with `old_key` first; nothing is
     // written unless all decrypt. Rolls back already written files on a
-    // failed write. A missing `dir` is not an error (no device CA yet).
+    // failed write. A missing `dir` is not an error (no device CA yet). The
+    // broker identity's key (broker_client/client.key.enc), if any, is re-sealed
+    // in the same all-or-nothing step.
     static bool resealAll(const std::filesystem::path& dir,
                           const liveqx::auth::MasterKey& old_key,
                           const liveqx::auth::MasterKey& new_key,

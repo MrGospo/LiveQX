@@ -871,3 +871,32 @@ TEST_F(DeviceApiTest, AStartupFlagThatIsNotABooleanIsJustAnOrdinaryHeartbeat) {
     EXPECT_EQ(r->status, 429) << "only a real true earns the exemption";
 }
 
+// ── the server's own certificate for the broker is not a player ─────────────
+TEST_F(DeviceApiTest, TheServersOwnBrokerCertificateGetsNoFurtherThanTheGate) {
+    // It chains to the same device root, so TLS accepts it — which makes the
+    // gate's player check the thing that matters.
+    tls::BrokerIdentity ident;
+    std::string err;
+    ASSERT_TRUE(tls::DeviceCa::ensureBrokerIdentity(dir_ / "c1" / "ca", *mk_, *center_.ca, ident, err)) << err;
+    PlayerCreds svc;
+    svc.id = "liveqx-server";
+    svc.cert_path = dir_ / "svc.crt";
+    svc.key_path  = dir_ / "svc.key";
+    write(svc.cert_path, ident.cert_chain_pem);
+    write(svc.key_path, ident.key_pem);
+
+    auto own = clientWith(svc);
+    auto r = own->Patch(path(svc.id, "heartbeat"), hb(), "application/json");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 404) << "there is no such player";
+    EXPECT_EQ(errorOf(r), "player_not_found");
+
+    auto victim = pair("Lobby");
+    auto other = clientWith(svc);
+    auto r2 = other->Patch(path(victim.id, "heartbeat"), hb(), "application/json");
+    ASSERT_TRUE(r2);
+    EXPECT_EQ(r2->status, 403) << "and it cannot speak for a real player either";
+    EXPECT_EQ(errorOf(r2), "cn_mismatch");
+    EXPECT_FALSE(db_->status(victim.id).has_value());
+}
+

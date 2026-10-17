@@ -103,6 +103,7 @@ add_executable(liveqx-tests
     test_renew_service.cpp
     test_presence.cpp
     test_player_access.cpp
+    test_broker_identity.cpp
     test_enroll_service.cpp
     test_pki_export.cpp
     test_tls_config.cpp
