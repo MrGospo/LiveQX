@@ -50,6 +50,7 @@ extern "C" {
 #include "mounts/MountManager.h"
 #include "mounts/MountSpec.h"
 #include "players/EnrollService.h"
+#include "players/PlayerAccess.h"
 #include "utils/ClientIp.h"
 #include "players/PlayersService.h"
 #include "audit/AuditDb.h"
@@ -442,16 +443,19 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     rbac.registerEndpoint("POST /api/players/{id}/revoke-cert",     rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("POST /api/players/{id}/reissue-token",   rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("GET /api/players/settings",              rbacRole(RbacRole::Admin));
-    // The hierarchy all -> object -> group. Administered by admins; reading it is
-    // admin-only until access by group exists, so nobody sees names they should not.
-    rbac.registerEndpoint("GET /api/player-objects",                rbacRole(RbacRole::Admin));
+    // The hierarchy all -> object -> group. Administered by admins; reading the
+    // tree and moving screens are open to the roles but filtered / checked by the
+    // rights an administrator has given (players/PlayerAccess).
+    rbac.registerEndpoint("GET /api/player-objects",                rbacRole(RbacRole::Viewer));   // filtered by rights
     rbac.registerEndpoint("POST /api/player-objects",               rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("PUT /api/player-objects/{id}",           rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("DELETE /api/player-objects/{id}",        rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("POST /api/player-objects/{id}/groups",   rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("PUT /api/player-groups/{id}",            rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("DELETE /api/player-groups/{id}",         rbacRole(RbacRole::Admin));
-    rbac.registerEndpoint("PUT /api/players/{id}/group",            rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("PUT /api/players/{id}/group",            rbacRole(RbacRole::Operator)); // needs the move right on both groups
+    rbac.registerEndpoint("GET /api/auth/users/{uid}/player-grants", rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("PUT /api/auth/users/{uid}/player-grants", rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("PUT /api/players/settings",              rbacRole(RbacRole::Admin));
 
     // fix33 — server time / NTP config. GET — Operator (mostly read для
@@ -1250,7 +1254,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     // false и httplib закрывает chunked stream.
     auto* rb = impl_->rbac;
     s.Get("/api/events/stream",
-          [ev, rb](const httplib::Request& req, httplib::Response& res) {
+          [ev, rb, au](const httplib::Request& req, httplib::Response& res) {
         if (!ev) {
             writeJson(res, 503, {{"error", "events_bus_not_configured"}});
             return;
@@ -1317,9 +1321,13 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         res.set_header("X-Accel-Buffering",   "no"); // disable nginx buffering
         res.set_chunked_content_provider(
             "text/event-stream",
-            [sub, matches, ctx](size_t, httplib::DataSink& sink) -> bool {
+            [sub, matches, ctx, au](size_t, httplib::DataSink& sink) mutable -> bool {
                 using namespace std::chrono_literals;
                 auto evs = sub->drain(15s);
+                // Rights on players are read afresh on every beat of the stream, so
+                // taking one away stops the news at once, not at the next login.
+                if (au && ctx.role != liveqx::auth::Role::Admin && ctx.user_id > 0)
+                    ctx.player_grants = au->playerGrantsOf(ctx.user_id);
 
                 // Slow-consumer guard: queue overflowed → tell client to
                 // reconnect with last seen id and abort the stream.
@@ -3211,6 +3219,41 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         }
         return j;
     };
+    // What the caller may do with players (B13): the role from the verified
+    // token, the rights read fresh from the database. nullopt = not signed in.
+    // Without authentication configured at all (development, tests) nothing is
+    // restricted, as before.
+    auto accessFor = [au, pls](const httplib::Request& req) -> std::optional<liveqx::players::PlayerAccess> {
+        using liveqx::players::PlayerAccess;
+        if (!au) return PlayerAccess::unrestricted();
+        if (!req.has_header("Authorization")) return std::nullopt;
+        const auto v = req.get_header_value("Authorization");
+        constexpr const char* kPrefix = "Bearer ";
+        if (v.rfind(kPrefix, 0) != 0) return std::nullopt;
+        auto claims = au->verifyActiveAccess(v.substr(7));
+        if (!claims) return std::nullopt;
+        if (claims->role == liveqx::auth::Role::Admin) return PlayerAccess(claims->role, {});
+        std::vector<liveqx::auth::PlayerScopeGrant> live;
+        for (auto g : au->playerGrantsOf(claims->user_id)) {
+            if (g.scope == liveqx::auth::PlayerScopeGrant::Scope::Group) {
+                // The object of a group right comes from the hierarchy; a right
+                // whose group no longer exists is simply dropped.
+                auto gr = pls ? pls->db().findGroup(g.scope_id) : std::nullopt;
+                if (!gr) continue;
+                g.object_id = gr->object_id;
+            }
+            live.push_back(g);
+        }
+        return PlayerAccess(claims->role, std::move(live));
+    };
+    auto placeOf = [](const liveqx::players::PlayerRow& p, const Hierarchy& h) {
+        liveqx::players::Place pl;
+        if (p.group_id) {
+            pl.group_id = p.group_id;
+            if (auto g = h.groups.find(*p.group_id); g != h.groups.end()) pl.object_id = g->second.object_id;
+        }
+        return pl;
+    };
     auto auditPlayer = [](std::string_view action, const json& details, const std::string& id) {
         setAuditContextOverride(action, details, "player", id);
     };
@@ -3299,19 +3342,24 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     };
 
     s.Get("/api/player-objects",
-          [pls, players_unavailable](const httplib::Request&, httplib::Response& res) {
+          [pls, players_unavailable, accessFor](const httplib::Request& req, httplib::Response& res) {
         if (!pls) { players_unavailable(res); return; }
+        auto access = accessFor(req);
+        if (!access) { writeJson(res, 401, {{"error", "unauthorized"}}); return; }
         const auto counts = pls->db().playerCountByGroup();
         const auto groups = pls->db().listGroups(std::nullopt);
         json objs = json::array();
         for (const auto& o : pls->db().listObjects()) {
             json gs = json::array();
             for (const auto& g : groups) {
-                if (g.object_id != o.id) continue;
+                if (g.object_id != o.id || !access->canSeeGroup(g.id, g.object_id)) continue;
                 auto c = counts.find(g.id);
                 gs.push_back({{"id", g.id}, {"object_id", g.object_id}, {"name", g.name},
                               {"created_at", g.created_at}, {"players", c == counts.end() ? 0 : c->second}});
             }
+            // An object is shown when it is granted, or holds a granted group
+            // (then only as the container of that group).
+            if (!access->canSeeObject(o.id) && !access->seesObjectContaining(o.id)) continue;
             objs.push_back({{"id", o.id}, {"name", o.name}, {"created_at", o.created_at}, {"groups", std::move(gs)}});
         }
         writeJson(res, 200, json{{"objects", std::move(objs)}});
@@ -3345,13 +3393,15 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Delete(R"(/api/player-objects/(\d+))",
-             [pls, players_unavailable, groupStatusFor, groupErrorName, auditNode]
+             [pls, au, players_unavailable, groupStatusFor, groupErrorName, auditNode]
              (const httplib::Request& req, httplib::Response& res) {
         if (!pls) { players_unavailable(res); return; }
         const std::int64_t id = std::stoll(req.matches[1]);
         const auto before = pls->db().findObject(id);
         const auto r = pls->db().deleteObject(id);
         if (r != liveqx::players::GroupResult::Ok) { writeJson(res, groupStatusFor(r), {{"error", groupErrorName(r)}}); return; }
+        // Ids are never reused, but a right pointing at nothing is clutter and a risk.
+        if (au) au->dropPlayerGrantsForScope(liveqx::auth::PlayerScopeGrant::Scope::Object, id);
         auditNode("player.object_delete", json{{"name", before ? before->name : ""}}, "player_object", id);
         writeJson(res, 200, json{{"id", id}});
     });
@@ -3386,21 +3436,25 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Delete(R"(/api/player-groups/(\d+))",
-             [pls, players_unavailable, groupStatusFor, groupErrorName, auditNode]
+             [pls, au, players_unavailable, groupStatusFor, groupErrorName, auditNode]
              (const httplib::Request& req, httplib::Response& res) {
         if (!pls) { players_unavailable(res); return; }
         const std::int64_t id = std::stoll(req.matches[1]);
         const auto before = pls->db().findGroup(id);
         const auto r = pls->db().deleteGroup(id);
         if (r != liveqx::players::GroupResult::Ok) { writeJson(res, groupStatusFor(r), {{"error", groupErrorName(r)}}); return; }
+        if (au) au->dropPlayerGrantsForScope(liveqx::auth::PlayerScopeGrant::Scope::Group, id);
         auditNode("player.group_delete", json{{"name", before ? before->name : ""}}, "player_group", id);
         writeJson(res, 200, json{{"id", id}});
     });
 
     s.Put(R"(/api/players/([^/]+)/group)",
-          [pls, players_unavailable, playerJson, loadHierarchy, groupStatusFor, groupErrorName, auditPlayer]
+          [pls, players_unavailable, playerJson, loadHierarchy, groupStatusFor, groupErrorName, auditPlayer,
+           accessFor, placeOf]
           (const httplib::Request& req, httplib::Response& res) {
         if (!pls) { players_unavailable(res); return; }
+        auto access = accessFor(req);
+        if (!access) { writeJson(res, 401, {{"error", "unauthorized"}}); return; }
         const std::string id = req.matches[1];
         json body;
         if (!parseJsonBody(req, res, body)) return;
@@ -3411,9 +3465,20 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         if (!body["group_id"].is_number_integer()) { writeJson(res, 400, {{"error", "invalid_group"}}); return; }
         const std::int64_t gid = body["group_id"].get<std::int64_t>();
         auto p = pls->db().findPlayer(id);
-        if (!p) { writeJson(res, 404, {{"error", "not_found"}}); return; }
+        const auto hier = loadHierarchy(pls->db());
+        if (!p || !access->canView(placeOf(*p, hier))) { writeJson(res, 404, {{"error", "not_found"}}); return; }
         auto target = pls->db().findGroup(gid);
-        if (!target) { writeJson(res, 404, {{"error", "group_not_found"}}); return; }
+        if (!target) {
+            // An administrator is told the truth; anyone else cannot tell "no such
+            // group" from "a group I may not use".
+            if (access->isAdmin()) writeJson(res, 404, {{"error", "group_not_found"}});
+            else                   writeJson(res, 403, {{"error", "forbidden"}});
+            return;
+        }
+        liveqx::players::Place to;
+        to.group_id = target->id;
+        to.object_id = target->object_id;
+        if (!access->canMove(placeOf(*p, hier), to)) { writeJson(res, 403, {{"error", "forbidden"}}); return; }
         const auto r = pls->db().movePlayer(id, gid);
         if (r != liveqx::players::GroupResult::Ok) { writeJson(res, groupStatusFor(r), {{"error", groupErrorName(r)}}); return; }
         auditPlayer("player.move",
@@ -3421,6 +3486,116 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
                          {"to_group", gid}, {"to_group_name", target->name}},
                     id);
         writeJson(res, 200, playerJson(*pls->db().findPlayer(id), pls->db().status(id), loadHierarchy(pls->db())));
+    });
+
+    // ─── Who may see and command which players (B13) ────────────────────────
+    // Administrators only. The rights are replaced as a whole list: one request,
+    // one audit row, no half-applied state.
+    auto grants_auth_unavailable = [](httplib::Response& res) {
+        writeJson(res, 503, {{"error", "auth_not_configured"}});
+    };
+    auto grantJson = [](const liveqx::auth::PlayerScopeGrant& g, liveqx::players::PlayersDb* db) {
+        using Scope = liveqx::auth::PlayerScopeGrant::Scope;
+        json j = {{"scope", g.scope == Scope::Object ? "object" : "group"}, {"id", g.scope_id},
+                  {"can_command_group", g.can_command_group}, {"can_command_object", g.can_command_object},
+                  {"can_move", g.can_move}, {"can_view_audit", g.can_view_audit}};
+        if (!db) return j;
+        if (g.scope == Scope::Object) {
+            if (auto o = db->findObject(g.scope_id)) j["name"] = o->name; else j["missing"] = true;
+        } else if (auto gr = db->findGroup(g.scope_id)) {
+            j["name"] = gr->name;
+            j["object_id"] = gr->object_id;
+            if (auto o = db->findObject(gr->object_id)) j["object_name"] = o->name;
+        } else {
+            j["missing"] = true;
+        }
+        return j;
+    };
+
+    s.Get(R"(/api/auth/users/(\d+)/player-grants)",
+          [au, pls, grants_auth_unavailable, grantJson](const httplib::Request& req, httplib::Response& res) {
+        if (!au) { grants_auth_unavailable(res); return; }
+        const std::int64_t uid = std::stoll(req.matches[1]);
+        if (!au->adminGetUser(uid)) { writeJson(res, 404, {{"error", "user_not_found"}}); return; }
+        json arr = json::array();
+        for (const auto& g : au->playerGrantsOf(uid)) arr.push_back(grantJson(g, pls ? &pls->db() : nullptr));
+        writeJson(res, 200, json{{"grants", std::move(arr)}});
+    });
+
+    s.Put(R"(/api/auth/users/(\d+)/player-grants)",
+          [au, pls, grants_auth_unavailable, grantJson, mountActorOf](const httplib::Request& req, httplib::Response& res) {
+        using liveqx::auth::PlayerScopeGrant;
+        if (!au) { grants_auth_unavailable(res); return; }
+        if (!pls) { writeJson(res, 503, {{"error", "players_not_configured"}}); return; }
+        const std::int64_t uid = std::stoll(req.matches[1]);
+        json body;
+        if (!parseJsonBody(req, res, body)) return;
+        if (!body.is_object() || !body.contains("grants") || !body["grants"].is_array()) {
+            writeJson(res, 400, {{"error", "invalid_body"}});
+            return;
+        }
+        auto target = au->adminGetUser(uid);
+        if (!target) { writeJson(res, 404, {{"error", "user_not_found"}}); return; }
+        const auto& items = body["grants"];
+        if (items.size() > 500) { writeJson(res, 400, {{"error", "too_many_grants"}}); return; }
+
+        std::vector<PlayerScopeGrant> grants;
+        std::set<std::pair<int, std::int64_t>> seen;
+        json named = json::array();
+        auto flag = [](const json& it, const char* k, bool& out) {
+            if (!it.contains(k) || it[k].is_null()) { out = false; return true; }
+            if (!it[k].is_boolean()) return false;
+            out = it[k].get<bool>();
+            return true;
+        };
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            const auto& it = items[i];
+            auto bad = [&](int status, const char* code) {
+                writeJson(res, status, {{"error", code}, {"index", i}});
+            };
+            if (!it.is_object() || !it.contains("scope") || !it["scope"].is_string()) { bad(400, "invalid_scope"); return; }
+            const auto sc = it["scope"].get<std::string>();
+            if (sc != "object" && sc != "group") { bad(400, "invalid_scope"); return; }
+            if (!it.contains("id") || !it["id"].is_number_integer()) { bad(400, "invalid_id"); return; }
+            PlayerScopeGrant g;
+            g.scope = sc == "object" ? PlayerScopeGrant::Scope::Object : PlayerScopeGrant::Scope::Group;
+            g.scope_id = it["id"].get<std::int64_t>();
+            if (!flag(it, "can_command_group", g.can_command_group) || !flag(it, "can_command_object", g.can_command_object) ||
+                !flag(it, "can_move", g.can_move) || !flag(it, "can_view_audit", g.can_view_audit)) {
+                bad(400, "invalid_flag");
+                return;
+            }
+            // The scope has to exist now (a typo would grant nothing, silently).
+            if (g.scope == PlayerScopeGrant::Scope::Object) {
+                auto o = pls->db().findObject(g.scope_id);
+                if (!o) { bad(400, "unknown_scope"); return; }
+                named.push_back("object:" + o->name);
+            } else {
+                auto gr = pls->db().findGroup(g.scope_id);
+                if (!gr) { bad(400, "unknown_scope"); return; }
+                named.push_back("group:" + gr->name);
+            }
+            if (g.scope == PlayerScopeGrant::Scope::Group && g.can_command_object) { bad(400, "invalid_flag"); return; }
+            // A viewer never commands or moves; saying otherwise would only mislead the administrator.
+            if (target->role == liveqx::auth::Role::Viewer &&
+                (g.can_command_group || g.can_command_object || g.can_move)) {
+                bad(400, "flag_not_allowed_for_role");
+                return;
+            }
+            if (!seen.insert({static_cast<int>(g.scope), g.scope_id}).second) { bad(400, "duplicate_grant"); return; }
+            grants.push_back(g);
+        }
+        const auto [actor_id, actor_name] = mountActorOf(req);
+        if (!au->setPlayerGrants(uid, grants, actor_id)) { writeJson(res, 500, {{"error", "storage_error"}}); return; }
+        setAuditContextOverride("player.grants_update",
+                                json{{"user", target->username}, {"count", grants.size()}, {"grants", named}},
+                                "user", std::to_string(uid));
+        // The path says "auth", but this is about who may reach which players: it
+        // belongs in the players' trail, where the object and group filters look.
+        setAuditCategoryOverride(liveqx::audit::Category::Player);
+        json arr = json::array();
+        for (const auto& g : grants) arr.push_back(grantJson(g, &pls->db()));
+        writeJson(res, 200, json{{"grants", std::move(arr)}});
     });
 
     s.Get("/api/players/settings",
@@ -3490,8 +3665,11 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Get("/api/players",
-          [pls, players_unavailable, playerJson, loadHierarchy](const httplib::Request& req, httplib::Response& res) {
+          [pls, players_unavailable, playerJson, loadHierarchy, accessFor, placeOf]
+          (const httplib::Request& req, httplib::Response& res) {
         if (!pls) { players_unavailable(res); return; }
+        auto access = accessFor(req);
+        if (!access) { writeJson(res, 401, {{"error", "unauthorized"}}); return; }
         liveqx::players::ListFilter f;
         auto idParam = [&](const char* k, std::optional<std::int64_t>& out) {
             if (!req.has_param(k)) return true;
@@ -3525,14 +3703,27 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         auto limit  = num("limit", 200, 1, 1000);
         auto offset = num("offset", 0, 0, 1'000'000);
         if (!limit || !offset) { writeJson(res, 400, {{"error", "invalid_paging"}}); return; }
-        f.limit = *limit;
-        f.offset = *offset;
+        // An administrator pages in the database. For everyone else the rights
+        // are applied to the whole matching set first and the page is cut from
+        // what is visible, so a page never has holes or leaks a count.
+        const bool restricted = !access->isAdmin();
+        f.limit  = restricted ? 0 : *limit;
+        f.offset = restricted ? 0 : *offset;
 
         std::map<std::string, liveqx::players::StatusRow> statuses;
         for (auto& st : pls->db().allStatuses()) statuses.emplace(st.player_id, st);
         const auto hier = loadHierarchy(pls->db());
+        auto rows = pls->db().listPlayers(f);
+        if (restricted) {
+            std::vector<liveqx::players::PlayerRow> visible;
+            for (auto& p : rows)
+                if (access->canView(placeOf(p, hier))) visible.push_back(std::move(p));
+            const std::size_t from = std::min<std::size_t>(static_cast<std::size_t>(*offset), visible.size());
+            const std::size_t to   = std::min<std::size_t>(from + static_cast<std::size_t>(*limit), visible.size());
+            rows.assign(std::make_move_iterator(visible.begin() + from), std::make_move_iterator(visible.begin() + to));
+        }
         json arr = json::array();
-        for (const auto& p : pls->db().listPlayers(f)) {
+        for (const auto& p : rows) {
             std::optional<liveqx::players::StatusRow> st;
             if (auto it = statuses.find(p.id); it != statuses.end()) st = it->second;
             arr.push_back(playerJson(p, st, hier));
@@ -3541,12 +3732,17 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Get(R"(/api/players/([^/]+))",
-          [pls, players_unavailable, playerJson, loadHierarchy](const httplib::Request& req, httplib::Response& res) {
+          [pls, players_unavailable, playerJson, loadHierarchy, accessFor, placeOf]
+          (const httplib::Request& req, httplib::Response& res) {
         if (!pls) { players_unavailable(res); return; }
+        auto access = accessFor(req);
+        if (!access) { writeJson(res, 401, {{"error", "unauthorized"}}); return; }
         const std::string id = req.matches[1];
         auto p = pls->db().findPlayer(id);
-        if (!p) { writeJson(res, 404, {{"error", "not_found"}}); return; }
-        json j = playerJson(*p, pls->db().status(id), loadHierarchy(pls->db()));
+        const auto hier = loadHierarchy(pls->db());
+        // A player outside the caller's rights is "not found": its existence is not revealed.
+        if (!p || !access->canView(placeOf(*p, hier))) { writeJson(res, 404, {{"error", "not_found"}}); return; }
+        json j = playerJson(*p, pls->db().status(id), hier);
         json certs = json::array();
         for (const auto& c : pls->db().certsOf(id)) {
             json cj = {{"serial", c.serial_hex}, {"generation", c.generation},

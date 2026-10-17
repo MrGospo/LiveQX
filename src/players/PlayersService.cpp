@@ -206,9 +206,14 @@ PairingResult PlayersService::create(const std::string& name, std::optional<std:
     }
     r.ok = true;
     r.player = created->player;
-    if (opts_.events)
-        opts_.events->publish(events::EventType::PlayerRegistered, -1,
-                              {{"player_id", r.player.id}, {"name", r.player.name}});
+    if (opts_.events) {
+        nlohmann::json payload = {{"player_id", r.player.id}, {"name", r.player.name}};
+        if (auto place = db_.placeOfPlayer(r.player.id)) {
+            payload["group_id"]  = place->group_id;
+            payload["object_id"] = place->object_id;
+        }
+        opts_.events->publish(events::EventType::PlayerRegistered, -1, std::move(payload));
+    }
     return r;
 }
 

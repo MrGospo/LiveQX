@@ -81,6 +81,12 @@ struct GroupRow {
 // groups, or a group that still has players, cannot be removed.
 enum class GroupResult { Ok, NotFound, NameTaken, InvalidName, NotEmpty, Storage };
 
+// Where a player sits: its group and that group's object.
+struct PlayerPlace {
+    std::int64_t group_id{0};
+    std::int64_t object_id{0};
+};
+
 struct CreatedPlayer {
     PlayerRow    player;
     std::string  token;              // plaintext, shown ONCE
@@ -225,6 +231,9 @@ public:
     GroupResult              deleteGroup(std::int64_t id);              // NotEmpty while it has players
     std::optional<GroupRow>  findGroup(std::int64_t id);
     std::vector<GroupRow>    listGroups(std::optional<std::int64_t> object_id);
+
+    // The group and object of a player; nullopt if it is unknown or sits nowhere.
+    std::optional<PlayerPlace> placeOfPlayer(const std::string& player_id);
 
     // Moves a player to another group (any object) and leaves a "moved" event
     // with the old and new group. Who may do it is decided above this layer.

@@ -167,6 +167,8 @@ TEST_F(PlayersServiceTest, TheCreatedPlayerIsPendingAndAnEventIsPublished) {
     EXPECT_EQ(evs[0].type, liveqx::events::EventType::PlayerRegistered);
     EXPECT_EQ(evs[0].payload["player_id"], r.player.id);
     EXPECT_EQ(evs[0].payload["name"], "Lobby");
+    EXPECT_EQ(evs[0].payload["group_id"], group_) << "the event says where the player sits";
+    EXPECT_TRUE(evs[0].payload.contains("object_id"));
     EXPECT_EQ(evs[0].payload.dump().find(r.package["bootstrap_token"].get<std::string>()),
               std::string::npos) << "the token must never travel over SSE";
 }

@@ -330,7 +330,7 @@ TEST(RbacRest, EnrollIsOpenBecauseThePlayerHasNoAccountYet) {
     EXPECT_EQ(r->status, 503) << "past the role check, stopped by the missing module";
 }
 
-TEST(RbacRest, TheHierarchyOfObjectsAndGroupsIsAdministeredByAdminsOnly) {
+TEST(RbacRest, TheHierarchyIsAdministeredByAdminsButItsTreeAndMovesAreOpenToTheRoles) {
     RbacRestFixture f(nextPort());
     auto cli      = f.client();
     auto viewer   = f.loginAs("h_viewer", liveqx::auth::Role::Viewer);
@@ -339,17 +339,22 @@ TEST(RbacRest, TheHierarchyOfObjectsAndGroupsIsAdministeredByAdminsOnly) {
     const std::string pid = "11111111-2222-4333-8444-555555555555";
 
     for (const auto& token : {viewer, op}) {
-        EXPECT_EQ(cli.Get("/api/player-objects", bearer(token))->status, 403);
         EXPECT_EQ(cli.Post("/api/player-objects", bearer(token), R"({"name":"x"})", "application/json")->status, 403);
         EXPECT_EQ(cli.Put("/api/player-objects/1", bearer(token), R"({"name":"x"})", "application/json")->status, 403);
         EXPECT_EQ(cli.Delete("/api/player-objects/1", bearer(token))->status, 403);
         EXPECT_EQ(cli.Post("/api/player-objects/1/groups", bearer(token), R"({"name":"x"})", "application/json")->status, 403);
         EXPECT_EQ(cli.Put("/api/player-groups/1", bearer(token), R"({"name":"x"})", "application/json")->status, 403);
         EXPECT_EQ(cli.Delete("/api/player-groups/1", bearer(token))->status, 403);
-        EXPECT_EQ(cli.Put(("/api/players/" + pid + "/group").c_str(), bearer(token), R"({"group_id":1})", "application/json")->status, 403);
+        EXPECT_EQ(cli.Get("/api/auth/users/1/player-grants", bearer(token))->status, 403);
+        EXPECT_EQ(cli.Put("/api/auth/users/1/player-grants", bearer(token), R"({"grants":[]})", "application/json")->status, 403);
     }
-    // The module is not wired in this fixture: an admin gets past the role check and meets the 503.
+    // The tree is readable by every signed-in role (the handler filters it by rights)...
+    EXPECT_EQ(cli.Get("/api/player-objects", bearer(viewer))->status, 503);
+    EXPECT_EQ(cli.Get("/api/player-objects", bearer(op))->status, 503);
     EXPECT_EQ(cli.Get("/api/player-objects", bearer(admin))->status, 503);
+    // ...and a move is for operators and above (the handler checks the move right).
+    EXPECT_EQ(cli.Put(("/api/players/" + pid + "/group").c_str(), bearer(viewer), R"({"group_id":1})", "application/json")->status, 403);
+    EXPECT_EQ(cli.Put(("/api/players/" + pid + "/group").c_str(), bearer(op), R"({"group_id":1})", "application/json")->status, 503);
     EXPECT_EQ(cli.Put(("/api/players/" + pid + "/group").c_str(), bearer(admin), R"({"group_id":1})", "application/json")->status, 503);
 }
 

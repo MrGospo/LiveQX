@@ -102,6 +102,7 @@ add_executable(liveqx-tests
     test_device_api.cpp
     test_renew_service.cpp
     test_presence.cpp
+    test_player_access.cpp
     test_enroll_service.cpp
     test_pki_export.cpp
     test_tls_config.cpp
@@ -174,6 +175,7 @@ add_executable(liveqx-tests
     ../src/players/DeviceApi.cpp
     ../src/players/RenewService.cpp
     ../src/players/PresenceService.cpp
+    ../src/players/PlayerAccess.cpp
     ../src/utils/TlsConfig.cpp
     ../src/utils/RuntimeLock.cpp
     ../src/metrics/ChannelProfiler.cpp
@@ -334,6 +336,7 @@ add_executable(liveqx-itests
     test_control_api_tls.cpp
     test_control_api_mounts.cpp
     test_control_api_players.cpp
+    test_player_scope_rest.cpp
     test_metrics_mounts.cpp
     ../src/mounts/MountSpec.cpp
     ../src/mounts/RpcProtocol.cpp
@@ -450,6 +453,7 @@ add_executable(liveqx-itests
     ../src/players/PlayersDb.cpp
     ../src/players/PlayersService.cpp
     ../src/players/EnrollService.cpp
+    ../src/players/PlayerAccess.cpp
     ../src/utils/DeviceCa.cpp
     ../src/auth/SealedServer.cpp
     ../src/utils/TlsConfig.cpp

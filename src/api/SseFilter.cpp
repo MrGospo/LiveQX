@@ -1,6 +1,28 @@
 #include "api/SseFilter.h"
 
+#include "players/PlayerAccess.h"
+
 namespace liveqx::api {
+
+namespace {
+
+bool playerEventVisible(const liveqx::auth::RequestContext& ctx, const liveqx::events::Event& e) noexcept {
+    if (ctx.role == liveqx::auth::Role::Admin) return true;
+    liveqx::players::Place place;
+    try {
+        if (e.payload.is_object()) {
+            if (auto it = e.payload.find("group_id"); it != e.payload.end() && it->is_number_integer())
+                place.group_id = it->get<std::int64_t>();
+            if (auto it = e.payload.find("object_id"); it != e.payload.end() && it->is_number_integer())
+                place.object_id = it->get<std::int64_t>();
+        }
+    } catch (...) {
+        return false;
+    }
+    return liveqx::players::PlayerAccess::canViewWith(ctx.role, ctx.player_grants, place);
+}
+
+}  // namespace
 
 bool sseEventVisibleTo(const liveqx::auth::RequestContext& ctx,
                        const liveqx::events::Event& e) noexcept {
@@ -19,9 +41,11 @@ bool sseEventVisibleTo(const liveqx::auth::RequestContext& ctx,
         case EventType::PlayerOffline:
         case EventType::PlayerHeartbeat:
         case EventType::PlayerVersionChanged:
-            // Any signed-in user may list players (A7), and players belong to
-            // no channel, so there is nothing finer to filter on.
-            return true;
+            // A person sees the events of the players they have been given (B13).
+            // The event names the player's group and object, so no lookup is
+            // needed; one that does not, or names them oddly, is for
+            // administrators only.
+            return playerEventVisible(ctx, e);
         case EventType::ChannelStateChange:
         case EventType::OutputStateChange:
         case EventType::ClipChange:

@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 
+#include <optional>
+
 #include "api/SseFilter.h"
 #include "auth/AuthTypes.h"
 #include "events/EventBus.h"
@@ -129,22 +131,87 @@ TEST(SseFilter, DefaultSubscriptionIncludesOperationalEvents) {
 }
 
 // ── player events (LiveQX-Player integration) ───────────────────────────────
-// A7: any signed-in user may list players, so any role may see their events;
-// players are not channel-scoped, so channel grants play no part.
-TEST(SseFilter, EveryRoleSeesPlayerEvents) {
-    for (EventType t : {EventType::PlayerRegistered, EventType::PlayerOnline,
-                        EventType::PlayerOffline, EventType::PlayerHeartbeat,
-                        EventType::PlayerVersionChanged}) {
-        EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Admin), evtFor(t)))    << liveqx::events::eventTypeName(t);
-        EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Operator), evtFor(t))) << liveqx::events::eventTypeName(t);
-        EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Viewer), evtFor(t)))   << liveqx::events::eventTypeName(t);
+// B13: a player belongs to a group of an object, and a person sees the events of
+// the players they have been given — nothing more. The event itself says where
+// the player sits (group_id, object_id), so the filter needs no database.
+using liveqx::auth::PlayerScopeGrant;
+
+Event playerEvt(EventType t, std::optional<std::int64_t> group, std::optional<std::int64_t> object) {
+    Event e = evtFor(t);
+    e.payload = nlohmann::json::object();
+    e.payload["player_id"] = "11111111-2222-4333-8444-555555555555";
+    if (group)  e.payload["group_id"]  = *group;
+    if (object) e.payload["object_id"] = *object;
+    return e;
+}
+
+PlayerScopeGrant groupGrant(std::int64_t id) {
+    PlayerScopeGrant g;
+    g.scope = PlayerScopeGrant::Scope::Group;
+    g.scope_id = id;
+    return g;
+}
+PlayerScopeGrant objectGrant(std::int64_t id) {
+    PlayerScopeGrant g;
+    g.scope = PlayerScopeGrant::Scope::Object;
+    g.scope_id = id;
+    return g;
+}
+
+const EventType kPlayerEvents[] = {EventType::PlayerRegistered, EventType::PlayerOnline,
+                                   EventType::PlayerOffline, EventType::PlayerHeartbeat,
+                                   EventType::PlayerVersionChanged};
+
+TEST(SseFilter, AnAdministratorSeesEveryPlayerEventEvenOneWithoutAPlace) {
+    for (EventType t : kPlayerEvents) {
+        EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Admin), playerEvt(t, 11, 1))) << liveqx::events::eventTypeName(t);
+        EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Admin), playerEvt(t, std::nullopt, std::nullopt)));
     }
 }
 
+TEST(SseFilter, WithoutARightNoPlayerEventIsSeen) {
+    for (Role r : {Role::Operator, Role::Viewer})
+        for (EventType t : kPlayerEvents)
+            EXPECT_FALSE(sseEventVisibleTo(ctxFor(r), playerEvt(t, 11, 1))) << liveqx::events::eventTypeName(t);
+}
+
+TEST(SseFilter, AGroupRightShowsTheEventsOfThatGroupOnly) {
+    auto ctx = ctxFor(Role::Operator);
+    ctx.player_grants = {groupGrant(11)};
+    EXPECT_TRUE(sseEventVisibleTo(ctx, playerEvt(EventType::PlayerOnline, 11, 1)));
+    EXPECT_FALSE(sseEventVisibleTo(ctx, playerEvt(EventType::PlayerOnline, 12, 1))) << "a sibling group";
+    EXPECT_FALSE(sseEventVisibleTo(ctx, playerEvt(EventType::PlayerOnline, 21, 2)));
+}
+
+TEST(SseFilter, AnObjectRightShowsTheEventsOfAllItsGroups) {
+    auto ctx = ctxFor(Role::Viewer);
+    ctx.player_grants = {objectGrant(1)};
+    EXPECT_TRUE(sseEventVisibleTo(ctx, playerEvt(EventType::PlayerOffline, 11, 1)));
+    EXPECT_TRUE(sseEventVisibleTo(ctx, playerEvt(EventType::PlayerOffline, 12, 1)));
+    EXPECT_FALSE(sseEventVisibleTo(ctx, playerEvt(EventType::PlayerOffline, 21, 2)));
+}
+
+TEST(SseFilter, AnEventThatDoesNotSayWhereItsPlayerSitsIsForAdministratorsOnly) {
+    auto ctx = ctxFor(Role::Operator);
+    ctx.player_grants = {objectGrant(1), groupGrant(11)};
+    EXPECT_FALSE(sseEventVisibleTo(ctx, playerEvt(EventType::PlayerOnline, std::nullopt, std::nullopt)));
+    EXPECT_FALSE(sseEventVisibleTo(ctx, playerEvt(EventType::PlayerOnline, 11, std::nullopt)));
+    EXPECT_FALSE(sseEventVisibleTo(ctx, evtFor(EventType::PlayerOnline))) << "no payload at all";
+}
+
+TEST(SseFilter, AMalformedPlaceInAnEventIsRefusedNotTrusted) {
+    auto ctx = ctxFor(Role::Operator);
+    ctx.player_grants = {groupGrant(11)};
+    Event e = evtFor(EventType::PlayerOnline);
+    e.payload = {{"group_id", "11"}, {"object_id", 1}};
+    EXPECT_FALSE(sseEventVisibleTo(ctx, e)) << "an id given as text does not count";
+}
+
 TEST(SseFilter, PlayerEventsNeedNoChannelGrant) {
-    // A viewer without any grant still sees them; channel_id is -1 for these.
-    EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Viewer),
-                                  evtFor(EventType::PlayerOnline, /*channel_id=*/-1)));
+    // Channel grants play no part: an operator with only a channel grant sees no player.
+    auto ctx = ctxFor(Role::Operator);
+    ctx.channel_grants = {ChannelGrant{7, ChannelPermission::Operate}};
+    EXPECT_FALSE(sseEventVisibleTo(ctx, playerEvt(EventType::PlayerOnline, 11, 1)));
 }
 
 TEST(SseFilter, HeartbeatsAreNotInTheDefaultSubscription) {

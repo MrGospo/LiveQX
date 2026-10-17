@@ -4212,6 +4212,10 @@ paths:
       description: |
         Viewer+. Токены привязки здесь не отдаются никогда. `status`
         присутствует, если от плеера уже приходило состояние.
+        Не-администратор видит только плееры в группах и объектах, которые ему
+        выдал администратор (`PUT /api/auth/users/{uid}/player-grants`); без
+        выданных прав — пустой список. Права читаются при каждом запросе, снятие
+        действует сразу.
       parameters:
         - in: query
           name: state
@@ -4381,13 +4385,96 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/auth/users/{uid}/player-grants:
+    parameters:
+      - in: path
+        name: uid
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      tags: [Players]
+      summary: Rights of a user on players, by object and group
+      description: |
+        Admin. Что администратор выдал этому пользователю. Запись, чья группа или
+        объект уже удалены, помечается `missing` (при удалении такие права
+        снимаются сами).
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [grants]
+                properties:
+                  grants:
+                    type: array
+                    items: { $ref: '#/components/schemas/PlayerGrant' }
+        '404':
+          description: '`user_not_found`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    put:
+      tags: [Players]
+      summary: Replace a user's rights on players
+      description: |
+        Admin. Заменяет весь список одним запросом (все или ничего). Права
+        читаются при каждом запросе, а не из токена: выданное и снятое действует
+        сразу. Ошибки содержат `index` записи.
+
+        Правила: `scope` — `object` или `group`; объект/группа должны существовать
+        (`unknown_scope`); `can_command_object` только для `object`
+        (`invalid_flag`); у Viewer не бывает `can_command_*` и `can_move`
+        (`flag_not_allowed_for_role`); повтор одной области — `duplicate_grant`;
+        не более 500 записей. Право на объект действует на все его группы,
+        в том числе будущие. Команды на группу/объект и «всем» — этапы команд;
+        «всем» только администратору.
+        Audit event: `player.grants_update` (категория player).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [grants]
+              properties:
+                grants:
+                  type: array
+                  maxItems: 500
+                  items: { $ref: '#/components/schemas/PlayerGrantInput' }
+      responses:
+        '200':
+          description: The new list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [grants]
+                properties:
+                  grants:
+                    type: array
+                    items: { $ref: '#/components/schemas/PlayerGrant' }
+        '400':
+          description: '`invalid_body`, `invalid_scope`, `invalid_id`, `invalid_flag`, `unknown_scope`, `flag_not_allowed_for_role`, `duplicate_grant`, `too_many_grants`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`user_not_found`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/player-objects:
     get:
       tags: [Players]
       summary: The tree of objects and groups with player counts
       description: |
-        Admin (пока нет доступа по группам). Иерархия: все → объект → группа;
-        у группы — число плееров.
+        Viewer+. Иерархия: все → объект → группа; у группы — число плееров.
+        Администратор видит всё. Остальные — только выданный объект и группы:
+        право на объект показывает его целиком, право на группу — эту группу и
+        имя её объекта как вместилища; остальное скрыто.
       responses:
         '200':
           description: ok
@@ -4607,8 +4694,12 @@ paths:
       tags: [Players]
       summary: Move a player to another group
       description: |
-        Admin. Плеер всегда в одной группе; перенос действует сразу и пишется в
-        журнал плеера (`moved`) и в аудит (`player.move`).
+        Operator+ с правом «переносить экраны» на обе группы (откуда и куда) либо
+        на их общий объект; между объектами переносит только администратор.
+        Администратор — всегда. Не-администратору неизвестная группа и группа без
+        прав отвечают одинаково (`403 forbidden`); плеер вне прав — `404`.
+        Перенос действует сразу и пишется в журнал плеера (`moved`) и в аудит
+        (`player.move`).
       requestBody:
         required: true
         content:
@@ -4701,7 +4792,9 @@ paths:
     get:
       tags: [Players]
       summary: Player details with certificates and recent events
-      description: Viewer+. Последние 50 событий смены состояния.
+      description: |
+        Viewer+. Последние 50 событий смены состояния. Плеер вне выданных прав —
+        `404 not_found` (существование не раскрывается).
       responses:
         '200':
           description: ok
@@ -4860,6 +4953,27 @@ components:
   schemas:
 
     # ── Players ──────────────────────────────────────────────────────────────
+    PlayerGrantInput:
+      type: object
+      required: [scope, id]
+      properties:
+        scope: { type: string, enum: [object, group] }
+        id: { type: integer, format: int64 }
+        can_command_group: { type: boolean, default: false, description: "Команда всей группе (на объекте — любой группе объекта)." }
+        can_command_object: { type: boolean, default: false, description: "Команда всему объекту; только для scope=object; подразумевает команды группам объекта." }
+        can_move: { type: boolean, default: false, description: "Переносить экраны между группами (нужно на обе)." }
+        can_view_audit: { type: boolean, default: false, description: "Смотреть аудит этой области." }
+
+    PlayerGrant:
+      allOf:
+        - $ref: '#/components/schemas/PlayerGrantInput'
+        - type: object
+          properties:
+            name: { type: string }
+            object_id: { type: integer, format: int64 }
+            object_name: { type: string }
+            missing: { type: boolean }
+
     PlayerGroup:
       type: object
       required: [id, object_id, name, created_at]

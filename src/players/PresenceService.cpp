@@ -48,31 +48,36 @@ StatusRow PresenceService::rowOf(const std::string& id, const Entry& e) const {
 
 void PresenceService::publish(const std::vector<Note>& notes) {
     using nlohmann::json;
+    // Every announcement says where the player sits NOW, so that whoever sees
+    // only part of the tree gets only its own news.
+    auto announce = [&](events::EventType type, const std::string& player_id, json payload) {
+        if (!opts_.events) return;
+        if (auto place = db_.placeOfPlayer(player_id)) {
+            payload["group_id"]  = place->group_id;
+            payload["object_id"] = place->object_id;
+        }
+        opts_.events->publish(type, -1, std::move(payload));
+    };
     for (const auto& n : notes) {
         switch (n.kind) {
         case Note::Online:
             db_.addEvent(n.player_id, "online", "", nowSeconds());
-            if (opts_.events)
-                opts_.events->publish(events::EventType::PlayerOnline, -1,
-                                      {{"player_id", n.player_id}, {"name", n.name}});
+            announce(events::EventType::PlayerOnline, n.player_id,
+                     {{"player_id", n.player_id}, {"name", n.name}});
             break;
         case Note::Offline:
             db_.addEvent(n.player_id, "offline",
                          json{{"reason", "heartbeat_timeout"}, {"last_seen", n.last_seen}}.dump(), nowSeconds());
-            if (opts_.events)
-                opts_.events->publish(events::EventType::PlayerOffline, -1,
-                                      {{"player_id", n.player_id}, {"name", n.name},
-                                       {"reason", "heartbeat_timeout"}});
+            announce(events::EventType::PlayerOffline, n.player_id,
+                     {{"player_id", n.player_id}, {"name", n.name}, {"reason", "heartbeat_timeout"}});
             break;
         case Note::Started:
             db_.addEvent(n.player_id, "started", "", nowSeconds());
             break;
         case Note::VersionChanged:
             db_.addEvent(n.player_id, "version_changed", json{{"from", n.from}, {"to", n.to}}.dump(), nowSeconds());
-            if (opts_.events)
-                opts_.events->publish(events::EventType::PlayerVersionChanged, -1,
-                                      {{"player_id", n.player_id}, {"name", n.name},
-                                       {"from", n.from}, {"to", n.to}});
+            announce(events::EventType::PlayerVersionChanged, n.player_id,
+                     {{"player_id", n.player_id}, {"name", n.name}, {"from", n.from}, {"to", n.to}});
             break;
         }
     }

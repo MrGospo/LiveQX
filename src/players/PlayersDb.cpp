@@ -1056,6 +1056,15 @@ GroupResult PlayersDb::movePlayer(const std::string& player_id, std::int64_t gro
     return tx.commit() ? GroupResult::Ok : GroupResult::Storage;
 }
 
+std::optional<PlayerPlace> PlayersDb::placeOfPlayer(const std::string& player_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return std::nullopt;
+    Stmt s(db_, "SELECT g.id, g.object_id FROM players p JOIN player_groups g ON g.id = p.group_id WHERE p.id=?");
+    s.text(1, player_id);
+    if (s.step() != SQLITE_ROW) return std::nullopt;
+    return PlayerPlace{s.num(0), s.num(1)};
+}
+
 std::map<std::int64_t, std::int64_t> PlayersDb::playerCountByGroup() {
     std::lock_guard<std::mutex> lk(mu_);
     std::map<std::int64_t, std::int64_t> out;

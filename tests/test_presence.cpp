@@ -281,6 +281,47 @@ TEST_F(PresenceTest, AStartupHeartbeatLeavesAStartedEventAndAnOrdinaryOneDoesNot
     EXPECT_EQ(dbEvents(id, "online"), 1);
 }
 
+TEST_F(PresenceTest, EventsSayWhereThePlayerSitsSoTheyCanBeFilteredByRights) {
+    auto obj = db_->createObject("Mall");
+    auto grp = db_->createGroup(obj->id, "Hall");
+    auto c = db_->createPlayer("Placed", std::nullopt, "strict", 86400, now_, grp->id);
+    ASSERT_TRUE(c.has_value());
+    const auto id = c->player.id;
+    beat(id, "1.0");
+    beat(id, "2.0");
+    now_ += 1000;
+    svc_->tick();
+    int seen = 0;
+    for (const auto& e : events()) {
+        if (e.type != EventType::PlayerOnline && e.type != EventType::PlayerOffline &&
+            e.type != EventType::PlayerVersionChanged) continue;
+        ++seen;
+        EXPECT_EQ(e.payload["group_id"], grp->id) << liveqx::events::eventTypeName(e.type);
+        EXPECT_EQ(e.payload["object_id"], obj->id) << liveqx::events::eventTypeName(e.type);
+    }
+    EXPECT_EQ(seen, 3) << "online, version change, offline";
+}
+
+TEST_F(PresenceTest, ThePlaceInAnEventIsWhereThePlayerSitsNow) {
+    auto obj = db_->createObject("Mall");
+    auto g1 = db_->createGroup(obj->id, "G1");
+    auto g2 = db_->createGroup(obj->id, "G2");
+    auto c = db_->createPlayer("Mover", std::nullopt, "strict", 86400, now_, g1->id);
+    const auto id = c->player.id;
+    beat(id);
+    events();
+    ASSERT_EQ(db_->movePlayer(id, g2->id, now_), GroupResult::Ok);
+    now_ += 1000;
+    svc_->tick();
+    bool offline = false;
+    for (const auto& e : events())
+        if (e.type == EventType::PlayerOffline) {
+            offline = true;
+            EXPECT_EQ(e.payload["group_id"], g2->id) << "a moved player's news goes to its new group";
+        }
+    EXPECT_TRUE(offline);
+}
+
 TEST_F(PresenceTest, ADeletedPlayerDisappearsWithoutEventsOrErrors) {
     const auto id = newPlayer();
     beat(id);
