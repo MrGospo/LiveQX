@@ -172,11 +172,12 @@ PlayerRow readPlayer(const Stmt& s) {
     p.activated_at  = s.optNum(6);
     p.revoked_at    = s.optNum(7);
     p.revoke_reason = s.str(8);
+    p.group_id      = s.optNum(9);
     return p;
 }
 
 constexpr const char* kPlayerCols =
-    "id,name,state,clock_policy,created_at,created_by,activated_at,revoked_at,revoke_reason";
+    "id,name,state,clock_policy,created_at,created_by,activated_at,revoked_at,revoke_reason,group_id";
 
 CertRow readCert(const Stmt& s) {
     CertRow c;
@@ -280,6 +281,36 @@ CREATE TABLE crl_state (
 );
 )SQL";
 
+// Version 2 -> 3: the hierarchy all -> object -> group. AUTOINCREMENT, so the
+// id of a removed object or group is never handed out again.
+constexpr const char* kSchemaV3 = R"SQL(
+CREATE TABLE player_objects (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE player_groups (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    object_id  INTEGER NOT NULL REFERENCES player_objects(id),
+    name       TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(object_id, name)
+);
+ALTER TABLE players ADD COLUMN group_id INTEGER REFERENCES player_groups(id);
+CREATE INDEX idx_players_group ON players(group_id);
+
+-- Players that exist from before groups get a place; an empty installation
+-- gets nothing invented.
+INSERT INTO player_objects(name, created_at)
+    SELECT 'Unassigned', CAST(strftime('%s','now') AS INTEGER) WHERE EXISTS (SELECT 1 FROM players);
+INSERT INTO player_groups(object_id, name, created_at)
+    SELECT id, 'Unassigned', CAST(strftime('%s','now') AS INTEGER) FROM player_objects WHERE name='Unassigned';
+UPDATE players SET group_id = (SELECT g.id FROM player_groups g
+                               JOIN player_objects o ON o.id = g.object_id
+                               WHERE o.name='Unassigned' AND g.name='Unassigned')
+    WHERE group_id IS NULL AND EXISTS (SELECT 1 FROM player_objects WHERE name='Unassigned');
+)SQL";
+
 // Version 1 -> 2: the module's settings.
 constexpr const char* kSchemaV2 = R"SQL(
 CREATE TABLE players_settings (
@@ -362,7 +393,8 @@ bool PlayersDb::open() {
         bool ok = true;
         if (version < 1) ok = ok && execSql(raw, kSchemaV1);
         if (version < 2) ok = ok && execSql(raw, kSchemaV2);
-        // Future versions: add `if (version < 3) ...` steps here, in order.
+        if (version < 3) ok = ok && execSql(raw, kSchemaV3);
+        // Future versions: add `if (version < 4) ...` steps here, in order.
         ok = ok && execSql(raw, ("PRAGMA user_version = " + std::to_string(kSchemaVersion) + ";").c_str());
         if (!ok || !tx.commit()) {
             LOG_ERROR("PlayersDb: migration {} -> {} failed", version, kSchemaVersion);
@@ -386,7 +418,8 @@ std::optional<CreatedPlayer> PlayersDb::createPlayer(const std::string& name,
                                                      std::optional<std::int64_t> created_by,
                                                      const std::string& clock_policy,
                                                      std::int64_t token_ttl_seconds,
-                                                     std::int64_t now) {
+                                                     std::int64_t now,
+                                                     std::optional<std::int64_t> group_id) {
     auto clean = cleanName(name);
     if (!clean) return std::nullopt;
     if (clock_policy != "strict" && clock_policy != "relaxed") return std::nullopt;
@@ -411,11 +444,17 @@ std::optional<CreatedPlayer> PlayersDb::createPlayer(const std::string& name,
 
     Tx tx(db_);
     if (!tx.ok()) return std::nullopt;
+    if (group_id) {
+        Stmt s(db_, "SELECT 1 FROM player_groups WHERE id=?");
+        s.i64(1, *group_id);
+        if (s.step() != SQLITE_ROW) return std::nullopt;
+    }
+    out.player.group_id = group_id;
     {
-        Stmt s(db_, "INSERT INTO players(id,name,state,clock_policy,created_at,created_by) "
-                    "VALUES(?,?,'pending',?,?,?)");
+        Stmt s(db_, "INSERT INTO players(id,name,state,clock_policy,created_at,created_by,group_id) "
+                    "VALUES(?,?,'pending',?,?,?,?)");
         s.text(1, out.player.id).text(2, out.player.name).text(3, clock_policy)
-         .i64(4, t).opt(5, created_by);
+         .i64(4, t).opt(5, created_by).opt(6, group_id);
         if (!s.exec()) return std::nullopt;
     }
     {
@@ -442,12 +481,19 @@ std::vector<PlayerRow> PlayersDb::listPlayers(const ListFilter& f) {
     std::vector<PlayerRow> out;
     if (!db_) return out;
     std::string sql = std::string("SELECT ") + kPlayerCols + " FROM players";
-    if (f.state) sql += " WHERE state=?";
+    std::string where;
+    auto add = [&](const char* cond) { where += where.empty() ? " WHERE " : " AND "; where += cond; };
+    if (f.state)     add("state=?");
+    if (f.group_id)  add("group_id=?");
+    if (f.object_id) add("group_id IN (SELECT id FROM player_groups WHERE object_id=?)");
+    sql += where;
     sql += " ORDER BY created_at, id";
     if (f.limit > 0) sql += " LIMIT ? OFFSET ?";
     Stmt s(db_, sql.c_str());
     int i = 1;
-    if (f.state) s.text(i++, toString(*f.state));
+    if (f.state)     s.text(i++, toString(*f.state));
+    if (f.group_id)  s.i64(i++, *f.group_id);
+    if (f.object_id) s.i64(i++, *f.object_id);
     if (f.limit > 0) { s.i64(i++, f.limit); s.i64(i++, std::max<std::int64_t>(f.offset, 0)); }
     while (s.step() == SQLITE_ROW) out.push_back(readPlayer(s));
     return out;
@@ -777,6 +823,246 @@ std::size_t PlayersDb::purgeExpiredCerts(std::int64_t now) {
     Stmt s(db_, "DELETE FROM player_certs WHERE not_after < ?");
     s.i64(1, nowOr(now));
     return s.exec() ? static_cast<std::size_t>(s.changes()) : 0;
+}
+
+// ─── objects and groups ─────────────────────────────────────────────────────
+namespace {
+void setResult(GroupResult* out, GroupResult r) { if (out) *out = r; }
+ObjectRow readObject(const Stmt& s) { return {s.num(0), s.str(1), s.num(2)}; }
+GroupRow  readGroup(const Stmt& s)  { return {s.num(0), s.num(1), s.str(2), s.num(3)}; }
+}  // namespace
+
+std::optional<ObjectRow> PlayersDb::createObject(const std::string& name, GroupResult* result,
+                                                 std::int64_t now) {
+    auto clean = cleanName(name);
+    if (!clean) { setResult(result, GroupResult::InvalidName); return std::nullopt; }
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) { setResult(result, GroupResult::Storage); return std::nullopt; }
+    Tx tx(db_);
+    if (!tx.ok()) { setResult(result, GroupResult::Storage); return std::nullopt; }
+    {
+        Stmt s(db_, "SELECT 1 FROM player_objects WHERE name=?");
+        s.text(1, *clean);
+        if (s.step() == SQLITE_ROW) { setResult(result, GroupResult::NameTaken); return std::nullopt; }
+    }
+    const std::int64_t t = nowOr(now);
+    {
+        Stmt s(db_, "INSERT INTO player_objects(name,created_at) VALUES(?,?)");
+        s.text(1, *clean).i64(2, t);
+        if (!s.exec()) { setResult(result, GroupResult::Storage); return std::nullopt; }
+    }
+    const std::int64_t id = sqlite3_last_insert_rowid(db_);
+    if (!tx.commit()) { setResult(result, GroupResult::Storage); return std::nullopt; }
+    setResult(result, GroupResult::Ok);
+    return ObjectRow{id, *clean, t};
+}
+
+GroupResult PlayersDb::renameObject(std::int64_t id, const std::string& name) {
+    auto clean = cleanName(name);
+    if (!clean) return GroupResult::InvalidName;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return GroupResult::Storage;
+    Tx tx(db_);
+    if (!tx.ok()) return GroupResult::Storage;
+    {
+        Stmt s(db_, "SELECT 1 FROM player_objects WHERE id=?");
+        s.i64(1, id);
+        if (s.step() != SQLITE_ROW) return GroupResult::NotFound;
+    }
+    {
+        Stmt s(db_, "SELECT 1 FROM player_objects WHERE name=? AND id<>?");
+        s.text(1, *clean).i64(2, id);
+        if (s.step() == SQLITE_ROW) return GroupResult::NameTaken;
+    }
+    {
+        Stmt s(db_, "UPDATE player_objects SET name=? WHERE id=?");
+        s.text(1, *clean).i64(2, id);
+        if (!s.exec()) return GroupResult::Storage;
+    }
+    return tx.commit() ? GroupResult::Ok : GroupResult::Storage;
+}
+
+GroupResult PlayersDb::deleteObject(std::int64_t id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return GroupResult::Storage;
+    Tx tx(db_);
+    if (!tx.ok()) return GroupResult::Storage;
+    {
+        Stmt s(db_, "SELECT 1 FROM player_objects WHERE id=?");
+        s.i64(1, id);
+        if (s.step() != SQLITE_ROW) return GroupResult::NotFound;
+    }
+    {
+        Stmt s(db_, "SELECT 1 FROM player_groups WHERE object_id=?");
+        s.i64(1, id);
+        if (s.step() == SQLITE_ROW) return GroupResult::NotEmpty;
+    }
+    {
+        Stmt s(db_, "DELETE FROM player_objects WHERE id=?");
+        s.i64(1, id);
+        if (!s.exec()) return GroupResult::Storage;
+    }
+    return tx.commit() ? GroupResult::Ok : GroupResult::Storage;
+}
+
+std::optional<ObjectRow> PlayersDb::findObject(std::int64_t id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return std::nullopt;
+    Stmt s(db_, "SELECT id,name,created_at FROM player_objects WHERE id=?");
+    s.i64(1, id);
+    if (s.step() != SQLITE_ROW) return std::nullopt;
+    return readObject(s);
+}
+
+std::vector<ObjectRow> PlayersDb::listObjects() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<ObjectRow> out;
+    if (!db_) return out;
+    Stmt s(db_, "SELECT id,name,created_at FROM player_objects ORDER BY name, id");
+    while (s.step() == SQLITE_ROW) out.push_back(readObject(s));
+    return out;
+}
+
+std::optional<GroupRow> PlayersDb::createGroup(std::int64_t object_id, const std::string& name,
+                                               GroupResult* result, std::int64_t now) {
+    auto clean = cleanName(name);
+    if (!clean) { setResult(result, GroupResult::InvalidName); return std::nullopt; }
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) { setResult(result, GroupResult::Storage); return std::nullopt; }
+    Tx tx(db_);
+    if (!tx.ok()) { setResult(result, GroupResult::Storage); return std::nullopt; }
+    {
+        Stmt s(db_, "SELECT 1 FROM player_objects WHERE id=?");
+        s.i64(1, object_id);
+        if (s.step() != SQLITE_ROW) { setResult(result, GroupResult::NotFound); return std::nullopt; }
+    }
+    {
+        Stmt s(db_, "SELECT 1 FROM player_groups WHERE object_id=? AND name=?");
+        s.i64(1, object_id).text(2, *clean);
+        if (s.step() == SQLITE_ROW) { setResult(result, GroupResult::NameTaken); return std::nullopt; }
+    }
+    const std::int64_t t = nowOr(now);
+    {
+        Stmt s(db_, "INSERT INTO player_groups(object_id,name,created_at) VALUES(?,?,?)");
+        s.i64(1, object_id).text(2, *clean).i64(3, t);
+        if (!s.exec()) { setResult(result, GroupResult::Storage); return std::nullopt; }
+    }
+    const std::int64_t id = sqlite3_last_insert_rowid(db_);
+    if (!tx.commit()) { setResult(result, GroupResult::Storage); return std::nullopt; }
+    setResult(result, GroupResult::Ok);
+    return GroupRow{id, object_id, *clean, t};
+}
+
+GroupResult PlayersDb::renameGroup(std::int64_t id, const std::string& name) {
+    auto clean = cleanName(name);
+    if (!clean) return GroupResult::InvalidName;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return GroupResult::Storage;
+    Tx tx(db_);
+    if (!tx.ok()) return GroupResult::Storage;
+    std::int64_t object_id = 0;
+    {
+        Stmt s(db_, "SELECT object_id FROM player_groups WHERE id=?");
+        s.i64(1, id);
+        if (s.step() != SQLITE_ROW) return GroupResult::NotFound;
+        object_id = s.num(0);
+    }
+    {
+        Stmt s(db_, "SELECT 1 FROM player_groups WHERE object_id=? AND name=? AND id<>?");
+        s.i64(1, object_id).text(2, *clean).i64(3, id);
+        if (s.step() == SQLITE_ROW) return GroupResult::NameTaken;
+    }
+    {
+        Stmt s(db_, "UPDATE player_groups SET name=? WHERE id=?");
+        s.text(1, *clean).i64(2, id);
+        if (!s.exec()) return GroupResult::Storage;
+    }
+    return tx.commit() ? GroupResult::Ok : GroupResult::Storage;
+}
+
+GroupResult PlayersDb::deleteGroup(std::int64_t id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return GroupResult::Storage;
+    Tx tx(db_);
+    if (!tx.ok()) return GroupResult::Storage;
+    {
+        Stmt s(db_, "SELECT 1 FROM player_groups WHERE id=?");
+        s.i64(1, id);
+        if (s.step() != SQLITE_ROW) return GroupResult::NotFound;
+    }
+    {
+        Stmt s(db_, "SELECT 1 FROM players WHERE group_id=?");
+        s.i64(1, id);
+        if (s.step() == SQLITE_ROW) return GroupResult::NotEmpty;
+    }
+    {
+        Stmt s(db_, "DELETE FROM player_groups WHERE id=?");
+        s.i64(1, id);
+        if (!s.exec()) return GroupResult::Storage;
+    }
+    return tx.commit() ? GroupResult::Ok : GroupResult::Storage;
+}
+
+std::optional<GroupRow> PlayersDb::findGroup(std::int64_t id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return std::nullopt;
+    Stmt s(db_, "SELECT id,object_id,name,created_at FROM player_groups WHERE id=?");
+    s.i64(1, id);
+    if (s.step() != SQLITE_ROW) return std::nullopt;
+    return readGroup(s);
+}
+
+std::vector<GroupRow> PlayersDb::listGroups(std::optional<std::int64_t> object_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<GroupRow> out;
+    if (!db_) return out;
+    Stmt s(db_, object_id ? "SELECT id,object_id,name,created_at FROM player_groups WHERE object_id=? ORDER BY name, id"
+                          : "SELECT id,object_id,name,created_at FROM player_groups ORDER BY object_id, name, id");
+    if (object_id) s.i64(1, *object_id);
+    while (s.step() == SQLITE_ROW) out.push_back(readGroup(s));
+    return out;
+}
+
+GroupResult PlayersDb::movePlayer(const std::string& player_id, std::int64_t group_id, std::int64_t now) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return GroupResult::Storage;
+    Tx tx(db_);
+    if (!tx.ok()) return GroupResult::Storage;
+    std::optional<std::int64_t> from;
+    {
+        Stmt s(db_, "SELECT group_id FROM players WHERE id=?");
+        s.text(1, player_id);
+        if (s.step() != SQLITE_ROW) return GroupResult::NotFound;
+        from = s.optNum(0);
+    }
+    {
+        Stmt s(db_, "SELECT 1 FROM player_groups WHERE id=?");
+        s.i64(1, group_id);
+        if (s.step() != SQLITE_ROW) return GroupResult::NotFound;
+    }
+    if (from && *from == group_id) return GroupResult::Ok;           // nothing to do, nothing to record
+    {
+        Stmt s(db_, "UPDATE players SET group_id=? WHERE id=?");
+        s.i64(1, group_id).text(2, player_id);
+        if (!s.exec()) return GroupResult::Storage;
+    }
+    {
+        Stmt s(db_, "INSERT INTO player_events(player_id,ts,kind,details) VALUES(?,?,'moved',?)");
+        s.text(1, player_id).i64(2, nowOr(now))
+         .text(3, "{\"from\":" + (from ? std::to_string(*from) : std::string("null")) +
+                  ",\"to\":" + std::to_string(group_id) + "}");
+        if (!s.exec()) return GroupResult::Storage;
+    }
+    return tx.commit() ? GroupResult::Ok : GroupResult::Storage;
+}
+
+std::map<std::int64_t, std::int64_t> PlayersDb::playerCountByGroup() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::map<std::int64_t, std::int64_t> out;
+    if (!db_) return out;
+    Stmt s(db_, "SELECT group_id, COUNT(*) FROM players WHERE group_id IS NOT NULL GROUP BY group_id");
+    while (s.step() == SQLITE_ROW) out[s.num(0)] = s.num(1);
+    return out;
 }
 
 // ─── settings ───────────────────────────────────────────────────────────────

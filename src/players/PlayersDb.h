@@ -17,6 +17,8 @@
 //   player_events  state changes (enrolled, online, offline, revoked, ...)
 //   crl_state      the monotonic CRL number per CA generation
 //   players_settings  the module's key/value settings (schema version 2)
+//   player_objects / player_groups  the hierarchy all -> object -> group
+//                  (schema version 3); a player belongs to exactly one group
 //
 // Pairing tokens. The plaintext exists exactly once, in the return value of
 // createPlayer()/reissueToken(). claimToken() compares hashes in constant time
@@ -56,7 +58,28 @@ struct PlayerRow {
     std::optional<std::int64_t> activated_at;
     std::optional<std::int64_t> revoked_at;
     std::string                 revoke_reason;
+    // The one group the player sits in. Null only for rows made below the
+    // service layer (tests); the service never creates a player without one,
+    // and a player without a group is visible to administrators only.
+    std::optional<std::int64_t> group_id;
 };
+
+struct ObjectRow {
+    std::int64_t id{0};
+    std::string  name;
+    std::int64_t created_at{0};
+};
+
+struct GroupRow {
+    std::int64_t id{0};
+    std::int64_t object_id{0};
+    std::string  name;
+    std::int64_t created_at{0};
+};
+
+// Outcome of changes to the hierarchy. NotEmpty: an object that still has
+// groups, or a group that still has players, cannot be removed.
+enum class GroupResult { Ok, NotFound, NameTaken, InvalidName, NotEmpty, Storage };
 
 struct CreatedPlayer {
     PlayerRow    player;
@@ -71,6 +94,8 @@ struct TokenIssue {
 
 struct ListFilter {
     std::optional<PlayerState> state;
+    std::optional<std::int64_t> group_id;      // exactly this group
+    std::optional<std::int64_t> object_id;     // any group of this object
     std::int64_t               limit{0};    // 0 = no limit
     std::int64_t               offset{0};
 };
@@ -113,7 +138,7 @@ struct EventRow {
 
 class PlayersDb {
 public:
-    static constexpr int kSchemaVersion = 2;
+    static constexpr int kSchemaVersion = 3;
     static constexpr std::size_t kMaxPayloadBytes = 64 * 1024;
     static constexpr std::size_t kMaxNameBytes = 120;
     static constexpr std::int64_t kMaxTokenTtlSeconds = 365LL * 86400;
@@ -138,7 +163,8 @@ public:
                                               std::optional<std::int64_t> created_by,
                                               const std::string& clock_policy,
                                               std::int64_t token_ttl_seconds,
-                                              std::int64_t now = 0);
+                                              std::int64_t now = 0,
+                                              std::optional<std::int64_t> group_id = std::nullopt);
     std::optional<PlayerRow>     findPlayer(const std::string& id);
     std::vector<PlayerRow>       listPlayers(const ListFilter& filter);
 
@@ -181,6 +207,31 @@ public:
     std::vector<CertRow> revokedCerts(std::int64_t now = 0);
     // Deletes certificate records whose notAfter is before `now`. Returns how many.
     std::size_t          purgeExpiredCerts(std::int64_t now = 0);
+
+    // ── objects and groups ───────────────────────────────────────────────
+    // Names are trimmed, 1..120 bytes, no control characters. An object name is
+    // unique everywhere, a group name within its object. Ids are never reused
+    // (access grants refer to them). Everything here is one transaction.
+    std::optional<ObjectRow> createObject(const std::string& name, GroupResult* result = nullptr,
+                                          std::int64_t now = 0);
+    GroupResult              renameObject(std::int64_t id, const std::string& name);
+    GroupResult              deleteObject(std::int64_t id);             // NotEmpty while it has groups
+    std::optional<ObjectRow> findObject(std::int64_t id);
+    std::vector<ObjectRow>   listObjects();
+
+    std::optional<GroupRow>  createGroup(std::int64_t object_id, const std::string& name,
+                                         GroupResult* result = nullptr, std::int64_t now = 0);
+    GroupResult              renameGroup(std::int64_t id, const std::string& name);
+    GroupResult              deleteGroup(std::int64_t id);              // NotEmpty while it has players
+    std::optional<GroupRow>  findGroup(std::int64_t id);
+    std::vector<GroupRow>    listGroups(std::optional<std::int64_t> object_id);
+
+    // Moves a player to another group (any object) and leaves a "moved" event
+    // with the old and new group. Who may do it is decided above this layer.
+    GroupResult              movePlayer(const std::string& player_id, std::int64_t group_id,
+                                        std::int64_t now = 0);
+    // Players per group id (groups without players are absent).
+    std::map<std::int64_t, std::int64_t> playerCountByGroup();
 
     // ── settings ─────────────────────────────────────────────────────────
     // Plain key/value storage for the module's settings (server URLs, token

@@ -537,7 +537,9 @@ TEST_F(PlayersDbTest, ADatabaseOfVersionOneIsMigratedKeepingItsData) {
     {
         sqlite3* raw = nullptr;
         ASSERT_EQ(sqlite3_open(path_.c_str(), &raw), SQLITE_OK);
-        ASSERT_EQ(sqlite3_exec(raw, "DROP TABLE players_settings; PRAGMA user_version = 1;",
+        ASSERT_EQ(sqlite3_exec(raw, "DROP INDEX idx_players_group; ALTER TABLE players DROP COLUMN group_id;"
+                               "DROP TABLE player_groups; DROP TABLE player_objects;"
+                               "DROP TABLE players_settings; PRAGMA user_version = 1;",
                                nullptr, nullptr, nullptr), SQLITE_OK);
         sqlite3_close(raw);
     }
@@ -576,5 +578,236 @@ TEST_F(PlayersDbTest, RevokedCertsListsEveryGenerationButNotLiveOnesOrExpiredOne
 
     // Past its notAfter a revoked certificate no longer matters (it is expired anyway).
     EXPECT_TRUE(db_->revokedCerts(kT0 + 400LL * 86400).empty());
+}
+
+// ── objects and groups (schema version 3) ───────────────────────────────────
+// The hierarchy is all -> object -> group; a player sits in exactly one group.
+TEST_F(PlayersDbTest, ObjectsAndGroupsAreCreatedListedAndFound) {
+    GroupResult err = GroupResult::Ok;
+    auto lobby = db_->createObject("Mall", &err, kT0);
+    ASSERT_TRUE(lobby.has_value());
+    EXPECT_EQ(err, GroupResult::Ok);
+    EXPECT_GT(lobby->id, 0);
+    EXPECT_EQ(lobby->name, "Mall");
+
+    auto hall = db_->createGroup(lobby->id, "Entrance hall", &err, kT0);
+    ASSERT_TRUE(hall.has_value());
+    EXPECT_EQ(hall->object_id, lobby->id);
+
+    EXPECT_EQ(db_->findObject(lobby->id)->name, "Mall");
+    EXPECT_EQ(db_->findGroup(hall->id)->name, "Entrance hall");
+    ASSERT_EQ(db_->listObjects().size(), 1u);
+    ASSERT_EQ(db_->listGroups(lobby->id).size(), 1u);
+    EXPECT_EQ(db_->listGroups(std::nullopt).size(), 1u) << "no filter = every group";
+    EXPECT_FALSE(db_->findObject(9999).has_value());
+    EXPECT_FALSE(db_->findGroup(9999).has_value());
+}
+
+TEST_F(PlayersDbTest, NamesAreCleanedValidatedAndUniqueWhereTheyMust) {
+    GroupResult err;
+    ASSERT_TRUE(db_->createObject("  Mall  ", &err));
+    EXPECT_EQ(db_->listObjects()[0].name, "Mall") << "surrounding spaces are trimmed";
+
+    EXPECT_FALSE(db_->createObject("Mall", &err));
+    EXPECT_EQ(err, GroupResult::NameTaken) << "an object name is unique everywhere";
+    for (const std::string& bad : {std::string(""), std::string("   "), std::string(121, 'x'),
+                                   std::string("a\nb"), std::string("a\x01" "b")}) {
+        EXPECT_FALSE(db_->createObject(bad, &err)) << bad.size();
+        EXPECT_EQ(err, GroupResult::InvalidName);
+    }
+
+    auto a = db_->createObject("A", &err);
+    auto b = db_->createObject("B", &err);
+    ASSERT_TRUE(a && b);
+    ASSERT_TRUE(db_->createGroup(a->id, "Hall", &err));
+    EXPECT_FALSE(db_->createGroup(a->id, "Hall", &err));
+    EXPECT_EQ(err, GroupResult::NameTaken) << "a group name is unique within its object";
+    EXPECT_TRUE(db_->createGroup(b->id, "Hall", &err)) << "...but may repeat in another object";
+    EXPECT_FALSE(db_->createGroup(9999, "Hall", &err));
+    EXPECT_EQ(err, GroupResult::NotFound);
+}
+
+TEST_F(PlayersDbTest, RenamingKeepsTheIdAndRespectsUniqueness) {
+    GroupResult err;
+    auto a = db_->createObject("A", &err);
+    auto b = db_->createObject("B", &err);
+    auto g1 = db_->createGroup(a->id, "G1", &err);
+    auto g2 = db_->createGroup(a->id, "G2", &err);
+    ASSERT_TRUE(a && b && g1 && g2);
+
+    EXPECT_EQ(db_->renameObject(a->id, "A2"), GroupResult::Ok);
+    EXPECT_EQ(db_->findObject(a->id)->name, "A2");
+    EXPECT_EQ(db_->renameObject(a->id, "B"), GroupResult::NameTaken);
+    EXPECT_EQ(db_->renameObject(a->id, "A2"), GroupResult::Ok) << "renaming to itself is fine";
+    EXPECT_EQ(db_->renameObject(9999, "X"), GroupResult::NotFound);
+    EXPECT_EQ(db_->renameObject(a->id, ""), GroupResult::InvalidName);
+
+    EXPECT_EQ(db_->renameGroup(g1->id, "G1b"), GroupResult::Ok);
+    EXPECT_EQ(db_->renameGroup(g1->id, "G2"), GroupResult::NameTaken);
+    EXPECT_EQ(db_->renameGroup(9999, "X"), GroupResult::NotFound);
+}
+
+TEST_F(PlayersDbTest, ThingsThatStillHoldSomethingCannotBeDeleted) {
+    GroupResult err;
+    auto obj = db_->createObject("Mall", &err);
+    auto grp = db_->createGroup(obj->id, "Hall", &err);
+    ASSERT_TRUE(obj && grp);
+    auto p = db_->createPlayer("Screen", 1, "strict", 86400, kT0, grp->id);
+    ASSERT_TRUE(p);
+
+    EXPECT_EQ(db_->deleteObject(obj->id), GroupResult::NotEmpty) << "it still has a group";
+    EXPECT_EQ(db_->deleteGroup(grp->id), GroupResult::NotEmpty) << "it still has a player";
+    EXPECT_TRUE(db_->findGroup(grp->id).has_value());
+
+    auto other = db_->createGroup(obj->id, "Cafe", &err);
+    ASSERT_TRUE(other);
+    ASSERT_EQ(db_->movePlayer(p->player.id, other->id, kT0 + 1), GroupResult::Ok);
+    EXPECT_EQ(db_->deleteGroup(grp->id), GroupResult::Ok) << "empty now";
+    EXPECT_EQ(db_->deleteGroup(grp->id), GroupResult::NotFound);
+    EXPECT_EQ(db_->deleteObject(obj->id), GroupResult::NotEmpty) << "one group is left";
+    ASSERT_TRUE(db_->deletePlayer(p->player.id, "x", kT0 + 2));
+    EXPECT_EQ(db_->deleteGroup(other->id), GroupResult::Ok);
+    EXPECT_EQ(db_->deleteObject(obj->id), GroupResult::Ok);
+    EXPECT_EQ(db_->deleteObject(obj->id), GroupResult::NotFound);
+}
+
+TEST_F(PlayersDbTest, IdsOfDeletedGroupsAreNeverReused) {
+    // Access grants refer to ids. If a deleted group's id came back for a new
+    // group, a stale grant would silently apply to it.
+    GroupResult err;
+    auto obj = db_->createObject("Mall", &err);
+    auto g1 = db_->createGroup(obj->id, "G1", &err);
+    ASSERT_TRUE(g1);
+    ASSERT_EQ(db_->deleteGroup(g1->id), GroupResult::Ok);
+    auto g2 = db_->createGroup(obj->id, "G2", &err);
+    ASSERT_TRUE(g2);
+    EXPECT_NE(g2->id, g1->id);
+
+    ASSERT_EQ(db_->deleteGroup(g2->id), GroupResult::Ok);
+    ASSERT_EQ(db_->deleteObject(obj->id), GroupResult::Ok);
+    auto obj2 = db_->createObject("Mall", &err);
+    ASSERT_TRUE(obj2);
+    EXPECT_NE(obj2->id, obj->id);
+}
+
+TEST_F(PlayersDbTest, APlayerCanBeCreatedIntoAGroupAndOnlyIntoAnExistingOne) {
+    GroupResult err;
+    auto obj = db_->createObject("Mall", &err);
+    auto grp = db_->createGroup(obj->id, "Hall", &err);
+    ASSERT_TRUE(obj && grp);
+
+    auto p = db_->createPlayer("Screen", 1, "strict", 86400, kT0, grp->id);
+    ASSERT_TRUE(p);
+    ASSERT_TRUE(p->player.group_id.has_value());
+    EXPECT_EQ(*p->player.group_id, grp->id);
+    EXPECT_EQ(db_->findPlayer(p->player.id)->group_id, std::optional<std::int64_t>(grp->id));
+
+    EXPECT_FALSE(db_->createPlayer("Ghost", 1, "strict", 86400, kT0, 9999).has_value())
+        << "a group that does not exist is refused";
+    EXPECT_EQ(db_->listPlayers({}).size(), 1u) << "and leaves nothing behind";
+}
+
+TEST_F(PlayersDbTest, PlayersAreListedByGroupAndByObject) {
+    GroupResult err;
+    auto o1 = db_->createObject("O1", &err);
+    auto o2 = db_->createObject("O2", &err);
+    auto g1 = db_->createGroup(o1->id, "G1", &err);
+    auto g2 = db_->createGroup(o1->id, "G2", &err);
+    auto g3 = db_->createGroup(o2->id, "G3", &err);
+    ASSERT_TRUE(g1 && g2 && g3);
+    ASSERT_TRUE(db_->createPlayer("a", 1, "strict", 86400, kT0, g1->id));
+    ASSERT_TRUE(db_->createPlayer("b", 1, "strict", 86400, kT0 + 1, g1->id));
+    ASSERT_TRUE(db_->createPlayer("c", 1, "strict", 86400, kT0 + 2, g2->id));
+    ASSERT_TRUE(db_->createPlayer("d", 1, "strict", 86400, kT0 + 3, g3->id));
+
+    ListFilter f;
+    f.group_id = g1->id;
+    EXPECT_EQ(db_->listPlayers(f).size(), 2u);
+    f.group_id = std::nullopt;
+    f.object_id = o1->id;
+    EXPECT_EQ(db_->listPlayers(f).size(), 3u) << "an object includes all its groups";
+    f.object_id = o2->id;
+    EXPECT_EQ(db_->listPlayers(f).size(), 1u);
+    f.object_id = std::nullopt;
+    f.state = PlayerState::Active;
+    EXPECT_TRUE(db_->listPlayers(f).empty()) << "filters combine";
+
+    auto counts = db_->playerCountByGroup();
+    EXPECT_EQ(counts[g1->id], 2);
+    EXPECT_EQ(counts[g2->id], 1);
+    EXPECT_EQ(counts[g3->id], 1);
+}
+
+TEST_F(PlayersDbTest, MovingAPlayerChangesItsGroupAndLeavesATrace) {
+    GroupResult err;
+    auto obj = db_->createObject("Mall", &err);
+    auto g1 = db_->createGroup(obj->id, "G1", &err);
+    auto g2 = db_->createGroup(obj->id, "G2", &err);
+    auto p = db_->createPlayer("Screen", 1, "strict", 86400, kT0, g1->id);
+    ASSERT_TRUE(g1 && g2 && p);
+
+    EXPECT_EQ(db_->movePlayer(p->player.id, g2->id, kT0 + 5), GroupResult::Ok);
+    EXPECT_EQ(db_->findPlayer(p->player.id)->group_id, std::optional<std::int64_t>(g2->id));
+    int moved = 0;
+    std::string details;
+    for (const auto& e : db_->events(p->player.id, 20))
+        if (e.kind == "moved") { ++moved; details = e.details; }
+    EXPECT_EQ(moved, 1);
+    EXPECT_NE(details.find("\"from\":" + std::to_string(g1->id)), std::string::npos) << details;
+    EXPECT_NE(details.find("\"to\":" + std::to_string(g2->id)), std::string::npos) << details;
+
+    EXPECT_EQ(db_->movePlayer(p->player.id, g2->id, kT0 + 6), GroupResult::Ok) << "already there: nothing to do";
+    moved = 0;
+    for (const auto& e : db_->events(p->player.id, 20)) moved += (e.kind == "moved");
+    EXPECT_EQ(moved, 1) << "no second trace for a no-op";
+
+    EXPECT_EQ(db_->movePlayer(p->player.id, 9999, kT0 + 7), GroupResult::NotFound);
+    EXPECT_EQ(db_->movePlayer("00000000-0000-4000-8000-000000000000", g1->id, kT0 + 7), GroupResult::NotFound);
+    EXPECT_EQ(db_->findPlayer(p->player.id)->group_id, std::optional<std::int64_t>(g2->id)) << "failed moves change nothing";
+}
+
+TEST_F(PlayersDbTest, TheHierarchySurvivesReopening) {
+    GroupResult err;
+    auto obj = db_->createObject("Mall", &err);
+    auto grp = db_->createGroup(obj->id, "Hall", &err);
+    auto p = db_->createPlayer("Screen", 1, "strict", 86400, kT0, grp->id);
+    ASSERT_TRUE(obj && grp && p);
+    reopen();
+    EXPECT_EQ(db_->findGroup(grp->id)->object_id, obj->id);
+    EXPECT_EQ(db_->findPlayer(p->player.id)->group_id, std::optional<std::int64_t>(grp->id));
+}
+
+TEST_F(PlayersDbTest, ADatabaseOfVersionTwoIsMigratedAndItsPlayersGetAPlace) {
+    // What an installation from before groups looks like: players, no
+    // objects or groups, no group_id column, user_version 2.
+    auto legacy = enrolled("MIG02");
+    auto legacy_cert_count = db_->certsOf(legacy).size();
+    db_.reset();
+    {
+        sqlite3* raw = nullptr;
+        ASSERT_EQ(sqlite3_open(path_.c_str(), &raw), SQLITE_OK);
+        ASSERT_EQ(sqlite3_exec(raw,
+            "DROP INDEX idx_players_group; ALTER TABLE players DROP COLUMN group_id;"
+            "DROP TABLE player_groups; DROP TABLE player_objects; PRAGMA user_version = 2;",
+            nullptr, nullptr, nullptr), SQLITE_OK);
+        sqlite3_close(raw);
+    }
+
+    PlayersDb upgraded(path_);
+    ASSERT_TRUE(upgraded.open());
+    EXPECT_EQ(upgraded.schemaVersion(), PlayersDb::kSchemaVersion);
+    auto p = upgraded.findPlayer(legacy);
+    ASSERT_TRUE(p.has_value()) << "players survive";
+    EXPECT_EQ(upgraded.certsOf(legacy).size(), legacy_cert_count);
+    ASSERT_TRUE(p->group_id.has_value()) << "every player ends up in a group";
+    auto g = upgraded.findGroup(*p->group_id);
+    ASSERT_TRUE(g.has_value());
+    EXPECT_EQ(g->name, "Unassigned");
+    EXPECT_EQ(upgraded.findObject(g->object_id)->name, "Unassigned");
+}
+
+TEST_F(PlayersDbTest, AFreshOrEmptyDatabaseGetsNoInventedObjects) {
+    EXPECT_TRUE(db_->listObjects().empty());
+    EXPECT_TRUE(db_->listGroups(std::nullopt).empty());
 }
 
