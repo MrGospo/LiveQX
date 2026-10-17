@@ -4217,6 +4217,14 @@ paths:
           name: state
           schema: { type: string, enum: [pending, active, revoked] }
         - in: query
+          name: group_id
+          schema: { type: integer, format: int64 }
+          description: Только плееры этой группы.
+        - in: query
+          name: object_id
+          schema: { type: integer, format: int64 }
+          description: Плееры всех групп этого объекта.
+        - in: query
           name: limit
           schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
         - in: query
@@ -4260,9 +4268,13 @@ paths:
           application/json:
             schema:
               type: object
-              required: [name]
+              required: [name, group_id]
               properties:
                 name: { type: string, minLength: 1, maxLength: 120 }
+                group_id:
+                  type: integer
+                  format: int64
+                  description: Группа, в которой будет плеер. Плеер всегда состоит ровно в одной группе.
                 clock_policy:
                   type: string
                   enum: [strict, relaxed]
@@ -4274,7 +4286,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PairingPackage' }
         '400':
-          description: '`invalid_json`, `invalid_body`, `invalid_name`, `invalid_clock_policy`.'
+          description: '`invalid_json`, `invalid_body`, `invalid_name`, `invalid_clock_policy`, `group_required`, `invalid_group`, `group_not_found`.'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -4365,6 +4377,260 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '503':
           description: '`ca_unavailable`, `server_clock_unsynced` или модуль плееров не подключён.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/player-objects:
+    get:
+      tags: [Players]
+      summary: The tree of objects and groups with player counts
+      description: |
+        Admin (пока нет доступа по группам). Иерархия: все → объект → группа;
+        у группы — число плееров.
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [objects]
+                properties:
+                  objects:
+                    type: array
+                    items: { $ref: '#/components/schemas/PlayerObject' }
+        '503':
+          description: Модуль плееров не подключён.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    post:
+      tags: [Players]
+      summary: Create an object
+      description: |
+        Admin. Имя объекта уникально. Audit event: `player.object_create`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerObjectBrief' }
+        '400':
+          description: '`invalid_name`, `invalid_json`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`name_taken`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/player-objects/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    put:
+      tags: [Players]
+      summary: Rename an object
+      description: 'Admin. Audit event: `player.object_rename`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        '200':
+          description: Renamed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerObjectBrief' }
+        '400':
+          description: '`invalid_name`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`not_found`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`name_taken`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      tags: [Players]
+      summary: Remove an empty object
+      description: |
+        Admin. Объект, в котором остались группы, удалить нельзя (`409 not_empty`).
+        Идентификаторы удалённых объектов не используются повторно.
+        Audit event: `player.object_delete`.
+      responses:
+        '200':
+          description: Removed.
+        '404':
+          description: '`not_found`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`not_empty`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/player-objects/{id}/groups:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    post:
+      tags: [Players]
+      summary: Create a group inside an object
+      description: |
+        Admin. Имя группы уникально в пределах объекта.
+        Audit event: `player.group_create`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerGroup' }
+        '400':
+          description: '`invalid_name`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Нет такого объекта.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`name_taken`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/player-groups/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    put:
+      tags: [Players]
+      summary: Rename a group
+      description: 'Admin. Audit event: `player.group_rename`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        '200':
+          description: Renamed.
+        '400':
+          description: '`invalid_name`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`not_found`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`name_taken`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      tags: [Players]
+      summary: Remove an empty group
+      description: |
+        Admin. Группу, в которой есть плееры, удалить нельзя (`409 not_empty`).
+        Audit event: `player.group_delete`.
+      responses:
+        '200':
+          description: Removed.
+        '404':
+          description: '`not_found`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`not_empty`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/players/{id}/group:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [Players]
+      summary: Move a player to another group
+      description: |
+        Admin. Плеер всегда в одной группе; перенос действует сразу и пишется в
+        журнал плеера (`moved`) и в аудит (`player.move`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [group_id]
+              properties:
+                group_id: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: The player with its new place.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Player' }
+        '400':
+          description: '`group_required`, `invalid_group`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`not_found` (плеер) или `group_not_found`.'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -4594,6 +4860,34 @@ components:
   schemas:
 
     # ── Players ──────────────────────────────────────────────────────────────
+    PlayerGroup:
+      type: object
+      required: [id, object_id, name, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        object_id: { type: integer, format: int64 }
+        name: { type: string }
+        created_at: { type: integer, format: int64 }
+        players: { type: integer, description: "Сколько плееров в группе (в дереве)." }
+
+    PlayerObjectBrief:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        created_at: { type: integer, format: int64 }
+
+    PlayerObject:
+      allOf:
+        - $ref: '#/components/schemas/PlayerObjectBrief'
+        - type: object
+          required: [groups]
+          properties:
+            groups:
+              type: array
+              items: { $ref: '#/components/schemas/PlayerGroup' }
+
     PlayersSettings:
       type: object
       required: [server_url, device_api_url, mqtt_broker_url, ca_cert_pem, token_ttl_days, clock_policy]
@@ -4641,6 +4935,10 @@ components:
         state: { type: string, enum: [pending, active, revoked] }
         clock_policy: { type: string, enum: [strict, relaxed] }
         created_at: { type: integer, format: int64 }
+        group_id: { type: integer, format: int64, description: "Группа плеера." }
+        group_name: { type: string }
+        object_id: { type: integer, format: int64, description: "Объект, которому принадлежит группа." }
+        object_name: { type: string }
         created_by: { type: integer, format: int64 }
         activated_at: { type: integer, format: int64 }
         revoked_at: { type: integer, format: int64 }

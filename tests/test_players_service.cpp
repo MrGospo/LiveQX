@@ -49,6 +49,7 @@ protected:
     std::vector<std::string> ntp_;
     std::vector<CertRow> revoked_by_hook_;
     std::unique_ptr<PlayersService> svc_;
+    std::int64_t group_{0};
 
     void SetUp() override {
         static std::atomic<int> seq{0};
@@ -58,6 +59,12 @@ protected:
         fs::create_directories(tls_dir_);
         db_ = std::make_unique<PlayersDb>(dir_ / "players.db");
         ASSERT_TRUE(db_->open());
+        {
+            auto o = db_->createObject("Main");
+            auto g = db_->createGroup(o->id, "Hall");
+            ASSERT_TRUE(g.has_value());
+            group_ = g->id;
+        }
         ASSERT_TRUE(liveqx::tls::ensureCa(tls_dir_).ok());
         makeService();
     }
@@ -104,7 +111,7 @@ TEST_F(PlayersServiceTest, SettingsHaveSafeDefaults) {
 }
 
 TEST_F(PlayersServiceTest, ThePackageIsRefusedUntilTheModuleIsConfigured) {
-    auto r = svc_->create("Lobby", 1, std::nullopt, kT0);
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
     EXPECT_FALSE(r.ok);
     EXPECT_EQ(r.error, "not_configured");
     EXPECT_TRUE(db_->listPlayers({}).empty()) << "no half-created player";
@@ -112,7 +119,7 @@ TEST_F(PlayersServiceTest, ThePackageIsRefusedUntilTheModuleIsConfigured) {
 
 TEST_F(PlayersServiceTest, ThePackageCarriesExactlyTheA3Fields) {
     configure();
-    auto r = svc_->create("Lobby", 7, std::nullopt, kT0);
+    auto r = svc_->create("Lobby", 7, std::nullopt, kT0, group_);
     ASSERT_TRUE(r.ok) << r.error;
     const json& p = r.package;
     std::set<std::string> keys;
@@ -136,7 +143,7 @@ TEST_F(PlayersServiceTest, ThePackageCarriesExactlyTheA3Fields) {
 TEST_F(PlayersServiceTest, TokenExpiryIsRfc3339UtcAndFollowsTheConfiguredLifetime) {
     configure();
     ASSERT_EQ(svc_->updateSettings({{"token_ttl_days", "1"}}), "");
-    auto r = svc_->create("Lobby", 1, std::nullopt, kT0);
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
     ASSERT_TRUE(r.ok);
     std::time_t t = kT0 + 86400;
     std::tm tm{};
@@ -149,7 +156,7 @@ TEST_F(PlayersServiceTest, TokenExpiryIsRfc3339UtcAndFollowsTheConfiguredLifetim
 TEST_F(PlayersServiceTest, TheCreatedPlayerIsPendingAndAnEventIsPublished) {
     configure();
     auto sub = bus_.subscribe();
-    auto r = svc_->create("Lobby", 7, std::nullopt, kT0);
+    auto r = svc_->create("Lobby", 7, std::nullopt, kT0, group_);
     ASSERT_TRUE(r.ok);
     auto stored = db_->findPlayer(r.player.id);
     ASSERT_TRUE(stored.has_value());
@@ -167,16 +174,16 @@ TEST_F(PlayersServiceTest, TheCreatedPlayerIsPendingAndAnEventIsPublished) {
 TEST_F(PlayersServiceTest, ThePolicyOfTheRequestWinsOverTheDefault) {
     configure();
     ASSERT_EQ(svc_->updateSettings({{"clock_policy", "relaxed"}}), "");
-    EXPECT_EQ(svc_->create("A", 1, std::nullopt, kT0).package["clock_policy"], "relaxed");
-    EXPECT_EQ(svc_->create("B", 1, std::string("strict"), kT0).package["clock_policy"], "strict");
+    EXPECT_EQ(svc_->create("A", 1, std::nullopt, kT0, group_).package["clock_policy"], "relaxed");
+    EXPECT_EQ(svc_->create("B", 1, std::string("strict"), kT0, group_).package["clock_policy"], "strict");
 }
 
 TEST_F(PlayersServiceTest, AnInvalidNameOrPolicyIsRejectedWithoutSideEffects) {
     configure();
-    auto a = svc_->create("   ", 1, std::nullopt, kT0);
+    auto a = svc_->create("   ", 1, std::nullopt, kT0, group_);
     EXPECT_FALSE(a.ok);
     EXPECT_EQ(a.error, "invalid_name");
-    auto b = svc_->create("Lobby", 1, std::string("whatever"), kT0);
+    auto b = svc_->create("Lobby", 1, std::string("whatever"), kT0, group_);
     EXPECT_FALSE(b.ok);
     EXPECT_EQ(b.error, "invalid_clock_policy");
     EXPECT_TRUE(db_->listPlayers({}).empty());
@@ -185,7 +192,7 @@ TEST_F(PlayersServiceTest, AnInvalidNameOrPolicyIsRejectedWithoutSideEffects) {
 TEST_F(PlayersServiceTest, NtpHintAppearsOnlyWhenTheServerHasNtp) {
     configure();
     ntp_ = {"pool.ntp.org:123", "time.example"};
-    auto r = svc_->create("Lobby", 1, std::nullopt, kT0);
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
     ASSERT_TRUE(r.ok);
     ASSERT_TRUE(r.package.contains("ntp_hint"));
     EXPECT_EQ(r.package["ntp_hint"], (json{"pool.ntp.org:123", "time.example"}));
@@ -194,7 +201,7 @@ TEST_F(PlayersServiceTest, NtpHintAppearsOnlyWhenTheServerHasNtp) {
 TEST_F(PlayersServiceTest, WithoutACaNoPackageIsIssued) {
     configure();
     fs::remove(tls_dir_ / "ca.crt");
-    auto r = svc_->create("Lobby", 1, std::nullopt, kT0);
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
     EXPECT_FALSE(r.ok);
     EXPECT_EQ(r.error, "ca_unavailable");
     EXPECT_TRUE(db_->listPlayers({}).empty());
@@ -207,7 +214,7 @@ TEST_F(PlayersServiceTest, AnExplicitCaOverrideIsUsedInsteadOfTheTlsDirectory) {
     ASSERT_TRUE(liveqx::tls::ensureCa(other, "Other CA").ok());
     const std::string pem = slurp(other / "ca.crt");
     ASSERT_EQ(svc_->updateSettings({{"ca_cert_pem", pem}}), "");
-    auto r = svc_->create("Lobby", 1, std::nullopt, kT0);
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
     ASSERT_TRUE(r.ok);
     EXPECT_EQ(r.package["ca_cert_pem"], pem);
 }
@@ -264,12 +271,12 @@ TEST_F(PlayersServiceTest, AnEmptyValueClearsASetting) {
     configure();
     ASSERT_EQ(svc_->updateSettings({{"server_url", ""}}), "");
     EXPECT_TRUE(svc_->settings().server_url.empty());
-    EXPECT_EQ(svc_->create("Lobby", 1, std::nullopt, kT0).error, "not_configured");
+    EXPECT_EQ(svc_->create("Lobby", 1, std::nullopt, kT0, group_).error, "not_configured");
 }
 
 TEST_F(PlayersServiceTest, ReissuingGivesANewPackageForAPendingPlayerOnly) {
     configure();
-    auto r = svc_->create("Lobby", 1, std::nullopt, kT0);
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
     ASSERT_TRUE(r.ok);
     auto again = svc_->reissueToken(r.player.id, kT0 + 10);
     ASSERT_TRUE(again.ok) << again.error;
@@ -289,7 +296,7 @@ TEST_F(PlayersServiceTest, ReissuingGivesANewPackageForAPendingPlayerOnly) {
 
 TEST_F(PlayersServiceTest, RevokingReportsTheCertificatesToTheCrlHook) {
     configure();
-    auto r = svc_->create("Lobby", 1, std::nullopt, kT0);
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
     auto claim = db_->claimToken(r.player.id, r.package["bootstrap_token"], kT0 + 1);
     ASSERT_TRUE(db_->finishEnrollment(claim.token_id, certFor(r.player.id, "BB02"), kT0 + 2));
 
@@ -313,7 +320,7 @@ TEST_F(PlayersServiceTest, RevokingAnUnknownPlayerIsNotFound) {
 
 TEST_F(PlayersServiceTest, DeletingRevokesTheCertificatesFirstAndKeepsTheirRecords) {
     configure();
-    auto r = svc_->create("Lobby", 1, std::nullopt, kT0);
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
     auto claim = db_->claimToken(r.player.id, r.package["bootstrap_token"], kT0 + 1);
     ASSERT_TRUE(db_->finishEnrollment(claim.token_id, certFor(r.player.id, "CC03"), kT0 + 2));
 
@@ -327,7 +334,7 @@ TEST_F(PlayersServiceTest, DeletingRevokesTheCertificatesFirstAndKeepsTheirRecor
 
 TEST_F(PlayersServiceTest, DeletingAPendingPlayerBurnsItsToken) {
     configure();
-    auto r = svc_->create("Lobby", 1, std::nullopt, kT0);
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
     ASSERT_TRUE(svc_->remove(r.player.id, "mistake", kT0 + 1).found);
     EXPECT_FALSE(db_->claimToken(r.player.id, r.package["bootstrap_token"], kT0 + 2).ok);
     EXPECT_TRUE(revoked_by_hook_.empty());
@@ -344,5 +351,26 @@ TEST_F(PlayersServiceTest, CaCertPemFollowsTheOverrideThenTheTlsDirectory) {
     fs::remove(tls_dir_ / "ca.crt");
     ASSERT_EQ(svc_->updateSettings({{"ca_cert_pem", ""}}), "");
     EXPECT_TRUE(svc_->caCertPem().empty()) << "no usable root -> empty, never garbage";
+}
+
+// ── players live in a group ─────────────────────────────────────────────────
+TEST_F(PlayersServiceTest, ACreatedPlayerSitsInTheGroupItWasGiven) {
+    configure();
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
+    ASSERT_TRUE(r.ok) << r.error;
+    EXPECT_EQ(r.player.group_id, std::optional<std::int64_t>(group_));
+    EXPECT_EQ(db_->findPlayer(r.player.id)->group_id, std::optional<std::int64_t>(group_));
+    EXPECT_FALSE(r.package.contains("group_id")) << "the player does not need to know its group (A3 is unchanged)";
+}
+
+TEST_F(PlayersServiceTest, APlayerWithoutAGroupIsNotCreated) {
+    configure();
+    auto none = svc_->create("Lobby", 1, std::nullopt, kT0, std::nullopt);
+    EXPECT_FALSE(none.ok);
+    EXPECT_EQ(none.error, "group_required");
+    auto ghost = svc_->create("Lobby", 1, std::nullopt, kT0, 424242);
+    EXPECT_FALSE(ghost.ok);
+    EXPECT_EQ(ghost.error, "group_not_found");
+    EXPECT_TRUE(db_->listPlayers({}).empty()) << "and nothing is left behind";
 }
 

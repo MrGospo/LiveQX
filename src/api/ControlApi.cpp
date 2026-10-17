@@ -442,6 +442,16 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     rbac.registerEndpoint("POST /api/players/{id}/revoke-cert",     rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("POST /api/players/{id}/reissue-token",   rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("GET /api/players/settings",              rbacRole(RbacRole::Admin));
+    // The hierarchy all -> object -> group. Administered by admins; reading it is
+    // admin-only until access by group exists, so nobody sees names they should not.
+    rbac.registerEndpoint("GET /api/player-objects",                rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("POST /api/player-objects",               rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("PUT /api/player-objects/{id}",           rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("DELETE /api/player-objects/{id}",        rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("POST /api/player-objects/{id}/groups",   rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("PUT /api/player-groups/{id}",            rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("DELETE /api/player-groups/{id}",         rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("PUT /api/players/{id}/group",            rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("PUT /api/players/settings",              rbacRole(RbacRole::Admin));
 
     // fix33 — server time / NTP config. GET — Operator (mostly read для
@@ -652,7 +662,8 @@ liveqx::audit::Category categoryForApiPath(std::string_view p) noexcept {
     if (p.rfind("/api/gateways", 0) == 0)      return C::Gateway;
     if (p.rfind("/api/plugins", 0) == 0)       return C::Plugin;
     if (p.rfind("/api/system/mounts", 0) == 0) return C::Mount;
-    if (p.rfind("/api/players", 0) == 0)       return C::Player;
+    if (p.rfind("/api/players", 0) == 0 || p.rfind("/api/player-objects", 0) == 0 ||
+        p.rfind("/api/player-groups", 0) == 0) return C::Player;
     if (p.rfind("/api/system", 0) == 0)        return C::System;
     if (p.rfind("/api/channels", 0) == 0) {
         return p.find("/outputs") != std::string_view::npos
@@ -3158,13 +3169,34 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         if (code == "storage_error") return 500;
         return 400;
     };
+    // Names of groups and objects, loaded once per request.
+    struct Hierarchy {
+        std::map<std::int64_t, liveqx::players::GroupRow>  groups;
+        std::map<std::int64_t, liveqx::players::ObjectRow> objects;
+    };
+    auto loadHierarchy = [](liveqx::players::PlayersDb& db) {
+        Hierarchy h;
+        for (auto& g : db.listGroups(std::nullopt)) h.groups.emplace(g.id, g);
+        for (auto& o : db.listObjects()) h.objects.emplace(o.id, o);
+        return h;
+    };
     auto playerJson = [](const liveqx::players::PlayerRow& p,
-                         const std::optional<liveqx::players::StatusRow>& st) {
+                         const std::optional<liveqx::players::StatusRow>& st,
+                         const Hierarchy& h) {
         json j = {{"id", p.id},
                   {"name", p.name},
                   {"state", liveqx::players::toString(p.state)},
                   {"clock_policy", p.clock_policy},
                   {"created_at", p.created_at}};
+        if (p.group_id) {
+            j["group_id"] = *p.group_id;
+            if (auto g = h.groups.find(*p.group_id); g != h.groups.end()) {
+                j["group_name"] = g->second.name;
+                j["object_id"]  = g->second.object_id;
+                if (auto o = h.objects.find(g->second.object_id); o != h.objects.end())
+                    j["object_name"] = o->second.name;
+            }
+        }
         if (p.created_by)   j["created_by"]   = *p.created_by;
         if (p.activated_at) j["activated_at"] = *p.activated_at;
         if (p.revoked_at)   j["revoked_at"]   = *p.revoked_at;
@@ -3227,6 +3259,170 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         writeJson(res, out.status, out.body);
     });
 
+    // ─── The hierarchy all -> object -> group ───────────────────────────────
+    auto groupStatusFor = [](liveqx::players::GroupResult r) {
+        using R = liveqx::players::GroupResult;
+        switch (r) {
+            case R::Ok:          return 200;
+            case R::NotFound:    return 404;
+            case R::NameTaken:   return 409;
+            case R::NotEmpty:    return 409;
+            case R::InvalidName: return 400;
+            case R::Storage:     return 500;
+        }
+        return 500;
+    };
+    auto groupErrorName = [](liveqx::players::GroupResult r) -> const char* {
+        using R = liveqx::players::GroupResult;
+        switch (r) {
+            case R::Ok:          return "ok";
+            case R::NotFound:    return "not_found";
+            case R::NameTaken:   return "name_taken";
+            case R::NotEmpty:    return "not_empty";
+            case R::InvalidName: return "invalid_name";
+            case R::Storage:     return "storage_error";
+        }
+        return "storage_error";
+    };
+    // The "name" of a request body; nullopt (and a 400 already written) if it is missing or not text.
+    auto nameOf = [](const httplib::Request& req, httplib::Response& res) -> std::optional<std::string> {
+        json body;
+        if (!parseJsonBody(req, res, body)) return std::nullopt;
+        if (!body.is_object() || !body.contains("name") || !body["name"].is_string()) {
+            writeJson(res, 400, {{"error", "invalid_name"}});
+            return std::nullopt;
+        }
+        return body["name"].get<std::string>();
+    };
+    auto auditNode = [](std::string_view action, const json& details, const char* type, std::int64_t id) {
+        setAuditContextOverride(action, details, type, std::to_string(id));
+    };
+
+    s.Get("/api/player-objects",
+          [pls, players_unavailable](const httplib::Request&, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        const auto counts = pls->db().playerCountByGroup();
+        const auto groups = pls->db().listGroups(std::nullopt);
+        json objs = json::array();
+        for (const auto& o : pls->db().listObjects()) {
+            json gs = json::array();
+            for (const auto& g : groups) {
+                if (g.object_id != o.id) continue;
+                auto c = counts.find(g.id);
+                gs.push_back({{"id", g.id}, {"object_id", g.object_id}, {"name", g.name},
+                              {"created_at", g.created_at}, {"players", c == counts.end() ? 0 : c->second}});
+            }
+            objs.push_back({{"id", o.id}, {"name", o.name}, {"created_at", o.created_at}, {"groups", std::move(gs)}});
+        }
+        writeJson(res, 200, json{{"objects", std::move(objs)}});
+    });
+
+    s.Post("/api/player-objects",
+           [pls, players_unavailable, nameOf, groupStatusFor, groupErrorName, auditNode]
+           (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        auto name = nameOf(req, res);
+        if (!name) return;
+        liveqx::players::GroupResult err;
+        auto o = pls->db().createObject(*name, &err);
+        if (!o) { writeJson(res, groupStatusFor(err), {{"error", groupErrorName(err)}}); return; }
+        auditNode("player.object_create", json{{"name", o->name}}, "player_object", o->id);
+        writeJson(res, 201, json{{"id", o->id}, {"name", o->name}, {"created_at", o->created_at}});
+    });
+
+    s.Put(R"(/api/player-objects/(\d+))",
+          [pls, players_unavailable, nameOf, groupStatusFor, groupErrorName, auditNode]
+          (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        const std::int64_t id = std::stoll(req.matches[1]);
+        auto name = nameOf(req, res);
+        if (!name) return;
+        const auto before = pls->db().findObject(id);
+        const auto r = pls->db().renameObject(id, *name);
+        if (r != liveqx::players::GroupResult::Ok) { writeJson(res, groupStatusFor(r), {{"error", groupErrorName(r)}}); return; }
+        auditNode("player.object_rename", json{{"from", before ? before->name : ""}, {"to", *name}}, "player_object", id);
+        writeJson(res, 200, json{{"id", id}, {"name", pls->db().findObject(id)->name}});
+    });
+
+    s.Delete(R"(/api/player-objects/(\d+))",
+             [pls, players_unavailable, groupStatusFor, groupErrorName, auditNode]
+             (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        const std::int64_t id = std::stoll(req.matches[1]);
+        const auto before = pls->db().findObject(id);
+        const auto r = pls->db().deleteObject(id);
+        if (r != liveqx::players::GroupResult::Ok) { writeJson(res, groupStatusFor(r), {{"error", groupErrorName(r)}}); return; }
+        auditNode("player.object_delete", json{{"name", before ? before->name : ""}}, "player_object", id);
+        writeJson(res, 200, json{{"id", id}});
+    });
+
+    s.Post(R"(/api/player-objects/(\d+)/groups)",
+           [pls, players_unavailable, nameOf, groupStatusFor, groupErrorName, auditNode]
+           (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        const std::int64_t object_id = std::stoll(req.matches[1]);
+        auto name = nameOf(req, res);
+        if (!name) return;
+        liveqx::players::GroupResult err;
+        auto g = pls->db().createGroup(object_id, *name, &err);
+        if (!g) { writeJson(res, groupStatusFor(err), {{"error", groupErrorName(err)}}); return; }
+        auditNode("player.group_create", json{{"name", g->name}, {"object_id", object_id}}, "player_group", g->id);
+        writeJson(res, 201, json{{"id", g->id}, {"object_id", g->object_id}, {"name", g->name},
+                                 {"created_at", g->created_at}});
+    });
+
+    s.Put(R"(/api/player-groups/(\d+))",
+          [pls, players_unavailable, nameOf, groupStatusFor, groupErrorName, auditNode]
+          (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        const std::int64_t id = std::stoll(req.matches[1]);
+        auto name = nameOf(req, res);
+        if (!name) return;
+        const auto before = pls->db().findGroup(id);
+        const auto r = pls->db().renameGroup(id, *name);
+        if (r != liveqx::players::GroupResult::Ok) { writeJson(res, groupStatusFor(r), {{"error", groupErrorName(r)}}); return; }
+        auditNode("player.group_rename", json{{"from", before ? before->name : ""}, {"to", *name}}, "player_group", id);
+        writeJson(res, 200, json{{"id", id}, {"name", pls->db().findGroup(id)->name}});
+    });
+
+    s.Delete(R"(/api/player-groups/(\d+))",
+             [pls, players_unavailable, groupStatusFor, groupErrorName, auditNode]
+             (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        const std::int64_t id = std::stoll(req.matches[1]);
+        const auto before = pls->db().findGroup(id);
+        const auto r = pls->db().deleteGroup(id);
+        if (r != liveqx::players::GroupResult::Ok) { writeJson(res, groupStatusFor(r), {{"error", groupErrorName(r)}}); return; }
+        auditNode("player.group_delete", json{{"name", before ? before->name : ""}}, "player_group", id);
+        writeJson(res, 200, json{{"id", id}});
+    });
+
+    s.Put(R"(/api/players/([^/]+)/group)",
+          [pls, players_unavailable, playerJson, loadHierarchy, groupStatusFor, groupErrorName, auditPlayer]
+          (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        const std::string id = req.matches[1];
+        json body;
+        if (!parseJsonBody(req, res, body)) return;
+        if (!body.is_object() || !body.contains("group_id") || body["group_id"].is_null()) {
+            writeJson(res, 400, {{"error", "group_required"}});
+            return;
+        }
+        if (!body["group_id"].is_number_integer()) { writeJson(res, 400, {{"error", "invalid_group"}}); return; }
+        const std::int64_t gid = body["group_id"].get<std::int64_t>();
+        auto p = pls->db().findPlayer(id);
+        if (!p) { writeJson(res, 404, {{"error", "not_found"}}); return; }
+        auto target = pls->db().findGroup(gid);
+        if (!target) { writeJson(res, 404, {{"error", "group_not_found"}}); return; }
+        const auto r = pls->db().movePlayer(id, gid);
+        if (r != liveqx::players::GroupResult::Ok) { writeJson(res, groupStatusFor(r), {{"error", groupErrorName(r)}}); return; }
+        auditPlayer("player.move",
+                    json{{"name", p->name}, {"from_group", p->group_id.value_or(0)},
+                         {"to_group", gid}, {"to_group_name", target->name}},
+                    id);
+        writeJson(res, 200, playerJson(*pls->db().findPlayer(id), pls->db().status(id), loadHierarchy(pls->db())));
+    });
+
     s.Get("/api/players/settings",
           [pls, players_unavailable](const httplib::Request&, httplib::Response& res) {
         if (!pls) { players_unavailable(res); return; }
@@ -3278,19 +3474,38 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             }
             policy = body["clock_policy"].get<std::string>();
         }
+        std::optional<std::int64_t> group;
+        if (body.contains("group_id") && !body["group_id"].is_null()) {
+            if (!body["group_id"].is_number_integer()) { writeJson(res, 400, {{"error", "invalid_group"}}); return; }
+            group = body["group_id"].get<std::int64_t>();
+        }
         const auto [actor_id, actor_name] = mountActorOf(req);
-        auto r = pls->create(name, actor_id, policy);
+        auto r = pls->create(name, actor_id, policy, 0, group);
         if (!r.ok) { writeJson(res, playersStatusFor(r.error), {{"error", r.error}}); return; }
         auditPlayer("player.register",
-                    json{{"name", r.player.name}, {"clock_policy", r.player.clock_policy}},
+                    json{{"name", r.player.name}, {"clock_policy", r.player.clock_policy},
+                         {"group_id", r.player.group_id.value_or(0)}},
                     r.player.id);
         writeJson(res, 201, r.package);
     });
 
     s.Get("/api/players",
-          [pls, players_unavailable, playerJson](const httplib::Request& req, httplib::Response& res) {
+          [pls, players_unavailable, playerJson, loadHierarchy](const httplib::Request& req, httplib::Response& res) {
         if (!pls) { players_unavailable(res); return; }
         liveqx::players::ListFilter f;
+        auto idParam = [&](const char* k, std::optional<std::int64_t>& out) {
+            if (!req.has_param(k)) return true;
+            const std::string v = req.get_param_value(k);
+            if (v.empty() || v.size() > 12 ||
+                !std::all_of(v.begin(), v.end(), [](unsigned char c) { return std::isdigit(c); }))
+                return false;
+            out = std::stoll(v);
+            return true;
+        };
+        if (!idParam("group_id", f.group_id) || !idParam("object_id", f.object_id)) {
+            writeJson(res, 400, {{"error", "invalid_filter"}});
+            return;
+        }
         if (req.has_param("state")) {
             auto st = liveqx::players::parsePlayerState(req.get_param_value("state"));
             if (!st) { writeJson(res, 400, {{"error", "invalid_state"}}); return; }
@@ -3315,22 +3530,23 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
 
         std::map<std::string, liveqx::players::StatusRow> statuses;
         for (auto& st : pls->db().allStatuses()) statuses.emplace(st.player_id, st);
+        const auto hier = loadHierarchy(pls->db());
         json arr = json::array();
         for (const auto& p : pls->db().listPlayers(f)) {
             std::optional<liveqx::players::StatusRow> st;
             if (auto it = statuses.find(p.id); it != statuses.end()) st = it->second;
-            arr.push_back(playerJson(p, st));
+            arr.push_back(playerJson(p, st, hier));
         }
         writeJson(res, 200, json{{"players", std::move(arr)}});
     });
 
     s.Get(R"(/api/players/([^/]+))",
-          [pls, players_unavailable, playerJson](const httplib::Request& req, httplib::Response& res) {
+          [pls, players_unavailable, playerJson, loadHierarchy](const httplib::Request& req, httplib::Response& res) {
         if (!pls) { players_unavailable(res); return; }
         const std::string id = req.matches[1];
         auto p = pls->db().findPlayer(id);
         if (!p) { writeJson(res, 404, {{"error", "not_found"}}); return; }
-        json j = playerJson(*p, pls->db().status(id));
+        json j = playerJson(*p, pls->db().status(id), loadHierarchy(pls->db()));
         json certs = json::array();
         for (const auto& c : pls->db().certsOf(id)) {
             json cj = {{"serial", c.serial_hex}, {"generation", c.generation},

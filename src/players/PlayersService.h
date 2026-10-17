@@ -84,10 +84,12 @@ public:
     // storage_error.
     std::string updateSettings(const std::map<std::string, std::string>& patch);
 
-    // Errors: invalid_clock_policy, invalid_name, not_configured,
-    // ca_unavailable, storage_error. `now` = 0 reads the clock.
+    // A player always sits in a group: `group_id` is required. Errors:
+    // invalid_clock_policy, group_required, group_not_found, invalid_name,
+    // not_configured, ca_unavailable, storage_error. `now` = 0 reads the clock.
     PairingResult create(const std::string& name, std::optional<std::int64_t> created_by,
-                         std::optional<std::string> clock_policy, std::int64_t now = 0);
+                         std::optional<std::string> clock_policy, std::int64_t now = 0,
+                         std::optional<std::int64_t> group_id = std::nullopt);
 
     // A new token (and package) for a pending player. Errors: not_found,
     // not_pending, not_configured, ca_unavailable, storage_error.

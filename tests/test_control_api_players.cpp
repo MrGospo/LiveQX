@@ -56,6 +56,8 @@ struct PlayersApiFixture {
     std::unique_ptr<liveqx::audit::AuditDb> audit_db;
     std::unique_ptr<liveqx::audit::AuditLogger> audit_logger;
     std::vector<CertRow>        crl_hook;
+    std::int64_t                object_id{0};
+    std::int64_t                group_id{0};
     ChannelManager              manager;
     std::unique_ptr<ControlApi> api;
     int                         port;
@@ -69,6 +71,12 @@ struct PlayersApiFixture {
         EXPECT_TRUE(liveqx::tls::ensureCa(tmp / "tls").ok());
         db = std::make_unique<PlayersDb>(tmp / "players.db");
         EXPECT_TRUE(db->open());
+        {
+            auto ob = db->createObject("Main");
+            auto gr = db->createGroup(ob->id, "Hall");
+            object_id = ob->id;
+            group_id  = gr->id;
+        }
         PlayersServiceOptions o;
         o.ca_cert_path = tmp / "tls" / "ca.crt";
         o.on_certs_revoked = [this](const std::vector<CertRow>& c) {
@@ -134,7 +142,7 @@ struct PlayersApiFixture {
 
     json create(const std::string& name) {
         auto cli = client();
-        auto r = cli.Post("/api/players", json{{"name", name}}.dump(), "application/json");
+        auto r = cli.Post("/api/players", json{{"name", name}, {"group_id", group_id}}.dump(), "application/json");
         EXPECT_TRUE(r);
         EXPECT_EQ(r->status, 201) << (r ? r->body : "");
         return r ? json::parse(r->body) : json{};
@@ -210,7 +218,7 @@ TEST(ControlApiPlayers, InvalidSettingsAreRefusedWithACode) {
 TEST(ControlApiPlayers, CreatingBeforeConfigurationIsAConflict) {
     PlayersApiFixture f(kBasePort + 3);
     auto cli = f.client();
-    auto r = cli.Post("/api/players", R"({"name":"Lobby"})", "application/json");
+    auto r = cli.Post("/api/players", json{{"name", "Lobby"}, {"group_id", f.group_id}}.dump(), "application/json");
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 409);
     EXPECT_EQ(json::parse(r->body)["error"], "not_configured");
@@ -252,17 +260,19 @@ TEST(ControlApiPlayers, BadCreateRequestsAreClientErrors) {
     PlayersApiFixture f(kBasePort + 5);
     f.configure();
     auto cli = f.client();
-    auto r = cli.Post("/api/players", R"({})", "application/json");
+    const json g = {{"group_id", f.group_id}};
+    auto withGroup = [&](json b) { b["group_id"] = f.group_id; return b.dump(); };
+    auto r = cli.Post("/api/players", g.dump(), "application/json");
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 400);
     EXPECT_EQ(json::parse(r->body)["error"], "invalid_name");
 
-    r = cli.Post("/api/players", R"({"name":"x","clock_policy":"lax"})", "application/json");
+    r = cli.Post("/api/players", withGroup({{"name", "x"}, {"clock_policy", "lax"}}), "application/json");
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 400);
     EXPECT_EQ(json::parse(r->body)["error"], "invalid_clock_policy");
 
-    r = cli.Post("/api/players", R"({"name":42})", "application/json");
+    r = cli.Post("/api/players", withGroup({{"name", 42}}), "application/json");
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 400);
 
@@ -625,3 +635,199 @@ TEST(ControlApiPlayers, TheAuditTrailNamesTheRealClientBehindAProxy) {
     ASSERT_EQ(rows.size(), 1u);
     EXPECT_EQ(rows[0].actor_ip, "198.51.100.7") << "rightmost entry, not the forged leading one";
 }
+
+// ─── Objects, groups and where a player sits ────────────────────────────────
+TEST(ControlApiPlayers, CreatingAPlayerNeedsAnExistingGroup) {
+    PlayersApiFixture f(kBasePort + 23);
+    f.configure();
+    auto cli = f.client();
+    auto post = [&](const json& b) { return cli.Post("/api/players", b.dump(), "application/json"); };
+
+    auto none = post({{"name", "x"}});
+    ASSERT_TRUE(none);
+    EXPECT_EQ(none->status, 400);
+    EXPECT_EQ(json::parse(none->body)["error"], "group_required");
+    EXPECT_EQ(json::parse(post({{"name", "x"}, {"group_id", nullptr}})->body)["error"], "group_required");
+
+    auto bad = post({{"name", "x"}, {"group_id", "one"}});
+    ASSERT_TRUE(bad);
+    EXPECT_EQ(bad->status, 400);
+    EXPECT_EQ(json::parse(bad->body)["error"], "invalid_group");
+
+    auto ghost = post({{"name", "x"}, {"group_id", 424242}});
+    ASSERT_TRUE(ghost);
+    EXPECT_EQ(ghost->status, 400);
+    EXPECT_EQ(json::parse(ghost->body)["error"], "group_not_found");
+    EXPECT_TRUE(f.db->listPlayers({}).empty());
+}
+
+TEST(ControlApiPlayers, PlayersCarryTheirPlaceInListAndDetails) {
+    PlayersApiFixture f(kBasePort + 24);
+    f.configure();
+    auto pkg = f.create("Lobby");
+    auto cli = f.client();
+    auto list = json::parse(cli.Get("/api/players")->body)["players"];
+    ASSERT_EQ(list.size(), 1u);
+    EXPECT_EQ(list[0]["group_id"], f.group_id);
+    EXPECT_EQ(list[0]["group_name"], "Hall");
+    EXPECT_EQ(list[0]["object_id"], f.object_id);
+    EXPECT_EQ(list[0]["object_name"], "Main");
+    auto d = json::parse(cli.Get(("/api/players/" + pkg["player_id"].get<std::string>()).c_str())->body);
+    EXPECT_EQ(d["group_name"], "Hall");
+    EXPECT_EQ(d["object_name"], "Main");
+}
+
+TEST(ControlApiPlayers, TheTreeShowsObjectsGroupsAndHowManyPlayersEachHolds) {
+    PlayersApiFixture f(kBasePort + 25);
+    f.configure();
+    f.create("A");
+    f.create("B");
+    auto other = f.db->createObject("Annex");
+    ASSERT_TRUE(f.db->createGroup(other->id, "Empty room"));
+    auto cli = f.client();
+    auto r = cli.Get("/api/player-objects");
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    auto objs = json::parse(r->body)["objects"];
+    ASSERT_EQ(objs.size(), 2u);
+    json main_obj, annex;
+    for (auto& o : objs) (o["name"] == "Main" ? main_obj : annex) = o;
+    ASSERT_EQ(main_obj["groups"].size(), 1u);
+    EXPECT_EQ(main_obj["groups"][0]["name"], "Hall");
+    EXPECT_EQ(main_obj["groups"][0]["players"], 2);
+    EXPECT_EQ(annex["groups"][0]["players"], 0);
+}
+
+TEST(ControlApiPlayers, ObjectsAndGroupsCanBeCreatedRenamedAndRemovedWithClearErrors) {
+    PlayersApiFixture f(kBasePort + 26);
+    auto cli = f.client();
+    auto send = [&](const char* method, const std::string& path, const json& body = json::object()) {
+        const std::string b = body.dump();
+        if (std::string(method) == "POST")   return cli.Post(path, b, "application/json");
+        if (std::string(method) == "PUT")    return cli.Put(path, b, "application/json");
+        return cli.Delete(path);
+    };
+
+    auto created = send("POST", "/api/player-objects", {{"name", "Mall"}});
+    ASSERT_TRUE(created);
+    ASSERT_EQ(created->status, 201) << created->body;
+    const auto oid = json::parse(created->body)["id"].get<std::int64_t>();
+    EXPECT_EQ(send("POST", "/api/player-objects", {{"name", "Mall"}})->status, 409);
+    EXPECT_EQ(json::parse(send("POST", "/api/player-objects", {{"name", "Mall"}})->body)["error"], "name_taken");
+    EXPECT_EQ(json::parse(send("POST", "/api/player-objects", {{"name", "  "}})->body)["error"], "invalid_name");
+    EXPECT_EQ(send("POST", "/api/player-objects", {{"name", 5}})->status, 400);
+
+    EXPECT_EQ(send("PUT", "/api/player-objects/" + std::to_string(oid), {{"name", "Mall 2"}})->status, 200);
+    EXPECT_EQ(send("PUT", "/api/player-objects/" + std::to_string(oid), {{"name", "Main"}})->status, 409)
+        << "Main exists (the fixture's object)";
+    EXPECT_EQ(send("PUT", "/api/player-objects/424242", {{"name", "X"}})->status, 404);
+
+    auto g = send("POST", "/api/player-objects/" + std::to_string(oid) + "/groups", {{"name", "Floor 1"}});
+    ASSERT_TRUE(g);
+    ASSERT_EQ(g->status, 201) << g->body;
+    const auto gid = json::parse(g->body)["id"].get<std::int64_t>();
+    EXPECT_EQ(send("POST", "/api/player-objects/" + std::to_string(oid) + "/groups", {{"name", "Floor 1"}})->status, 409);
+    EXPECT_EQ(send("POST", "/api/player-objects/424242/groups", {{"name", "X"}})->status, 404);
+    EXPECT_EQ(send("PUT", "/api/player-groups/" + std::to_string(gid), {{"name", "Floor 2"}})->status, 200);
+    EXPECT_EQ(send("PUT", "/api/player-groups/424242", {{"name", "X"}})->status, 404);
+
+    EXPECT_EQ(send("DELETE", "/api/player-objects/" + std::to_string(oid))->status, 409) << "it still has a group";
+    EXPECT_EQ(json::parse(send("DELETE", "/api/player-objects/" + std::to_string(oid))->body)["error"], "not_empty");
+
+    f.configure();
+    auto pkg = f.create("Screen");
+    ASSERT_EQ(send("PUT", "/api/players/" + pkg["player_id"].get<std::string>() + "/group", {{"group_id", gid}})->status, 200);
+    EXPECT_EQ(send("DELETE", "/api/player-groups/" + std::to_string(gid))->status, 409) << "it holds a player";
+
+    ASSERT_EQ(send("PUT", "/api/players/" + pkg["player_id"].get<std::string>() + "/group", {{"group_id", f.group_id}})->status, 200);
+    EXPECT_EQ(send("DELETE", "/api/player-groups/" + std::to_string(gid))->status, 200);
+    EXPECT_EQ(send("DELETE", "/api/player-groups/" + std::to_string(gid))->status, 404);
+    EXPECT_EQ(send("DELETE", "/api/player-objects/" + std::to_string(oid))->status, 200);
+}
+
+TEST(ControlApiPlayers, APlayerCanBeMovedToAnotherGroup) {
+    PlayersApiFixture f(kBasePort + 27);
+    f.configure();
+    auto pkg = f.create("Screen");
+    const std::string id = pkg["player_id"];
+    auto other = f.db->createGroup(f.object_id, "Cafe");
+    ASSERT_TRUE(other);
+    auto cli = f.client();
+    auto move = [&](const std::string& pid, const json& b) {
+        return cli.Put(("/api/players/" + pid + "/group").c_str(), b.dump(), "application/json");
+    };
+
+    auto r = move(id, {{"group_id", other->id}});
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    EXPECT_EQ(json::parse(r->body)["group_name"], "Cafe");
+    auto d = json::parse(cli.Get(("/api/players/" + id).c_str())->body);
+    EXPECT_EQ(d["group_id"], other->id);
+    bool moved = false;
+    for (auto& e : d["events"]) moved |= (e["kind"] == "moved");
+    EXPECT_TRUE(moved);
+
+    EXPECT_EQ(move("00000000-0000-4000-8000-000000000000", {{"group_id", other->id}})->status, 404);
+    auto ghost = move(id, {{"group_id", 424242}});
+    EXPECT_EQ(ghost->status, 404);
+    EXPECT_EQ(json::parse(ghost->body)["error"], "group_not_found");
+    EXPECT_EQ(json::parse(move(id, json::object())->body)["error"], "group_required");
+    EXPECT_EQ(json::parse(move(id, {{"group_id", "x"}})->body)["error"], "invalid_group");
+    EXPECT_EQ(json::parse(cli.Get(("/api/players/" + id).c_str())->body)["group_id"], other->id)
+        << "failed moves change nothing";
+}
+
+TEST(ControlApiPlayers, ThePlayerListCanBeFilteredByGroupAndObject) {
+    PlayersApiFixture f(kBasePort + 28);
+    f.configure();
+    f.create("A");
+    auto annex = f.db->createObject("Annex");
+    auto room = f.db->createGroup(annex->id, "Room");
+    auto pkg = f.create("B");
+    auto cli = f.client();
+    ASSERT_EQ(cli.Put(("/api/players/" + pkg["player_id"].get<std::string>() + "/group").c_str(),
+                      json{{"group_id", room->id}}.dump(), "application/json")->status, 200);
+
+    auto count = [&](const std::string& q) {
+        auto r = cli.Get(("/api/players" + q).c_str());
+        return r && r->status == 200 ? json::parse(r->body)["players"].size() : std::size_t(999);
+    };
+    EXPECT_EQ(count(""), 2u);
+    EXPECT_EQ(count("?group_id=" + std::to_string(room->id)), 1u);
+    EXPECT_EQ(count("?object_id=" + std::to_string(annex->id)), 1u);
+    EXPECT_EQ(count("?object_id=" + std::to_string(f.object_id)), 1u);
+    EXPECT_EQ(cli.Get("/api/players?group_id=abc")->status, 400);
+    EXPECT_EQ(cli.Get("/api/players?object_id=-1")->status, 400);
+}
+
+TEST(ControlApiPlayers, ChangesToTheHierarchyAreAudited) {
+    PlayersApiFixture f(kBasePort + 29);
+    f.configure();
+    auto cli = f.client();
+    auto o = json::parse(cli.Post("/api/player-objects", R"({"name":"Mall"})", "application/json")->body);
+    auto g = json::parse(cli.Post(("/api/player-objects/" + std::to_string(o["id"].get<std::int64_t>()) + "/groups").c_str(),
+                                  R"({"name":"Floor"})", "application/json")->body);
+    auto pkg = f.create("Screen");
+    ASSERT_EQ(cli.Put(("/api/players/" + pkg["player_id"].get<std::string>() + "/group").c_str(),
+                      json{{"group_id", g["id"]}}.dump(), "application/json")->status, 200);
+    f.audit_logger->flushForTesting();
+
+    auto find = [&](const char* action) {
+        liveqx::audit::AuditFilter af;
+        af.action = action;
+        af.limit  = 8;
+        return f.audit_db->list(af);
+    };
+    auto oc = find("player.object_create");
+    ASSERT_EQ(oc.size(), 1u);
+    EXPECT_EQ(oc[0].category, liveqx::audit::Category::Player);
+    EXPECT_EQ(oc[0].target_type, "player_object");
+    EXPECT_EQ(oc[0].target_id, std::to_string(o["id"].get<std::int64_t>()));
+    ASSERT_EQ(find("player.group_create").size(), 1u);
+    auto mv = find("player.move");
+    ASSERT_EQ(mv.size(), 1u);
+    EXPECT_EQ(mv[0].target_type, "player");
+    EXPECT_EQ(mv[0].target_id, pkg["player_id"].get<std::string>());
+    EXPECT_NE(mv[0].details_json.find("Floor"), std::string::npos) << "the destination is named in the trail";
+}
+

@@ -179,17 +179,22 @@ std::string PlayersService::buildPackage(const PlayerRow& p, const std::string& 
 }
 
 PairingResult PlayersService::create(const std::string& name, std::optional<std::int64_t> created_by,
-                                     std::optional<std::string> clock_policy, std::int64_t now) {
+                                     std::optional<std::string> clock_policy, std::int64_t now,
+                                     std::optional<std::int64_t> group_id) {
     PairingResult r;
     const PlayersSettings s = settings();
     const std::string policy = clock_policy ? *clock_policy : s.clock_policy;
     if (!validPolicy(policy)) { r.error = "invalid_clock_policy"; return r; }
+    // Where a player sits decides who may see and command it, so it is never
+    // created "nowhere".
+    if (!group_id) { r.error = "group_required"; return r; }
+    if (!db_.findGroup(*group_id)) { r.error = "group_not_found"; return r; }
     std::string ca;
     if (auto e = checkReady(s, ca); !e.empty()) { r.error = e; return r; }
 
     if (now == 0) now = nowSeconds();
     auto created = db_.createPlayer(name, created_by, policy,
-                                    static_cast<std::int64_t>(s.token_ttl_days) * 86400, now);
+                                    static_cast<std::int64_t>(s.token_ttl_days) * 86400, now, group_id);
     if (!created) { r.error = "invalid_name"; return r; }
 
     if (auto e = buildPackage(created->player, created->token, created->token_expires_at, r.package);

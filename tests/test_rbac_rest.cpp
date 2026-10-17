@@ -329,3 +329,27 @@ TEST(RbacRest, EnrollIsOpenBecauseThePlayerHasNoAccountYet) {
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 503) << "past the role check, stopped by the missing module";
 }
+
+TEST(RbacRest, TheHierarchyOfObjectsAndGroupsIsAdministeredByAdminsOnly) {
+    RbacRestFixture f(nextPort());
+    auto cli      = f.client();
+    auto viewer   = f.loginAs("h_viewer", liveqx::auth::Role::Viewer);
+    auto op       = f.loginAs("h_operator", liveqx::auth::Role::Operator);
+    auto admin    = f.loginAs("h_admin", liveqx::auth::Role::Admin);
+    const std::string pid = "11111111-2222-4333-8444-555555555555";
+
+    for (const auto& token : {viewer, op}) {
+        EXPECT_EQ(cli.Get("/api/player-objects", bearer(token))->status, 403);
+        EXPECT_EQ(cli.Post("/api/player-objects", bearer(token), R"({"name":"x"})", "application/json")->status, 403);
+        EXPECT_EQ(cli.Put("/api/player-objects/1", bearer(token), R"({"name":"x"})", "application/json")->status, 403);
+        EXPECT_EQ(cli.Delete("/api/player-objects/1", bearer(token))->status, 403);
+        EXPECT_EQ(cli.Post("/api/player-objects/1/groups", bearer(token), R"({"name":"x"})", "application/json")->status, 403);
+        EXPECT_EQ(cli.Put("/api/player-groups/1", bearer(token), R"({"name":"x"})", "application/json")->status, 403);
+        EXPECT_EQ(cli.Delete("/api/player-groups/1", bearer(token))->status, 403);
+        EXPECT_EQ(cli.Put(("/api/players/" + pid + "/group").c_str(), bearer(token), R"({"group_id":1})", "application/json")->status, 403);
+    }
+    // The module is not wired in this fixture: an admin gets past the role check and meets the 503.
+    EXPECT_EQ(cli.Get("/api/player-objects", bearer(admin))->status, 503);
+    EXPECT_EQ(cli.Put(("/api/players/" + pid + "/group").c_str(), bearer(admin), R"({"group_id":1})", "application/json")->status, 503);
+}
+
