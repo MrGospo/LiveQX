@@ -265,6 +265,14 @@ target_link_libraries(liveqx-tests PRIVATE
     date::date-tz
     httplib::httplib
 )
+# MQTT client of the player integration (only when libmosquitto is installed).
+if(MOSQUITTO_FOUND)
+    target_sources(liveqx-tests PRIVATE
+        ../src/mqtt/MosquittoClient.cpp
+        test_mosquitto_client_config.cpp)
+    target_link_libraries(liveqx-tests PRIVATE PkgConfig::MOSQUITTO)
+    target_compile_definitions(liveqx-tests PRIVATE LIVEQX_HAVE_MOSQUITTO=1)
+endif()
 include(GoogleTest)
 gtest_discover_tests(liveqx-tests DISCOVERY_MODE PRE_TEST)
 

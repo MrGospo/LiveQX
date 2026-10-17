@@ -118,6 +118,14 @@ find_package(SQLite3 REQUIRED)
 # libsodium — fix22: argon2id + crypto_secretbox + randombytes.
 # Shipped in apt as libsodium-dev, exports a .pc file.
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
+# The MQTT client of the player integration (commands, presence). Optional at
+# build time: without libmosquitto the server builds and the integration's
+# broker side is simply not compiled in.
+pkg_check_modules(MOSQUITTO IMPORTED_TARGET libmosquitto)
+if(NOT MOSQUITTO_FOUND)
+    message(WARNING "libmosquitto not found: the MQTT client (player commands/presence) is NOT built. "
+                    "Install libmosquitto-dev to enable it.")
+endif()
 
 # OpenLDAP client — fix22 c16/24: search+bind for LDAP authentication.
 # Apt package libldap2-dev. We link -lldap -llber directly via an
@@ -435,6 +443,11 @@ target_link_libraries(liveqx-objs PUBLIC
     OpenSSL::Crypto
     ${CMAKE_DL_LIBS}
 )
+if(MOSQUITTO_FOUND)
+    target_sources(liveqx-objs PRIVATE src/mqtt/MosquittoClient.cpp)
+    target_link_libraries(liveqx-objs PUBLIC PkgConfig::MOSQUITTO)
+    target_compile_definitions(liveqx-objs PUBLIC LIVEQX_HAVE_MOSQUITTO=1)
+endif()
 if(ENABLE_WEBRTC_PREVIEW)
     # Link the static target so libdatachannel.a is vendored into the
     # binary — the shared target would require shipping libdatachannel.so
