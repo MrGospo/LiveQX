@@ -20,6 +20,8 @@
 
 #include "auth/AuthDb.h"
 
+#include <set>
+
 #include <chrono>
 #include <cstring>
 #include <system_error>
@@ -37,7 +39,7 @@ namespace {
 // (existing<1) сначала создаётся v1-схема без этих колонок, потом v2/v3
 // ALTER их добавляют. Это позволяет держать v1-определение неизменным
 // (важно для рестора DBs из старых бэкапов).
-constexpr int kSchemaVersion = 8;
+constexpr int kSchemaVersion = 9;
 
 // Schema v1 — все таблицы из fix22 design-doc, чтобы не дёргать
 // миграцию от commit к commit. Поля, реально читаемые сейчас, —
@@ -124,6 +126,26 @@ CREATE INDEX IF NOT EXISTS idx_channel_perm_ch ON channel_permissions(channel_id
 constexpr const char* kSchemaSqlV2 = R"sql(
 ALTER TABLE users ADD COLUMN failed_login_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN locked_until INTEGER;
+)sql";
+
+// Schema v9 (B13): rights on the screens of an object or of one group. Kept
+// out of the access token on purpose, so taking a right away works at once.
+// scope_id refers to players.db (another file), so it cannot be a foreign key;
+// ids there are never reused, and a removed object or group sweeps its rights.
+constexpr const char* kSchemaSqlV9 = R"sql(
+CREATE TABLE IF NOT EXISTS user_player_grants (
+  user_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  scope              TEXT    NOT NULL CHECK (scope IN ('object','group')),
+  scope_id           INTEGER NOT NULL,
+  can_command_group  INTEGER NOT NULL DEFAULT 0,
+  can_command_object INTEGER NOT NULL DEFAULT 0,
+  can_move           INTEGER NOT NULL DEFAULT 0,
+  can_view_audit     INTEGER NOT NULL DEFAULT 0,
+  granted_at         INTEGER NOT NULL,
+  granted_by         INTEGER,
+  PRIMARY KEY (user_id, scope, scope_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_player_grants_scope ON user_player_grants(scope, scope_id);
 )sql";
 
 // Schema v3 (commit 20/24): кэш LDAP-групп для downtime-read-only refresh.
@@ -350,8 +372,7 @@ bool AuthDb::runMigrations() {
     // Steps up to v7 are idempotent DDL applied one by one; v8 renames a
     // table, which is not, so it is applied atomically with the version bump.
     if (existing < 8) {
-        const std::string set_pragma =
-            "PRAGMA user_version=" + std::to_string(kSchemaVersion) + ";";
+        const std::string set_pragma = "PRAGMA user_version=8;";
         if (!exec("BEGIN IMMEDIATE;")) return false;
         bool ok = exec("DROP INDEX IF EXISTS idx_audit_ts;")
                && exec("DROP INDEX IF EXISTS idx_audit_user;");
@@ -369,7 +390,9 @@ bool AuthDb::runMigrations() {
         ok = ok && exec(set_pragma.c_str());
         if (!ok) { exec("ROLLBACK;"); return false; }
         if (!exec("COMMIT;")) return false;
-        return true;
+    }
+    if (existing < 9) {
+        if (!exec(kSchemaSqlV9)) return false;
     }
 
     if (existing < kSchemaVersion) {
@@ -653,6 +676,7 @@ bool AuthDb::purgeUser(std::int64_t user_id) {
     const bool ok =
         runBind("DELETE FROM sessions             WHERE user_id    = ?")  &&
         runBind("DELETE FROM channel_permissions  WHERE user_id    = ?")  &&
+        runBind("DELETE FROM user_player_grants   WHERE user_id    = ?")  &&
         runBind("DELETE FROM password_resets      WHERE user_id    = ?")  &&
         runBind("UPDATE users        SET created_by = NULL WHERE created_by = ?") &&
         runBind("UPDATE ldap_config  SET updated_by = NULL WHERE updated_by = ?") &&
@@ -1567,6 +1591,96 @@ AuthDb::listChannelGrantsForUser(std::int64_t user_id) {
     }
     sqlite3_finalize(st);
     return out;
+}
+
+
+// ─── rights on players by object and group (B13) ────────────────────────────
+std::vector<PlayerScopeGrant> AuthDb::listPlayerGrantsForUser(std::int64_t user_id) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    std::vector<PlayerScopeGrant> out;
+    if (!db_) return out;
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "SELECT scope, scope_id, can_command_group, can_command_object, can_move, can_view_audit "
+            "FROM user_player_grants WHERE user_id = ? ORDER BY scope, scope_id",
+            -1, &st, nullptr) != SQLITE_OK) return out;
+    sqlite3_bind_int64(st, 1, user_id);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        PlayerScopeGrant g;
+        g.scope = colText(st, 0) == "object" ? PlayerScopeGrant::Scope::Object : PlayerScopeGrant::Scope::Group;
+        g.scope_id           = sqlite3_column_int64(st, 1);
+        g.can_command_group  = sqlite3_column_int(st, 2) != 0;
+        g.can_command_object = sqlite3_column_int(st, 3) != 0;
+        g.can_move           = sqlite3_column_int(st, 4) != 0;
+        g.can_view_audit     = sqlite3_column_int(st, 5) != 0;
+        out.push_back(g);
+    }
+    sqlite3_finalize(st);
+    return out;
+}
+
+bool AuthDb::replacePlayerGrantsForUser(std::int64_t user_id,
+                                        const std::vector<PlayerScopeGrant>& grants,
+                                        std::optional<std::int64_t> granted_by,
+                                        std::int64_t granted_at) {
+    // A right listed twice is a mistake of the caller, not something to merge quietly.
+    {
+        std::set<std::pair<int, std::int64_t>> seen;
+        for (const auto& g : grants)
+            if (!seen.insert({static_cast<int>(g.scope), g.scope_id}).second) return false;
+    }
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (!db_) return false;
+    if (!exec("BEGIN IMMEDIATE;")) return false;
+    auto fail = [&] { exec("ROLLBACK;"); return false; };
+
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(db_, "SELECT 1 FROM users WHERE id = ?", -1, &st, nullptr) != SQLITE_OK) return fail();
+    sqlite3_bind_int64(st, 1, user_id);
+    const bool exists = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    if (!exists) return fail();
+
+    st = nullptr;
+    if (sqlite3_prepare_v2(db_, "DELETE FROM user_player_grants WHERE user_id = ?", -1, &st, nullptr) != SQLITE_OK) return fail();
+    sqlite3_bind_int64(st, 1, user_id);
+    const bool cleared = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    if (!cleared) return fail();
+
+    for (const auto& g : grants) {
+        st = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "INSERT INTO user_player_grants(user_id, scope, scope_id, can_command_group, "
+                "can_command_object, can_move, can_view_audit, granted_at, granted_by) "
+                "VALUES(?,?,?,?,?,?,?,?,?)", -1, &st, nullptr) != SQLITE_OK) return fail();
+        sqlite3_bind_int64(st, 1, user_id);
+        sqlite3_bind_text(st, 2, g.scope == PlayerScopeGrant::Scope::Object ? "object" : "group", -1, SQLITE_STATIC);
+        sqlite3_bind_int64(st, 3, g.scope_id);
+        sqlite3_bind_int(st, 4, g.can_command_group ? 1 : 0);
+        sqlite3_bind_int(st, 5, g.can_command_object ? 1 : 0);
+        sqlite3_bind_int(st, 6, g.can_move ? 1 : 0);
+        sqlite3_bind_int(st, 7, g.can_view_audit ? 1 : 0);
+        sqlite3_bind_int64(st, 8, granted_at);
+        if (granted_by) sqlite3_bind_int64(st, 9, *granted_by); else sqlite3_bind_null(st, 9);
+        const bool ok = sqlite3_step(st) == SQLITE_DONE;
+        sqlite3_finalize(st);
+        if (!ok) return fail();
+    }
+    return exec("COMMIT;");
+}
+
+std::size_t AuthDb::removePlayerGrantsForScope(PlayerScopeGrant::Scope scope, std::int64_t scope_id) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (!db_) return 0;
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(db_, "DELETE FROM user_player_grants WHERE scope = ? AND scope_id = ?",
+                           -1, &st, nullptr) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, scope == PlayerScopeGrant::Scope::Object ? "object" : "group", -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 2, scope_id);
+    const bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok ? static_cast<std::size_t>(sqlite3_changes(db_)) : 0;
 }
 
 std::vector<AuthDb::ChannelPermissionRow>

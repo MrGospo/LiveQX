@@ -1304,4 +1304,17 @@ AuthService::verifyActiveAccess(std::string_view access_token) {
     return claims;
 }
 
+std::vector<PlayerScopeGrant> AuthService::playerGrantsOf(std::int64_t user_id) {
+    return db_.listPlayerGrantsForUser(user_id);
+}
+
+bool AuthService::setPlayerGrants(std::int64_t user_id, const std::vector<PlayerScopeGrant>& grants,
+                                  std::optional<std::int64_t> granted_by) {
+    return db_.replacePlayerGrantsForUser(user_id, grants, granted_by, nowUnixSec());
+}
+
+std::size_t AuthService::dropPlayerGrantsForScope(PlayerScopeGrant::Scope scope, std::int64_t scope_id) {
+    return db_.removePlayerGrantsForScope(scope, scope_id);
+}
+
 }  // namespace liveqx::auth

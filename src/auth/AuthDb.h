@@ -222,6 +222,17 @@ public:
     std::vector<ChannelGrant>
         listChannelGrantsForUser(std::int64_t user_id);
 
+    // ── rights on players by object and group (B13) ──────────────────────
+    // Read fresh on every request (never carried in the token), so taking a
+    // right away works at once. scope_id refers to players.db.
+    std::vector<PlayerScopeGrant> listPlayerGrantsForUser(std::int64_t user_id);
+    // Replaces ALL of the user's rights in one transaction. False (and nothing
+    // changed) if the user does not exist or a right is listed twice.
+    bool replacePlayerGrantsForUser(std::int64_t user_id, const std::vector<PlayerScopeGrant>& grants,
+                                    std::optional<std::int64_t> granted_by, std::int64_t granted_at);
+    // Sweeps the rights on an object or group that has been removed.
+    std::size_t removePlayerGrantsForScope(PlayerScopeGrant::Scope scope, std::int64_t scope_id);
+
     std::vector<ChannelPermissionRow>
         listChannelPermissionsForUser(std::int64_t user_id);
 

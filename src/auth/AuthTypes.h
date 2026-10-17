@@ -82,12 +82,33 @@ struct ChannelGrant {
     ChannelPermission  permission{ChannelPermission::View};
 };
 
+// A right on the screens of an object or of one group (B13). An administrator
+// gives it; a right on an object covers all of its groups, present and future.
+// `can_command_group` / `can_command_object` widen what an operator may command
+// from one screen to a whole group / object; `can_move` lets screens be moved
+// between groups; `can_view_audit` opens the trail of that part of the tree.
+struct PlayerScopeGrant {
+    enum class Scope { Object, Group };
+    Scope        scope{Scope::Group};
+    std::int64_t scope_id{0};
+    // For a group right: the object the group belongs to. Filled by whoever
+    // loads the grant (it is not stored with the right).
+    std::int64_t object_id{0};
+    bool         can_command_group{false};
+    bool         can_command_object{false};    // meaningful on an object only
+    bool         can_move{false};
+    bool         can_view_audit{false};
+};
+
 struct RequestContext {
     std::int64_t user_id{0};
     std::string  username;
     Role         role{Role::Viewer};
     bool         must_change_password{false};
     std::vector<ChannelGrant> channel_grants;
+    // Rights on players by object and group. Not filled by the RBAC middleware:
+    // they are read fresh by whoever needs them (they are not in the token).
+    std::vector<PlayerScopeGrant> player_grants;
 };
 
 }  // namespace liveqx::auth

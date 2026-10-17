@@ -56,14 +56,14 @@ TEST_F(AuthDbTest, OpenCreatesFileAndAppliesSchema) {
     EXPECT_TRUE(fs::exists(dbPath()));
 
     // PRAGMA user_version должен совпасть с current schema_version
-    // (бампается при добавлении миграций; v7 — system_time_config).
+    // (бампается при добавлении миграций; v9 — права на плееров по объектам и группам).
     sqlite3* raw = nullptr;
     ASSERT_EQ(sqlite3_open(dbPath().string().c_str(), &raw), SQLITE_OK);
     sqlite3_stmt* st = nullptr;
     ASSERT_EQ(sqlite3_prepare_v2(raw, "PRAGMA user_version;", -1, &st, nullptr),
               SQLITE_OK);
     ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
-    EXPECT_EQ(sqlite3_column_int(st, 0), 8);
+    EXPECT_EQ(sqlite3_column_int(st, 0), 9);
     sqlite3_finalize(st);
     sqlite3_close(raw);
 }
@@ -127,7 +127,7 @@ TEST_F(AuthDbTest, UpgradeFromV7ArchivesLegacyAuditAndKeepsUsers) {
     EXPECT_EQ(rawScalar(dbPath(),
         "SELECT count(*) FROM sqlite_master WHERE name='auth_audit'"), 0);
     EXPECT_EQ(rawScalar(dbPath(), "SELECT count(*) FROM auth_audit_archived"), 2);
-    EXPECT_EQ(rawScalar(dbPath(), "PRAGMA user_version"), 8);
+    EXPECT_EQ(rawScalar(dbPath(), "PRAGMA user_version"), 9);
     EXPECT_EQ(rawScalar(dbPath(),
         "SELECT count(*) FROM sqlite_master WHERE name LIKE 'idx_audit_%'"), 0);
     ASSERT_TRUE(db.findUserByUsername("keeper").has_value());
@@ -151,7 +151,7 @@ TEST_F(AuthDbTest, ReopenAfterUpgradeDoesNotTouchArchive) {
         ASSERT_TRUE(db.open());
     }
     EXPECT_EQ(rawScalar(dbPath(), "SELECT count(*) FROM auth_audit_archived"), 1);
-    EXPECT_EQ(rawScalar(dbPath(), "PRAGMA user_version"), 8);
+    EXPECT_EQ(rawScalar(dbPath(), "PRAGMA user_version"), 9);
 }
 
 TEST_F(AuthDbTest, UpgradeKeepsBothWhenArchiveNameIsTaken) {
@@ -183,7 +183,7 @@ TEST_F(AuthDbTest, FreshDbHasNoLegacyAuditTables) {
     ASSERT_TRUE(db.open());
     EXPECT_EQ(rawScalar(dbPath(),
         "SELECT count(*) FROM sqlite_master WHERE name LIKE 'auth_audit%'"), 0);
-    EXPECT_EQ(rawScalar(dbPath(), "PRAGMA user_version"), 8);
+    EXPECT_EQ(rawScalar(dbPath(), "PRAGMA user_version"), 9);
 }
 
 TEST_F(AuthDbTest, FreshDbHasNoAdmin) {
@@ -620,3 +620,116 @@ TEST_F(AuthDbTest, ListChannelGrantsForUserOrdersByChannel) {
     EXPECT_EQ(grants[1].channel_id, 5);
     EXPECT_EQ(grants[2].channel_id, 9);
 }
+
+// ── rights on players by object and group (schema v9, B13) ──────────────────
+namespace {
+sa::PlayerScopeGrant pg(sa::PlayerScopeGrant::Scope scope, std::int64_t id, bool cg = false, bool co = false,
+                        bool mv = false, bool au = false) {
+    sa::PlayerScopeGrant g;
+    g.scope = scope; g.scope_id = id;
+    g.can_command_group = cg; g.can_command_object = co; g.can_move = mv; g.can_view_audit = au;
+    return g;
+}
+using SC = sa::PlayerScopeGrant::Scope;
+}  // namespace
+
+TEST_F(AuthDbTest, UpgradeFromV8AddsThePlayerRightsTableAndKeepsUsers) {
+    {
+        sa::AuthDb db(dbPath());
+        ASSERT_TRUE(db.open());
+        ASSERT_TRUE(db.insertUser(makeAdmin("keeper")).has_value());
+    }
+    rawExec(dbPath(), "DROP TABLE user_player_grants; PRAGMA user_version=8;");
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    EXPECT_EQ(rawScalar(dbPath(), "PRAGMA user_version"), 9);
+    EXPECT_EQ(rawScalar(dbPath(), "SELECT count(*) FROM sqlite_master WHERE name='user_player_grants'"), 1);
+    ASSERT_TRUE(db.findUserByUsername("keeper").has_value());
+}
+
+TEST_F(AuthDbTest, PlayerRightsAreStoredListedAndReplacedAsAWhole) {
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    auto uid = db.insertUser(makeAdmin("op"));
+    ASSERT_TRUE(uid.has_value());
+    EXPECT_TRUE(db.listPlayerGrantsForUser(*uid).empty());
+
+    ASSERT_TRUE(db.replacePlayerGrantsForUser(*uid,
+        {pg(SC::Object, 7, true, false, true, false), pg(SC::Group, 21, false, false, false, true)},
+        std::nullopt, 1700000000));
+    auto got = db.listPlayerGrantsForUser(*uid);
+    ASSERT_EQ(got.size(), 2u);
+    for (const auto& g : got) {
+        if (g.scope == SC::Object) {
+            EXPECT_EQ(g.scope_id, 7);
+            EXPECT_TRUE(g.can_command_group);
+            EXPECT_FALSE(g.can_command_object);
+            EXPECT_TRUE(g.can_move);
+            EXPECT_FALSE(g.can_view_audit);
+        } else {
+            EXPECT_EQ(g.scope_id, 21);
+            EXPECT_TRUE(g.can_view_audit);
+            EXPECT_FALSE(g.can_command_group);
+        }
+    }
+
+    ASSERT_TRUE(db.replacePlayerGrantsForUser(*uid, {pg(SC::Group, 5)}, std::nullopt, 1700000001));
+    got = db.listPlayerGrantsForUser(*uid);
+    ASSERT_EQ(got.size(), 1u) << "the new list replaces the old one";
+    EXPECT_EQ(got[0].scope_id, 5);
+
+    ASSERT_TRUE(db.replacePlayerGrantsForUser(*uid, {}, std::nullopt, 1700000002));
+    EXPECT_TRUE(db.listPlayerGrantsForUser(*uid).empty()) << "an empty list takes everything away";
+}
+
+TEST_F(AuthDbTest, ABadListChangesNothing) {
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    auto uid = db.insertUser(makeAdmin("op"));
+    ASSERT_TRUE(uid.has_value());
+    ASSERT_TRUE(db.replacePlayerGrantsForUser(*uid, {pg(SC::Group, 1)}, std::nullopt, 1700000000));
+
+    EXPECT_FALSE(db.replacePlayerGrantsForUser(*uid, {pg(SC::Group, 2), pg(SC::Group, 2)}, std::nullopt, 1700000001))
+        << "the same right twice";
+    auto got = db.listPlayerGrantsForUser(*uid);
+    ASSERT_EQ(got.size(), 1u);
+    EXPECT_EQ(got[0].scope_id, 1) << "all or nothing";
+
+    EXPECT_FALSE(db.replacePlayerGrantsForUser(424242, {pg(SC::Group, 1)}, std::nullopt, 1700000002))
+        << "a user that does not exist";
+    EXPECT_TRUE(db.listPlayerGrantsForUser(424242).empty());
+}
+
+TEST_F(AuthDbTest, ARightOnAnObjectAndOnAGroupWithTheSameIdAreDifferentRights) {
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    auto uid = db.insertUser(makeAdmin("op"));
+    ASSERT_TRUE(db.replacePlayerGrantsForUser(*uid, {pg(SC::Object, 3), pg(SC::Group, 3)}, std::nullopt, 1700000000));
+    EXPECT_EQ(db.listPlayerGrantsForUser(*uid).size(), 2u);
+}
+
+TEST_F(AuthDbTest, RightsOnARemovedObjectOrGroupCanBeSweptAway) {
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    auto a = db.insertUser(makeAdmin("a"));
+    auto b = db.insertUser(makeAdmin("b"));
+    ASSERT_TRUE(a && b);
+    ASSERT_TRUE(db.replacePlayerGrantsForUser(*a, {pg(SC::Group, 9), pg(SC::Object, 9)}, std::nullopt, 1700000000));
+    ASSERT_TRUE(db.replacePlayerGrantsForUser(*b, {pg(SC::Group, 9), pg(SC::Group, 10)}, std::nullopt, 1700000000));
+
+    EXPECT_EQ(db.removePlayerGrantsForScope(SC::Group, 9), 2u) << "both users lose the group right";
+    EXPECT_EQ(db.listPlayerGrantsForUser(*a).size(), 1u) << "the object 9 right is another thing";
+    EXPECT_EQ(db.listPlayerGrantsForUser(*a)[0].scope, SC::Object);
+    EXPECT_EQ(db.listPlayerGrantsForUser(*b).size(), 1u);
+}
+
+TEST_F(AuthDbTest, RightsGoWhenTheUserGoes) {
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    auto uid = db.insertUser(makeAdmin("leaver"));
+    ASSERT_TRUE(uid.has_value());
+    ASSERT_TRUE(db.replacePlayerGrantsForUser(*uid, {pg(SC::Group, 1)}, std::nullopt, 1700000000));
+    ASSERT_TRUE(db.purgeUser(*uid));
+    EXPECT_EQ(rawScalar(dbPath(), "SELECT count(*) FROM user_player_grants"), 0);
+}
+

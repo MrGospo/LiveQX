@@ -278,6 +278,16 @@ public:
 
     std::vector<User>                                 adminListUsers();
     std::optional<User>                               adminGetUser(std::int64_t id);
+
+    // ── rights on players by object and group (B13) ──────────────────────
+    // Read fresh at every request, never carried in the access token.
+    std::vector<PlayerScopeGrant> playerGrantsOf(std::int64_t user_id);
+    // Replaces all of the user's rights at once; false if the user is unknown
+    // or a right is listed twice (nothing changes then).
+    bool setPlayerGrants(std::int64_t user_id, const std::vector<PlayerScopeGrant>& grants,
+                         std::optional<std::int64_t> granted_by);
+    // Sweeps the rights on an object or group that has been removed.
+    std::size_t dropPlayerGrantsForScope(PlayerScopeGrant::Scope scope, std::int64_t scope_id);
     std::variant<CreatedUser, AdminError>             adminCreateUser(const CreateUserRequest& req);
     std::variant<User, AdminError>                    adminUpdateUser(std::int64_t id,
                                                                       const UpdateUserRequest& req);
