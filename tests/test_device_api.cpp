@@ -787,3 +787,87 @@ TEST_F(DeviceApiTest, AThousandPlayersCanAllSendAHeartbeatAtOnce) {
     EXPECT_LT(total_ms, 60'000);
 }
 
+// ── optional heartbeat fields of the command-confirmation contract ─────────
+TEST_F(DeviceApiTest, ConfirmationFieldsAreKeptWhenWellFormedAndDroppedWhenNot) {
+    auto p = pair("Lobby");
+    auto cli = clientWith(p);
+    const std::string cmd = "11111111-2222-4333-8444-555555555555";
+    ASSERT_EQ(cli->Patch(path(p.id, "heartbeat"),
+                         hb({{"os_uptime_seconds", 1234}, {"last_command_id", cmd},
+                             {"last_command_result", {{"id", cmd}, {"status", "executed"}}}}),
+                         "application/json")->status, 204);
+    auto payload = json::parse(db_->status(p.id)->payload_json);
+    EXPECT_EQ(payload["os_uptime_seconds"], 1234);
+    EXPECT_EQ(payload["last_command_id"], cmd);
+    EXPECT_EQ(payload["last_command_result"], (json{{"id", cmd}, {"status", "executed"}}));
+    EXPECT_FALSE(payload.contains("startup")) << "startup is a one-off marker, not part of the stored state";
+
+    now_ += 11;
+    auto cli2 = clientWith(p);
+    ASSERT_EQ(cli2->Patch(path(p.id, "heartbeat"),
+                          hb({{"os_uptime_seconds", -5},
+                              {"last_command_result", {{"id", "not-a-uuid"}, {"status", "executed"}}}}),
+                          "application/json")->status, 204);
+    payload = json::parse(db_->status(p.id)->payload_json);
+    EXPECT_FALSE(payload.contains("os_uptime_seconds")) << "negative uptime is nonsense";
+    EXPECT_FALSE(payload.contains("last_command_result")) << "a result must name a real command id";
+
+    now_ += 11;
+    auto cli3 = clientWith(p);
+    ASSERT_EQ(cli3->Patch(path(p.id, "heartbeat"),
+                          hb({{"last_command_result", {{"id", cmd}, {"status", "melted"}}}}),
+                          "application/json")->status, 204);
+    EXPECT_FALSE(json::parse(db_->status(p.id)->payload_json).contains("last_command_result"))
+        << "an unknown status is dropped, not stored";
+
+    now_ += 11;
+    auto cli4 = clientWith(p);
+    ASSERT_EQ(cli4->Patch(path(p.id, "heartbeat"), hb({{"last_command_result", "executed"}}), "application/json")->status, 204);
+    EXPECT_FALSE(json::parse(db_->status(p.id)->payload_json).contains("last_command_result")) << "wrong type";
+}
+
+TEST_F(DeviceApiTest, AStartupHeartbeatMayFollowAnOrdinaryOneImmediately) {
+    // A player that restarts within the 10 s spacing must still be heard.
+    auto p = pair("Lobby");
+    auto cli = clientWith(p);
+    ASSERT_EQ(cli->Patch(path(p.id, "heartbeat"), hb(), "application/json")->status, 204);
+
+    now_ += 2;                                       // far inside the normal spacing
+    auto cli2 = clientWith(p);
+    EXPECT_EQ(cli2->Patch(path(p.id, "heartbeat"), hb({{"startup", true}}), "application/json")->status, 204);
+
+    int started = 0;
+    for (const auto& e : db_->events(p.id, 20)) started += (e.kind == "started");
+    EXPECT_EQ(started, 1);
+}
+
+TEST_F(DeviceApiTest, StartupHeartbeatsHaveTheirOwnLimitSoTheFlagIsNoLoophole) {
+    auto p = pair("Lobby");
+    auto send = [&](bool startup) {
+        auto cli = clientWith(p);
+        return cli->Patch(path(p.id, "heartbeat"), hb({{"startup", startup}}), "application/json");
+    };
+    ASSERT_EQ(send(true)->status, 204);
+
+    now_ += 2;
+    auto again = send(true);
+    ASSERT_TRUE(again);
+    EXPECT_EQ(again->status, 429) << "a player cannot flood by saying it just started";
+    ASSERT_TRUE(again->has_header("Retry-After"));
+    EXPECT_GT(std::stoi(again->get_header_value("Retry-After")), 0);
+
+    now_ += 29;                                      // 31 s since the first startup heartbeat
+    EXPECT_EQ(send(true)->status, 204);
+}
+
+TEST_F(DeviceApiTest, AStartupFlagThatIsNotABooleanIsJustAnOrdinaryHeartbeat) {
+    auto p = pair("Lobby");
+    auto cli = clientWith(p);
+    ASSERT_EQ(cli->Patch(path(p.id, "heartbeat"), hb(), "application/json")->status, 204);
+    now_ += 2;
+    auto cli2 = clientWith(p);
+    auto r = cli2->Patch(path(p.id, "heartbeat"), hb({{"startup", "yes"}}), "application/json");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 429) << "only a real true earns the exemption";
+}
+

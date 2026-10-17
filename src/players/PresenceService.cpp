@@ -64,6 +64,9 @@ void PresenceService::publish(const std::vector<Note>& notes) {
                                       {{"player_id", n.player_id}, {"name", n.name},
                                        {"reason", "heartbeat_timeout"}});
             break;
+        case Note::Started:
+            db_.addEvent(n.player_id, "started", "", nowSeconds());
+            break;
         case Note::VersionChanged:
             db_.addEvent(n.player_id, "version_changed", json{{"from", n.from}, {"to", n.to}}.dump(), nowSeconds());
             if (opts_.events)
@@ -76,7 +79,7 @@ void PresenceService::publish(const std::vector<Note>& notes) {
 }
 
 void PresenceService::onHeartbeat(const std::string& player_id, const std::string& version,
-                                  const std::string& payload_json) {
+                                  const std::string& payload_json, bool startup) {
     const std::int64_t now = nowSeconds();
 
     // A player seen for the first time since startup: find out who it is
@@ -123,6 +126,7 @@ void PresenceService::onHeartbeat(const std::string& player_id, const std::strin
         e.dirty = true;
 
         if (!was_online) notes.push_back({Note::Online, player_id, e.name, "", "", 0});
+        if (startup) notes.push_back({Note::Started, player_id, e.name, "", "", 0});
         if (!prev_version.empty() && !version.empty() && prev_version != version)
             notes.push_back({Note::VersionChanged, player_id, e.name, prev_version, version, 0});
 

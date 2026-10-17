@@ -49,9 +49,11 @@ public:
     PresenceService& operator=(const PresenceService&) = delete;
 
     // An accepted heartbeat. `payload_json` is the already sanitised body.
-    // Unknown players are ignored.
+    // `startup` marks the first heartbeat after the player process started
+    // (A8): it leaves a "started" event, which also shows restarts that happen
+    // faster than the offline threshold. Unknown players are ignored.
     void onHeartbeat(const std::string& player_id, const std::string& version,
-                     const std::string& payload_json);
+                     const std::string& payload_json, bool startup = false);
 
     struct TickResult {
         std::size_t flushed{0};
@@ -76,7 +78,7 @@ private:
         bool         dirty{false};
     };
     struct Note {                           // something to record and announce
-        enum Kind { Online, Offline, VersionChanged } kind;
+        enum Kind { Online, Offline, VersionChanged, Started } kind;
         std::string  player_id, name, from, to;
         std::int64_t last_seen{0};
     };

@@ -265,6 +265,22 @@ TEST_F(PresenceTest, TheVersionSurvivesARestartSoItIsNotReportedAsNewAgain) {
     EXPECT_EQ(dbEvents(id, "version_changed"), 1);
 }
 
+TEST_F(PresenceTest, AStartupHeartbeatLeavesAStartedEventAndAnOrdinaryOneDoesNot) {
+    const auto id = newPlayer();
+    svc_->onHeartbeat(id, "1.0", "{}", /*startup=*/true);
+    EXPECT_EQ(dbEvents(id, "started"), 1);
+    EXPECT_EQ(dbEvents(id, "online"), 1) << "the first sight is still the player coming online";
+
+    now_ += 60;
+    beat(id);
+    EXPECT_EQ(dbEvents(id, "started"), 1) << "only a heartbeat that says it is the first after a start";
+
+    now_ += 60;
+    svc_->onHeartbeat(id, "1.0", "{}", /*startup=*/true);   // restarted while still "online"
+    EXPECT_EQ(dbEvents(id, "started"), 2) << "restarts inside the offline threshold are not lost";
+    EXPECT_EQ(dbEvents(id, "online"), 1);
+}
+
 TEST_F(PresenceTest, ADeletedPlayerDisappearsWithoutEventsOrErrors) {
     const auto id = newPlayer();
     beat(id);

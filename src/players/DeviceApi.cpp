@@ -64,6 +64,16 @@ std::string idInPath(const std::string& path) {
     return rest.substr(0, rest.find('/'));
 }
 
+bool looksLikeUuid(const std::string& s) {
+    if (s.size() != 36) return false;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        const char c = s[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) { if (c != '-') return false; }
+        else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
 // Printable text only, cut to `max` bytes.
 std::string cleanText(const std::string& s, std::size_t max) {
     std::string out;
@@ -94,7 +104,20 @@ json sanitiseHeartbeat(const json& in) {
         }
     };
     integer("uptime_seconds");
+    integer("os_uptime_seconds");
     integer("position_ms");
+    // The result of the last command: it must name a real command id and carry
+    // a known status, otherwise it is dropped.
+    if (in.contains("last_command_result") && in["last_command_result"].is_object()) {
+        const auto& r = in["last_command_result"];
+        if (r.contains("id") && r["id"].is_string() && r.contains("status") && r["status"].is_string()) {
+            const auto id = r["id"].get<std::string>();
+            const auto st = r["status"].get<std::string>();
+            const bool known = st == "executed" || st == "expired" || st == "duplicate" ||
+                               st == "unsupported" || st == "failed";
+            if (looksLikeUuid(id) && known) out["last_command_result"] = {{"id", id}, {"status", st}};
+        }
+    }
     oneOf("watchdog_state", {"ok", "stale", "not_running"});
     oneOf("health", {"ok", "warning", "critical"});
     str("current_source", 256);
@@ -236,24 +259,35 @@ bool DeviceApi::startListener() {
         const std::string id = req.matches[1];
         const std::int64_t now = nowSeconds();
 
+        json body = json::parse(req.body, nullptr, false);
+        if (!body.is_object()) { reply(res, 400, "invalid_heartbeat"); return; }
+
+        // "startup": true marks the first heartbeat after a process start. Only a
+        // real boolean true counts.
+        const bool startup = body.contains("startup") && body["startup"].is_boolean() && body["startup"].get<bool>();
+
         {   // slow down floods: one heartbeat per interval and player
             std::lock_guard<std::mutex> lk(hb_mu_);
             if (last_heartbeat_.size() > 20000) {
                 for (auto it = last_heartbeat_.begin(); it != last_heartbeat_.end();)
                     it = (now - it->second > 3600) ? last_heartbeat_.erase(it) : std::next(it);
+                for (auto it = last_startup_.begin(); it != last_startup_.end();)
+                    it = (now - it->second > 3600) ? last_startup_.erase(it) : std::next(it);
             }
-            auto it = last_heartbeat_.find(id);
-            if (it != last_heartbeat_.end() && now - it->second < opts_.min_heartbeat_interval_s) {
+            // A start is exempt from the ordinary spacing (a player that restarts
+            // within 10 s must still be heard) but has a spacing of its own.
+            const auto& table = startup ? last_startup_ : last_heartbeat_;
+            const std::int64_t spacing = startup ? opts_.min_startup_interval_s : opts_.min_heartbeat_interval_s;
+            auto it = table.find(id);
+            if (it != table.end() && now - it->second < spacing) {
                 res.status = 429;
-                res.set_header("Retry-After", std::to_string(opts_.min_heartbeat_interval_s - (now - it->second)));
+                res.set_header("Retry-After", std::to_string(spacing - (now - it->second)));
                 res.set_content(json{{"error", "rate_limited"}}.dump(), "application/json");
                 return;
             }
+            if (startup) last_startup_[id] = now;
             last_heartbeat_[id] = now;
         }
-
-        json body = json::parse(req.body, nullptr, false);
-        if (!body.is_object()) { reply(res, 400, "invalid_heartbeat"); return; }
 
         std::string version;
         if (body.contains("version") && body["version"].is_string())
@@ -261,7 +295,7 @@ bool DeviceApi::startListener() {
 
         // Online/offline, version changes and the batched status write all
         // live in PresenceService.
-        presence_->onHeartbeat(id, version, sanitiseHeartbeat(body).dump());
+        presence_->onHeartbeat(id, version, sanitiseHeartbeat(body).dump(), startup);
         res.status = 204;
     });
 

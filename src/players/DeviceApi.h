@@ -65,6 +65,9 @@ struct DeviceApiOptions {
     std::function<std::int64_t()> now;             // unix seconds; null = real clock
     events::EventBus*     events{nullptr};
     std::int64_t          min_heartbeat_interval_s{10};
+    // The first heartbeat after a start ("startup": true) is exempt from the
+    // spacing above, but has its own, longer one: the flag is no loophole.
+    std::int64_t          min_startup_interval_s{30};
     std::size_t           workers{16};
     // Audit sink (null = no audit). Refusals are throttled per (action,
     // identity, reason): a revoked screen retrying every minute is one row per
@@ -137,6 +140,7 @@ private:
     std::mutex                                   hb_mu_;
     std::unordered_map<std::string, std::int64_t> last_heartbeat_;
     std::unordered_map<std::string, std::int64_t> last_renew_;
+    std::unordered_map<std::string, std::int64_t> last_startup_;
 };
 
 }  // namespace liveqx::players
