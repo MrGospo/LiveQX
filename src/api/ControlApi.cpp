@@ -660,8 +660,10 @@ void setAuditCategoryOverride(liveqx::audit::Category c) {
 
 // Places the current request's audit row at a given object / group. Needed for
 // things that no longer exist once the handler is done (a deleted screen).
-void setAuditScopeOverride(std::optional<std::int64_t> object_id, std::optional<std::int64_t> group_id) {
-    g_audit_ctx.scope_override = liveqx::audit::AuditScope{object_id, group_id};
+void setAuditScopeOverride(std::optional<std::int64_t> object_id, std::optional<std::int64_t> group_id,
+                           std::optional<std::int64_t> from_object_id = std::nullopt,
+                           std::optional<std::int64_t> from_group_id = std::nullopt) {
+    g_audit_ctx.scope_override = liveqx::audit::AuditScope{object_id, group_id, from_object_id, from_group_id};
 }
 
 // Login/refresh/logout stay reachable even when the audit backlog is
@@ -853,9 +855,13 @@ void installAuditPostHandler(httplib::Server& s,
             if (g_audit_ctx.scope_override) {
                 ev.scope_object_id = g_audit_ctx.scope_override->object_id;
                 ev.scope_group_id  = g_audit_ctx.scope_override->group_id;
+                ev.scope_from_object_id = g_audit_ctx.scope_override->from_object_id;
+                ev.scope_from_group_id  = g_audit_ctx.scope_override->from_group_id;
             } else if (auto sc = audit->resolveScope(ev)) {
                 ev.scope_object_id = sc->object_id;
                 ev.scope_group_id  = sc->group_id;
+                ev.scope_from_object_id = sc->from_object_id;
+                ev.scope_from_group_id  = sc->from_group_id;
             }
 
             // Publish an SSE hint so open audit-trail views can refetch
@@ -877,6 +883,8 @@ void installAuditPostHandler(httplib::Server& s,
                 // People who may read the audit of some places hear only about those.
                 if (ev.scope_object_id) payload["scope_object_id"] = *ev.scope_object_id;
                 if (ev.scope_group_id)  payload["scope_group_id"]  = *ev.scope_group_id;
+                if (ev.scope_from_object_id) payload["scope_from_object_id"] = *ev.scope_from_object_id;
+                if (ev.scope_from_group_id)  payload["scope_from_group_id"]  = *ev.scope_from_group_id;
                 events->publish(liveqx::events::EventType::AuditEvent,
                                 /*channel_id=*/-1, std::move(payload));
             }
@@ -3523,6 +3531,11 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         if (!access->canMove(placeOf(*p, hier), to)) { writeJson(res, 403, {{"error", "forbidden"}}); return; }
         const auto r = pls->db().movePlayer(id, gid);
         if (r != liveqx::players::GroupResult::Ok) { writeJson(res, groupStatusFor(r), {{"error", groupErrorName(r)}}); return; }
+        // One row about a move that touches two places: where the screen is now, and where it was.
+        {
+            const auto from = placeOf(*p, hier);
+            setAuditScopeOverride(target->object_id, target->id, from.object_id, from.group_id);
+        }
         auditPlayer("player.move",
                     json{{"name", p->name}, {"from_group", p->group_id.value_or(0)},
                          {"to_group", gid}, {"to_group_name", target->name}},
@@ -4896,6 +4909,8 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         };
         if (e.scope_object_id) one["object_id"] = *e.scope_object_id;
         if (e.scope_group_id)  one["group_id"]  = *e.scope_group_id;
+        if (e.scope_from_object_id) one["from_object_id"] = *e.scope_from_object_id;
+        if (e.scope_from_group_id)  one["from_group_id"]  = *e.scope_from_group_id;
         if (e.actor_user_id) one["actor_user_id"] = *e.actor_user_id;
         else                 one["actor_user_id"] = nullptr;
         if (!e.mac.empty())      one["mac"]      = macToHex(e.mac);

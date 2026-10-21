@@ -212,3 +212,36 @@ TEST_F(AuditLoggerTest, TheEmergencyFileCarriesThePlaceToo) {
     EXPECT_NE(line.find("\"scope_group_id\":33"), std::string::npos) << line;
     EXPECT_NE(line.find("\"scope_object_id\":3"), std::string::npos) << line;
 }
+
+TEST_F(AuditLoggerTest, AMoveCarriesBothPlacesThroughTheLoggerAndTheEmergencyFile) {
+    const auto emerg = tmp_dir_ / "audit-emergency.jsonl";
+    {
+        AuditDb db(tmp_dir_ / "audit.db", key_.get());
+        ASSERT_TRUE(db.open());
+        AuditLogger lg(&db, tmp_dir_ / "audit-ok.jsonl");
+        lg.setScopeResolver([](const AuditEvent&) {
+            return std::optional<liveqx::audit::AuditScope>{liveqx::audit::AuditScope{1, 12, 1, 11}};
+        });
+        lg.start();
+        lg.log(mk("player.move"));
+        ASSERT_TRUE(waitFor([&] { return lg.stats().written_db >= 1; }, std::chrono::seconds(3)));
+        lg.stop();
+        auto row = db.list({})[0];
+        EXPECT_EQ(row.scope_group_id, 12);
+        EXPECT_EQ(row.scope_from_group_id, 11);
+        EXPECT_EQ(row.scope_from_object_id, 1);
+        EXPECT_EQ(db.verifyChain().first_bad_id, 0);
+    }
+    AuditLogger lg(nullptr, emerg);
+    lg.setScopeResolver([](const AuditEvent&) {
+        return std::optional<liveqx::audit::AuditScope>{liveqx::audit::AuditScope{1, 12, 1, 11}};
+    });
+    lg.start();
+    lg.log(mk("player.move"));
+    ASSERT_TRUE(waitFor([&] { return lg.stats().written_emergency >= 1; }, std::chrono::seconds(3)));
+    lg.stop();
+    std::ifstream f(emerg);
+    std::string line;
+    ASSERT_TRUE(std::getline(f, line));
+    EXPECT_NE(line.find("\"scope_from_group_id\":11"), std::string::npos) << line;
+}

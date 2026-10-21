@@ -286,3 +286,18 @@ TEST(SseFilterAudit, AViewerWithTheMarkHearsToo) {
     ctx.player_grants = {withAudit(groupGrant(11))};
     EXPECT_TRUE(sseEventVisibleTo(ctx, auditHint("player", 1, 11)));
 }
+
+TEST(SseFilterAudit, ARightOnEitherEndOfAMoveMeansHearingOfIt) {
+    Event move = evtFor(EventType::AuditEvent);
+    move.payload = {{"category", "player"}, {"action", "player.move"}, {"scope_object_id", 1}, {"scope_group_id", 12},
+                    {"scope_from_object_id", 1}, {"scope_from_group_id", 11}};
+    auto ctx = ctxFor(Role::Operator);
+    ctx.player_grants = {withAudit(groupGrant(11))};
+    EXPECT_TRUE(sseEventVisibleTo(ctx, move)) << "the group the screen left";
+    ctx.player_grants = {withAudit(groupGrant(12))};
+    EXPECT_TRUE(sseEventVisibleTo(ctx, move)) << "the group it arrived in";
+    ctx.player_grants = {withAudit(groupGrant(13))};
+    EXPECT_FALSE(sseEventVisibleTo(ctx, move));
+    ctx.player_grants = {withAudit(objectGrant(2))};
+    EXPECT_FALSE(sseEventVisibleTo(ctx, move));
+}

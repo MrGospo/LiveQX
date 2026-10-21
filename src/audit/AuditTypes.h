@@ -98,12 +98,19 @@ struct AuditEvent {
     // ── where it happened (players, B13) ────────────────────────────
     // The object and group of the screen (or group, or object) the event is about,
     // as they were WHEN it was written; unset for events that are not about a place.
-    // `scoped` is true for every row written by the current format: from then on
-    // the place is part of what the signature covers. Rows written before that
-    // have scoped = false and are verified exactly as they always were.
-    bool                         scoped{false};
+    // An event can touch two places: a screen moved from one group to another.
+    // `scope_*` is where it ended up, `scope_from_*` where it came from.
+    //
+    // `scoped` says which format the row was written in, and so what its
+    // signature covers — rows are verified by the rule they were written under:
+    //   0  before places existed: no place in the signature
+    //   1  the place (scope_*) is signed
+    //   2  the place and the place it came from (scope_from_*) are signed
+    int                          scoped{0};
     std::optional<std::int64_t>  scope_object_id;
     std::optional<std::int64_t>  scope_group_id;
+    std::optional<std::int64_t>  scope_from_object_id;
+    std::optional<std::int64_t>  scope_from_group_id;
 
     std::vector<std::uint8_t>    prev_mac;           // 0 or 32 bytes
     std::vector<std::uint8_t>    mac;                // always 32 bytes on read
@@ -115,6 +122,9 @@ struct AuditEvent {
 struct AuditScope {
     std::optional<std::int64_t> object_id;
     std::optional<std::int64_t> group_id;
+    // Where it came from, for an event that moved something between places.
+    std::optional<std::int64_t> from_object_id;
+    std::optional<std::int64_t> from_group_id;
 };
 
 // Filter for AuditDb::list. All conditions AND together. limit is
@@ -129,8 +139,8 @@ struct AuditFilter {
     std::string                  target_type;
     std::string                  target_id;
     std::string                  request_id;
-    // Place: exactly this object / this group (rows carry both, so an object
-    // finds the events of all its groups).
+    // Place: an event touching this object / group at either end (the place it
+    // happened in, or the one it came from).
     std::optional<std::int64_t>  scope_object_id;
     std::optional<std::int64_t>  scope_group_id;
     // For people who may read the audit of some places only: player events whose

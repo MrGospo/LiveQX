@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <set>
 #include <vector>
@@ -339,7 +340,7 @@ TEST_F(AuditDbTest, ARowWrittenBeforePlacesExistedStillVerifiesAndTheChainContin
     auto old_rows = db.list({});
     ASSERT_EQ(old_rows.size(), 3u);
     for (const auto& r : old_rows) {
-        EXPECT_FALSE(r.scoped);
+        EXPECT_EQ(r.scoped, 0);
         EXPECT_FALSE(r.scope_object_id.has_value());
     }
 
@@ -354,8 +355,8 @@ TEST_F(AuditDbTest, ARowWrittenBeforePlacesExistedStillVerifiesAndTheChainContin
     EXPECT_EQ(after.first_bad_id, 0) << after.first_bad_reason << " — one unbroken chain across the two formats";
     auto all = db.list({});
     int scoped = 0;
-    for (const auto& r : all) scoped += r.scoped;
-    EXPECT_EQ(scoped, 3) << "every new row is of the new format, even without a place";
+    for (const auto& r : all) scoped += (r.scoped == 2);
+    EXPECT_EQ(scoped, 3) << "every new row is of the current format, even without a place";
 }
 
 TEST_F(AuditDbTest, ThePlaceIsInsideTheSignatureOfANewRowAndTheFormatFlagCannotBeFlipped) {
@@ -490,4 +491,192 @@ TEST_F(AuditDbTest, SomeoneWithRightsOnPlacesSeesPlayerEventsOfThosePlacesOnly) 
     AuditFilter escaping = by_group;
     escaping.scope_group_id = 21;                         // asking for more is not
     EXPECT_TRUE(actions(escaping).empty());
+}
+
+// ── two places in one row (schema v3) ───────────────────────────────────────
+namespace {
+
+// What a version-2 binary wrote: the place is signed, the place it came from does not exist yet.
+std::string v2Canonical(std::int64_t ts, const std::string& summary, std::optional<std::int64_t> object,
+                        std::optional<std::int64_t> group) {
+    json j = json::parse(oldCanonical(ts, "player", "player.command_sent", summary));
+    j["scope_object_id"] = object ? json(*object) : json(nullptr);
+    j["scope_group_id"]  = group ? json(*group) : json(nullptr);
+    return j.dump();
+}
+
+// A database that went through both older versions: `v1` rows of the first format,
+// then `v2` rows of the second, all signed in one chain as those binaries would have.
+void writeVersionTwoDatabase(const fs::path& path, MasterKey& key, int v1, int v2) {
+    writeVersionOneDatabase(path, key, v1);
+    sqlite3* raw = nullptr;
+    ASSERT_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(raw,
+        "ALTER TABLE audit_events ADD COLUMN scoped INTEGER NOT NULL DEFAULT 0;"
+        "ALTER TABLE audit_events ADD COLUMN scope_object_id INTEGER;"
+        "ALTER TABLE audit_events ADD COLUMN scope_group_id INTEGER;"
+        "PRAGMA user_version = 2;", nullptr, nullptr, nullptr), SQLITE_OK);
+    std::vector<std::uint8_t> prev;
+    {
+        sqlite3_stmt* st = nullptr;
+        ASSERT_EQ(sqlite3_prepare_v2(raw, "SELECT mac FROM audit_events ORDER BY id DESC LIMIT 1", -1, &st, nullptr), SQLITE_OK);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const auto* b = static_cast<const std::uint8_t*>(sqlite3_column_blob(st, 0));
+            prev.assign(b, b + sqlite3_column_bytes(st, 0));
+        }
+        sqlite3_finalize(st);
+    }
+    for (int i = 0; i < v2; ++i) {
+        const std::int64_t ts = 1'710'000'000'000 + i;
+        const std::string summary = "v2 row " + std::to_string(i);
+        std::string msg(reinterpret_cast<const char*>(prev.data()), prev.size());
+        msg += v2Canonical(ts, summary, 7, 70 + i);
+        const auto mac = key.hmacSha256(msg);
+        sqlite3_stmt* st = nullptr;
+        ASSERT_EQ(sqlite3_prepare_v2(raw,
+            "INSERT INTO audit_events(ts_unix_ms,category,action,actor_user_id,actor_username,actor_role,actor_ip,"
+            "target_type,target_id,http_method,http_path,http_status,elapsed_ms,summary,details_json,request_id,"
+            "prev_mac,mac,key_fingerprint,legacy,scoped,scope_object_id,scope_group_id) VALUES(?,'player','player.command_sent',42,"
+            "'admin','admin','10.0.0.5','player','abc','POST','/api/players',200,0,?,'{}','',?,?,?,0,1,7,?)", -1, &st, nullptr), SQLITE_OK);
+        sqlite3_bind_int64(st, 1, ts);
+        sqlite3_bind_text(st, 2, summary.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(st, 3, prev.data(), static_cast<int>(prev.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_blob(st, 4, mac.data(), static_cast<int>(mac.size()), SQLITE_TRANSIENT);
+        const std::string fp = key.fingerprint();
+        sqlite3_bind_text(st, 5, fp.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(st, 6, 70 + i);
+        ASSERT_EQ(sqlite3_step(st), SQLITE_DONE);
+        sqlite3_finalize(st);
+        prev.assign(mac.begin(), mac.end());
+    }
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string hex;
+    for (auto b : prev) { hex.push_back(kHex[b >> 4]); hex.push_back(kHex[b & 15]); }
+    sqlite3_stmt* st = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(raw, "UPDATE audit_meta SET value=? WHERE key='last_mac'", -1, &st, nullptr), SQLITE_OK);
+    sqlite3_bind_text(st, 1, hex.c_str(), -1, SQLITE_TRANSIENT);
+    ASSERT_EQ(sqlite3_step(st), SQLITE_DONE);
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+}
+
+AuditEvent moved(const std::string& action, std::int64_t to_object, std::int64_t to_group,
+                 std::int64_t from_object, std::int64_t from_group) {
+    AuditEvent e = placed(action, to_object, to_group);
+    e.scope_from_object_id = from_object;
+    e.scope_from_group_id = from_group;
+    return e;
+}
+
+}  // namespace
+
+TEST_F(AuditDbTest, RowsOfAllThreeFormatsLiveInOneChainAndEachVerifiesByItsOwnRule) {
+    const auto path = tmp_dir_ / "audit.db";
+    writeVersionTwoDatabase(path, *key_, 2, 2);
+
+    AuditDb db(path, key_.get());
+    ASSERT_TRUE(db.open()) << "a version-2 database is migrated, not refused";
+    auto before = db.verifyChain();
+    EXPECT_EQ(before.scanned, 4);
+    EXPECT_EQ(before.first_bad_id, 0) << before.first_bad_reason << " — rows of both older formats verify as they did";
+
+    auto m = moved("player.move", 7, 72, 7, 71);
+    ASSERT_TRUE(db.insert(m).has_value());
+    auto plain = placed("player.command_sent", 7, 71);
+    ASSERT_TRUE(db.insert(plain).has_value());
+
+    auto after = db.verifyChain();
+    EXPECT_EQ(after.scanned, 6);
+    EXPECT_EQ(after.first_bad_id, 0) << after.first_bad_reason;
+    std::map<int, int> by_format;
+    for (const auto& r : db.list({})) ++by_format[r.scoped];
+    EXPECT_EQ(by_format[0], 2);
+    EXPECT_EQ(by_format[1], 2);
+    EXPECT_EQ(by_format[2], 2);
+}
+
+TEST_F(AuditDbTest, BothPlacesOfAMoveAreSignedAndTheFormatCannotBeDowngradedOrUpgraded) {
+    const auto path = tmp_dir_ / "audit.db";
+    {
+        AuditDb db(path, key_.get());
+        ASSERT_TRUE(db.open());
+        auto a = moved("player.move", 7, 72, 7, 71);
+        ASSERT_TRUE(db.insert(a).has_value());
+        ASSERT_EQ(db.verifyChain().first_bad_id, 0);
+    }
+    auto verdict = [&](const char* tamper) {
+        sqlite3* raw = nullptr;
+        EXPECT_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+        EXPECT_EQ(sqlite3_exec(raw, tamper, nullptr, nullptr, nullptr), SQLITE_OK);
+        sqlite3_close(raw);
+        AuditDb db(path, key_.get());
+        EXPECT_TRUE(db.open());
+        return db.verifyChain();
+    };
+    auto v = verdict("UPDATE audit_events SET scope_from_group_id = 99 WHERE id = 1;");
+    EXPECT_EQ(v.first_bad_id, 1) << "the place it came from is signed too";
+    verdict("UPDATE audit_events SET scope_from_group_id = 71 WHERE id = 1;");
+    v = verdict("UPDATE audit_events SET scoped = 1 WHERE id = 1;");
+    EXPECT_EQ(v.first_bad_id, 1) << "calling it an older row hides the origin only if the signature allowed it";
+    verdict("UPDATE audit_events SET scoped = 2 WHERE id = 1;");
+    v = verdict("UPDATE audit_events SET scoped = 0 WHERE id = 1;");
+    EXPECT_EQ(v.first_bad_id, 1);
+}
+
+TEST_F(AuditDbTest, ADatabaseWrittenAtFormatTwoCannotGainAnOriginAfterTheFact) {
+    const auto path = tmp_dir_ / "audit.db";
+    writeVersionTwoDatabase(path, *key_, 0, 2);
+    { AuditDb db(path, key_.get()); ASSERT_TRUE(db.open()); }
+    sqlite3* raw = nullptr;
+    ASSERT_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(raw, "UPDATE audit_events SET scoped = 2, scope_from_group_id = 5 WHERE id = 1;",
+                           nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_close(raw);
+    AuditDb db(path, key_.get());
+    ASSERT_TRUE(db.open());
+    EXPECT_EQ(db.verifyChain().first_bad_id, 1);
+}
+
+TEST_F(AuditDbTest, AMoveIsFoundFromEitherEndAndCountedOnce) {
+    AuditDb db(tmp_dir_ / "audit.db", key_.get());
+    ASSERT_TRUE(db.open());
+    auto m = moved("player.move", 1, 12, 1, 11);
+    ASSERT_TRUE(db.insert(m).has_value());
+    auto other = moved("player.move", 2, 21, 2, 22);
+    ASSERT_TRUE(db.insert(other).has_value());
+
+    AuditFilter f;
+    f.scope_group_id = 11;                                // where it came from
+    EXPECT_EQ(db.count(f), 1);
+    f.scope_group_id = 12;                                // where it went
+    EXPECT_EQ(db.count(f), 1);
+    f.scope_group_id = 13;
+    EXPECT_EQ(db.count(f), 0);
+    AuditFilter o;
+    o.scope_object_id = 1;
+    EXPECT_EQ(db.count(o), 1) << "one row, not one per end";
+    o.scope_object_id = 2;
+    EXPECT_EQ(db.list(o).size(), 1u);
+}
+
+TEST_F(AuditDbTest, WhoeverLostAScreenAndWhoeverGotItBothMayReadTheMove) {
+    AuditDb db(tmp_dir_ / "audit.db", key_.get());
+    ASSERT_TRUE(db.open());
+    auto m = moved("player.move", 1, 12, 1, 11);
+    ASSERT_TRUE(db.insert(m).has_value());
+    auto elsewhere = moved("player.move", 2, 21, 2, 22);
+    ASSERT_TRUE(db.insert(elsewhere).has_value());
+
+    auto sees = [&](std::vector<std::int64_t> groups, std::vector<std::int64_t> objects) {
+        AuditFilter f;
+        f.restrict_to_places = true;
+        f.allowed_group_ids = std::move(groups);
+        f.allowed_object_ids = std::move(objects);
+        return db.count(f);
+    };
+    EXPECT_EQ(sees({11}, {}), 1) << "the group that lost it";
+    EXPECT_EQ(sees({12}, {}), 1) << "the group that received it";
+    EXPECT_EQ(sees({13}, {}), 0);
+    EXPECT_EQ(sees({}, {1}), 1);
+    EXPECT_EQ(sees({11, 22}, {}), 2);
 }

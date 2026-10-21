@@ -5200,8 +5200,12 @@ paths:
         шире разрешённого не выходит.
 
         Каждая строка несёт область (`object_id`, `group_id`) — где находился экран на момент
-        события; для переноса — новое место; для удалённого экрана, группы — место до удаления.
-        Область входит в подпись строки (старые строки без области проверяются как раньше).
+        события; для удалённого экрана, группы — место до удаления. Перенос экрана — одна строка
+        с двумя областями: куда (`object_id`, `group_id`) и откуда (`from_object_id`,
+        `from_group_id`). Её видят и те, у кого аудит старой группы, и те, у кого новой;
+        фильтры `object_id`/`group_id` находят её по любому концу, счётчик считает её один раз.
+        Обе области входят в подпись строки; строки, записанные прежними версиями формата
+        (без области, с одной областью), проверяются по тем правилам, по которым были записаны.
         События, не относящиеся к месту (настройки, права), области не имеют и
         не-администраторам не видны.
       parameters:
@@ -5214,8 +5218,8 @@ paths:
         - { in: query, name: target_type, schema: { type: string } }
         - { in: query, name: target_id, schema: { type: string } }
         - { in: query, name: request_id, schema: { type: string } }
-        - { in: query, name: object_id, schema: { type: integer, format: int64 }, description: 'События объекта (всех его групп).' }
-        - { in: query, name: group_id, schema: { type: integer, format: int64 }, description: 'События группы.' }
+        - { in: query, name: object_id, schema: { type: integer, format: int64 }, description: 'События объекта (всех его групп); перенос находится по любому концу.' }
+        - { in: query, name: group_id, schema: { type: integer, format: int64 }, description: 'События группы; перенос находится по любому концу.' }
         - { in: query, name: limit, schema: { type: integer, maximum: 1000, default: 100 } }
         - { in: query, name: offset, schema: { type: integer, default: 0 } }
       responses:
@@ -5242,6 +5246,8 @@ paths:
                         target_id: { type: string }
                         object_id: { type: integer, format: int64, description: 'Только у строк с областью.' }
                         group_id: { type: integer, format: int64, description: 'Только у строк с областью.' }
+                        from_object_id: { type: integer, format: int64, description: 'Только у переноса: откуда.' }
+                        from_group_id: { type: integer, format: int64, description: 'Только у переноса: откуда.' }
         '403':
           description: '`forbidden` — не администратор и аудит ни одной области не выдан.'
           content:

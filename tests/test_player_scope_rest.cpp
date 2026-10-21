@@ -567,22 +567,36 @@ TEST(PlayerAuditRest, ARowAboutADeletedScreenKeepsTheGroupItWasIn) {
     EXPECT_EQ(json::parse(cli.Get("/api/audit/verify", bearer(admin.token))->body)["ok"], true);
 }
 
-TEST(PlayerAuditRest, AMoveIsFiledUnderTheNewPlaceAndEventsThatAreNotAboutAPlaceAreNotSeenByThePlacedReaders) {
+TEST(PlayerAuditRest, AMoveIsOneRowThatBothTheLosingAndTheReceivingSideCanRead) {
     ScopeFixture f(kBasePort + 27);
     auto admin = f.person("root", sa::Role::Admin);
-    auto op = f.person("op", sa::Role::Operator);
-    ASSERT_EQ(f.putGrants(admin, op.id, json::array({auditGrant("group", f.G12)}))->status, 200);
+    auto lost = f.person("lost", sa::Role::Operator);
+    auto got = f.person("got", sa::Role::Operator);
+    auto bystander = f.person("by", sa::Role::Operator);
+    ASSERT_EQ(f.putGrants(admin, lost.id, json::array({auditGrant("group", f.G11)}))->status, 200);
+    ASSERT_EQ(f.putGrants(admin, got.id, json::array({auditGrant("group", f.G12)}))->status, 200);
+    ASSERT_EQ(f.putGrants(admin, bystander.id, json::array({auditGrant("object", f.O2)}))->status, 200);
     auto cli = f.client();
     auto mv = cli.Put(("/api/players/" + f.P11 + "/group").c_str(), bearer(admin.token),
                       json{{"group_id", f.G12}}.dump(), "application/json");
     ASSERT_EQ(mv->status, 200) << mv->body;
     f.settleAudit();
 
-    auto moved = eventsOf(f, op, "action=player.move");
-    ASSERT_EQ(moved["events"].size(), 1u) << "whoever receives a screen can see that it arrived";
-    EXPECT_EQ(moved["events"][0]["group_id"], f.G12);
+    for (const auto* who : {&lost, &got}) {
+        auto body = eventsOf(f, *who, "action=player.move");
+        ASSERT_EQ(body["events"].size(), 1u);
+        EXPECT_EQ(body["events"][0]["group_id"], f.G12) << "where it is now";
+        EXPECT_EQ(body["events"][0]["from_group_id"], f.G11) << "where it was";
+        EXPECT_EQ(body["total"], 1);
+    }
+    EXPECT_TRUE(targets(eventsOf(f, bystander, "action=player.move")).empty());
+
+    // The administrator finds the one row from either group, and it is still one row overall.
+    EXPECT_EQ(eventsOf(f, admin, "action=player.move&group_id=" + std::to_string(f.G11))["total"], 1);
+    EXPECT_EQ(eventsOf(f, admin, "action=player.move&group_id=" + std::to_string(f.G12))["total"], 1);
+    EXPECT_EQ(eventsOf(f, admin, "action=player.move")["total"], 1) << "one act, one row";
+    EXPECT_EQ(json::parse(cli.Get("/api/audit/verify", bearer(admin.token))->body)["ok"], true);
     // The grants update (about a person, not a place) is not for them.
-    EXPECT_TRUE(targets(eventsOf(f, op, "action=player.grants_update")).empty());
-    EXPECT_EQ(eventsOf(f, op, "action=player.grants_update")["total"], 0);
+    EXPECT_EQ(eventsOf(f, got, "action=player.grants_update")["total"], 0);
     EXPECT_GE(eventsOf(f, admin, "action=player.grants_update")["total"].get<int>(), 1);
 }

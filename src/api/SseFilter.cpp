@@ -2,6 +2,9 @@
 
 #include "players/PlayerAccess.h"
 
+#include <algorithm>
+#include <vector>
+
 namespace liveqx::api {
 
 namespace {
@@ -30,15 +33,22 @@ bool auditEventVisible(const liveqx::auth::RequestContext& ctx, const liveqx::ev
         if (!e.payload.is_object()) return false;
         auto cat = e.payload.find("category");
         if (cat == e.payload.end() || !cat->is_string() || cat->get<std::string>() != "player") return false;
-        std::optional<std::int64_t> object, group;
-        if (auto it = e.payload.find("scope_object_id"); it != e.payload.end() && it->is_number_integer())
-            object = it->get<std::int64_t>();
-        if (auto it = e.payload.find("scope_group_id"); it != e.payload.end() && it->is_number_integer())
-            group = it->get<std::int64_t>();
+        // The place it happened in and, for a move, the place it came from: a right
+        // on either end means hearing of it.
+        std::vector<std::int64_t> objects, groups;
+        for (const char* key : {"scope_object_id", "scope_from_object_id"})
+            if (auto it = e.payload.find(key); it != e.payload.end() && it->is_number_integer())
+                objects.push_back(it->get<std::int64_t>());
+        for (const char* key : {"scope_group_id", "scope_from_group_id"})
+            if (auto it = e.payload.find(key); it != e.payload.end() && it->is_number_integer())
+                groups.push_back(it->get<std::int64_t>());
+        auto has = [](const std::vector<std::int64_t>& v, std::int64_t id) {
+            return std::find(v.begin(), v.end(), id) != v.end();
+        };
         for (const auto& g : ctx.player_grants) {
             if (!g.can_view_audit) continue;
-            if (g.scope == liveqx::auth::PlayerScopeGrant::Scope::Object && object && *object == g.scope_id) return true;
-            if (g.scope == liveqx::auth::PlayerScopeGrant::Scope::Group && group && *group == g.scope_id) return true;
+            if (g.scope == liveqx::auth::PlayerScopeGrant::Scope::Object && has(objects, g.scope_id)) return true;
+            if (g.scope == liveqx::auth::PlayerScopeGrant::Scope::Group && has(groups, g.scope_id)) return true;
         }
     } catch (...) {
     }

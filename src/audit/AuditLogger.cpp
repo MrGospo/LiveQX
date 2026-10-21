@@ -88,6 +88,8 @@ void AuditLogger::fillScope(AuditEvent& ev) const {
     if (auto sc = resolveScope(ev)) {
         ev.scope_object_id = sc->object_id;
         ev.scope_group_id  = sc->group_id;
+        ev.scope_from_object_id = sc->from_object_id;
+        ev.scope_from_group_id  = sc->from_group_id;
     }
 }
 
@@ -280,6 +282,8 @@ std::string AuditLogger::toJsonLine(const AuditEvent& ev) {
     j["request_id"]     = ev.request_id;
     j["scope_object_id"] = ev.scope_object_id ? json(*ev.scope_object_id) : json(nullptr);
     j["scope_group_id"]  = ev.scope_group_id  ? json(*ev.scope_group_id)  : json(nullptr);
+    j["scope_from_object_id"] = ev.scope_from_object_id ? json(*ev.scope_from_object_id) : json(nullptr);
+    j["scope_from_group_id"]  = ev.scope_from_group_id  ? json(*ev.scope_from_group_id)  : json(nullptr);
     return j.dump();
 }
 
