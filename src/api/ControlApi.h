@@ -140,6 +140,12 @@ public:
     // flag and drive the rebuild from the main loop).
     void setOnTlsReload(std::function<void()> cb);
 
+    // The MQTT broker link (players.broker), for GET /api/players/broker and
+    // POST /api/players/broker/reconcile. `status` returns JSON text; `sync`
+    // asks for a reconciliation now and is empty when there is no link. Set
+    // before start(); without them the endpoints say the broker is disabled.
+    void setBrokerHooks(std::function<std::string()> status, std::function<void()> sync);
+
     void start();
     void stop();
 

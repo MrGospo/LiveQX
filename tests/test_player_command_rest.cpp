@@ -571,3 +571,51 @@ TEST(PlayerCommandRest, JobsAreNotForViewersAndAnUnknownJobIsNotFound) {
     EXPECT_EQ(cli.Post("/api/command-jobs/nope/cancel", bearer(admin.token), "", "application/json")->status, 404);
     EXPECT_EQ(cli.Get("/api/command-jobs")->status, 401);
 }
+
+// ── the broker link, for the interface ──────────────────────────────────────
+TEST(PlayerBrokerRest, WithoutALinkTheBrokerIsReportedDisabledAndNothingCanBeNudged) {
+    CommandFixture f(g_port++);
+    auto admin = f.person("admin1", sa::Role::Admin);
+    auto cli = f.client();
+    auto r = cli.Get("/api/players/broker", bearer(admin.token));
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    EXPECT_EQ(json::parse(r->body)["state"], "disabled");
+    EXPECT_EQ(json::parse(r->body)["enabled"], false);
+    auto sync = cli.Post("/api/players/broker/reconcile", bearer(admin.token), "", "application/json");
+    EXPECT_EQ(sync->status, 409);
+    EXPECT_EQ(json::parse(sync->body)["error"], "broker_disabled");
+}
+
+TEST(PlayerBrokerRest, TheStatusOfTheLinkIsPassedOnAndAReconcileCanBeRequested) {
+    CommandFixture f(g_port++);
+    auto admin = f.person("admin1", sa::Role::Admin);
+    std::atomic<int> nudged{0};
+    f.api->setBrokerHooks(
+        [] { return json{{"enabled", true}, {"state", "waiting"}, {"detail", "the device CA is not set up yet"},
+                         {"readiness", {{"device_ca", false}, {"trust_root", true}}}}.dump(); },
+        [&] { ++nudged; });
+    auto cli = f.client();
+    auto r = cli.Get("/api/players/broker", bearer(admin.token));
+    ASSERT_EQ(r->status, 200);
+    const json j = json::parse(r->body);
+    EXPECT_EQ(j["state"], "waiting");
+    EXPECT_EQ(j["detail"], "the device CA is not set up yet");
+    EXPECT_EQ(j["readiness"]["device_ca"], false);
+
+    auto sync = cli.Post("/api/players/broker/reconcile", bearer(admin.token), "", "application/json");
+    EXPECT_EQ(sync->status, 202);
+    EXPECT_EQ(nudged.load(), 1);
+}
+
+TEST(PlayerBrokerRest, OnlyAnAdministratorSeesOrNudgesTheBroker) {
+    CommandFixture f(g_port++);
+    auto op = f.person("op1", sa::Role::Operator);
+    auto viewer = f.person("view1", sa::Role::Viewer);
+    auto cli = f.client();
+    for (const auto* who : {&op, &viewer}) {
+        EXPECT_EQ(cli.Get("/api/players/broker", bearer(who->token))->status, 403);
+        EXPECT_EQ(cli.Post("/api/players/broker/reconcile", bearer(who->token), "", "application/json")->status, 403);
+    }
+    EXPECT_EQ(cli.Get("/api/players/broker")->status, 401);
+}

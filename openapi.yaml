@@ -5093,6 +5093,48 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/players/broker:
+    get:
+      tags: [Players]
+      summary: State of the MQTT broker link
+      description: |
+        Только администратор. Ссылка на брокер включается в конфигурации сервера
+        (`players.broker.enabled`; хост, порт, проверка имени, период сверки — там же,
+        после правки нужен перезапуск). Здесь — её состояние и то, чего ей не хватает:
+        `readiness` показывает, есть ли центр устройств, корень для проверки сертификата
+        брокера, адрес брокера в настройках модуля и поддержка MQTT в сборке. Состояния:
+        `disabled`, `waiting` (нечем подключаться — причина в `detail`), `connecting`,
+        `connected`, `stopped`.
+      responses:
+        '200':
+          description: The state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BrokerStatus' }
+
+  /api/players/broker/reconcile:
+    post:
+      tags: [Players]
+      summary: Reconcile the broker with the players now
+      description: |
+        Только администратор. Просит ссылку сверить брокер с базой плееров сейчас, не
+        дожидаясь периода. Ничего не ждёт: результат виден в `last_reconcile_*`
+        состояния. Аудит: `player.broker_reconcile`.
+      responses:
+        '202':
+          description: Requested.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requested: { type: boolean }
+        '409':
+          description: '`broker_disabled` — ссылка не включена.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/players/settings:
     get:
       tags: [Players]
@@ -5374,6 +5416,33 @@ components:
             groups:
               type: array
               items: { $ref: '#/components/schemas/PlayerGroup' }
+
+    BrokerStatus:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        state: { type: string, enum: [disabled, waiting, connecting, connected, stopped] }
+        detail: { type: string }
+        host: { type: string }
+        port: { type: integer }
+        verify_hostname: { type: boolean }
+        reconcile_interval_s: { type: integer }
+        last_reconcile_at: { type: integer, format: int64, description: '0 — ещё не было.' }
+        last_reconcile_ok: { type: boolean }
+        last_report:
+          type: object
+          properties:
+            issued: { type: integer }
+            removed: { type: integer }
+            failed: { type: integer }
+            error: { type: string }
+        readiness:
+          type: object
+          properties:
+            mosquitto_in_build: { type: boolean }
+            device_ca: { type: boolean }
+            trust_root: { type: boolean }
+            broker_url_configured: { type: boolean }
 
     CommandJob:
       type: object

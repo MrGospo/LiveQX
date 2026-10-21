@@ -13,6 +13,16 @@ std::int64_t nowSeconds() { return static_cast<std::int64_t>(std::time(nullptr))
 
 }  // namespace
 
+nlohmann::json brokerStatusJson(const BrokerLinkStatus& st) {
+    nlohmann::json j = {{"state", st.state}, {"detail", st.detail},
+                        {"last_reconcile_at", st.last_reconcile_at},
+                        {"last_reconcile_ok", st.last_reconcile_ok}};
+    if (st.last_reconcile_at > 0)
+        j["last_report"] = {{"issued", st.last_report.issued}, {"removed", st.last_report.removed},
+                            {"failed", st.last_report.failed}, {"error", st.last_report.error}};
+    return j;
+}
+
 BrokerLink::BrokerLink(BrokerLinkOptions opts) : opts_(std::move(opts)) {
     opts_.retry_s = std::max(1, opts_.retry_s);
     opts_.reconcile_interval_s = std::max(opts_.retry_s, opts_.reconcile_interval_s);

@@ -302,3 +302,25 @@ TEST(BrokerLink, AskingFromTheMessageHandlerDoesNotDeadlockOrBlock) {
     link.stop();
     EXPECT_LT(std::chrono::steady_clock::now() - t0, 2s);
 }
+
+TEST(BrokerLink, TheStatusIsShownAsTheInterfaceNeedsIt) {
+    liveqx::mqtt::BrokerLinkStatus st;
+    st.state = "waiting";
+    st.detail = "the device CA is not set up yet";
+    auto j = liveqx::mqtt::brokerStatusJson(st);
+    EXPECT_EQ(j["state"], "waiting");
+    EXPECT_EQ(j["detail"], "the device CA is not set up yet");
+    EXPECT_EQ(j["last_reconcile_at"], 0);
+    EXPECT_FALSE(j.contains("last_report")) << "nothing to report before the first reconciliation";
+
+    st.state = "connected";
+    st.last_reconcile_at = 1800000000;
+    st.last_reconcile_ok = true;
+    st.last_report.issued = 3;
+    st.last_report.removed = 1;
+    j = liveqx::mqtt::brokerStatusJson(st);
+    EXPECT_EQ(j["last_report"]["issued"], 3);
+    EXPECT_EQ(j["last_report"]["removed"], 1);
+    EXPECT_EQ(j["last_report"]["failed"], 0);
+    EXPECT_EQ(j["last_reconcile_ok"], true);
+}

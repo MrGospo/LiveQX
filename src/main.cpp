@@ -1462,6 +1462,34 @@ int main(int argc, char* argv[]) {
                 g_running.store(false, std::memory_order_release);
             });
             // fix35 A3.5–A3.9 — mount static UI (or 503-stub if headless).
+            api.setBrokerHooks(
+                [&]() {
+                    // Everything the interface needs to say why the broker is (not) working.
+                    json j = broker_link ? liveqx::mqtt::brokerStatusJson(broker_link->status())
+                                         : json{{"state", "disabled"}, {"detail", ""}};
+                    json cfg_b = json::object();
+                    if (cfg.contains("players") && cfg["players"].is_object() &&
+                        cfg["players"].contains("broker") && cfg["players"]["broker"].is_object())
+                        cfg_b = cfg["players"]["broker"];
+                    j["enabled"]         = cfg_b.value("enabled", false);
+                    j["host"]            = cfg_b.value("host", std::string("127.0.0.1"));
+                    j["port"]            = cfg_b.value("port", 8883);
+                    j["verify_hostname"] = cfg_b.value("verify_hostname", true);
+                    j["reconcile_interval_s"] = cfg_b.value("reconcile_interval_s", 300);
+#ifdef LIVEQX_HAVE_MOSQUITTO
+                    constexpr bool kBuilt = true;
+#else
+                    constexpr bool kBuilt = false;
+#endif
+                    j["readiness"] = {
+                        {"mosquitto_in_build", kBuilt},
+                        {"device_ca", device_ca_provider ? device_ca_provider() != nullptr : false},
+                        {"trust_root", players_service ? !players_service->caCertPem().empty() : false},
+                        {"broker_url_configured",
+                         players_service ? !players_service->settings().mqtt_broker_url.empty() : false}};
+                    return j.dump();
+                },
+                broker_link ? std::function<void()>([&]() { broker_link->requestSync(); }) : std::function<void()>{});
             api.mountUi(paths.uiDir());
             api.start();
             const bool tls_on = !tls_bindings.cert_path.empty() &&

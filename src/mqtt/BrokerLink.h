@@ -19,6 +19,8 @@
 #include "mqtt/BrokerAdmin.h"
 #include "mqtt/MqttClient.h"
 
+#include <nlohmann/json.hpp>
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -67,6 +69,9 @@ struct BrokerLinkStatus {
     bool            last_reconcile_ok{false};
     ReconcileReport last_report;
 };
+
+// The link's status as the API shows it.
+nlohmann::json brokerStatusJson(const BrokerLinkStatus& st);
 
 class BrokerLink {
 public:

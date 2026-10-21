@@ -106,6 +106,8 @@ struct ControlApi::Impl {
     TlsBindings                                    tls_bindings;
     liveqx::net::TrustedProxies                    proxies;
     std::function<void()>                          on_tls_reload;
+    std::function<std::string()>                   broker_status;
+    std::function<void()>                          broker_sync;
     std::mutex                                     metrics_token_mu;
 
     Impl(ChannelManager& m, MetricsCollector* mc, LivezOptions lz,
@@ -446,6 +448,8 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     rbac.registerEndpoint("POST /api/players/{id}/revoke-cert",     rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("POST /api/players/{id}/reissue-token",   rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("GET /api/players/settings",              rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("GET /api/players/broker",                rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("POST /api/players/broker/reconcile",     rbacRole(RbacRole::Admin));
     // The hierarchy all -> object -> group. Administered by admins; reading the
     // tree and moving screens are open to the roles but filtered / checked by the
     // rights an administrator has given (players/PlayerAccess).
@@ -3910,6 +3914,23 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         writeJson(res, 200, json{{"grants", std::move(arr)}});
     });
 
+    // The MQTT broker link: where it stands and a way to nudge it. Registered
+    // before the routes with an {id}, which would otherwise swallow "broker".
+    s.Get("/api/players/broker", [impl](const httplib::Request&, httplib::Response& res) {
+        if (!impl->broker_status) {
+            writeJson(res, 200, json{{"enabled", false}, {"state", "disabled"}});
+            return;
+        }
+        auto j = json::parse(impl->broker_status(), nullptr, false);
+        writeJson(res, 200, j.is_discarded() ? json{{"enabled", false}, {"state", "disabled"}} : j);
+    });
+    s.Post("/api/players/broker/reconcile", [impl, auditPlayer](const httplib::Request&, httplib::Response& res) {
+        if (!impl->broker_sync) { writeJson(res, 409, {{"error", "broker_disabled"}}); return; }
+        impl->broker_sync();
+        auditPlayer("player.broker_reconcile", json::object(), "");
+        writeJson(res, 202, json{{"requested", true}});
+    });
+
     s.Get("/api/players/settings",
           [pls, players_unavailable](const httplib::Request&, httplib::Response& res) {
         if (!pls) { players_unavailable(res); return; }
@@ -6361,6 +6382,11 @@ void ControlApi::stop() {
     if (impl_->stopped.exchange(true)) return;
     if (impl_->server) impl_->server->stop();
     if (impl_->thread.joinable()) impl_->thread.join();
+}
+
+void ControlApi::setBrokerHooks(std::function<std::string()> status, std::function<void()> sync) {
+    impl_->broker_status = std::move(status);
+    impl_->broker_sync   = std::move(sync);
 }
 
 void ControlApi::setOnTlsReload(std::function<void()> cb) {
