@@ -21,6 +21,7 @@ const char* eventTypeName(EventType t) noexcept {
         case EventType::PlayerOffline:       return "player_offline";
         case EventType::PlayerHeartbeat:     return "player_heartbeat";
         case EventType::PlayerVersionChanged:return "player_version_changed";
+        case EventType::PlayerCommand:       return "player_command";
         case EventType::AuditEvent:          return "audit_event";
     }
     return "unknown";
@@ -41,6 +42,7 @@ std::optional<EventType> parseEventType(const std::string& s) noexcept {
     if (s == "player_offline")        return EventType::PlayerOffline;
     if (s == "player_heartbeat")      return EventType::PlayerHeartbeat;
     if (s == "player_version_changed")return EventType::PlayerVersionChanged;
+    if (s == "player_command")        return EventType::PlayerCommand;
     if (s == "audit_event")           return EventType::AuditEvent;
     return std::nullopt;
 }

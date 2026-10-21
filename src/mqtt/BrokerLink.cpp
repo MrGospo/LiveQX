@@ -96,14 +96,23 @@ bool BrokerLink::bringUp(std::string& why) {
     });
     if (!client->start()) { why = client->lastError(); return false; }
 
-    client_ = std::move(client);
-    admin_  = std::move(admin);
+    {
+        std::lock_guard<std::mutex> lk(client_mu_);
+        client_ = std::move(client);
+        admin_  = std::move(admin);
+    }
     serial_ = id.serial;
     was_up_ = false;
     return true;
 }
 
+PublishResult BrokerLink::publish(const Message& m) {
+    std::lock_guard<std::mutex> lk(client_mu_);
+    return client_ ? client_->publish(m) : PublishResult::NotConnected;
+}
+
 void BrokerLink::tearDown() {
+    std::lock_guard<std::mutex> lk(client_mu_);
     if (client_) client_->stop();          // joins its threads before the administrator goes
     admin_.reset();
     client_.reset();

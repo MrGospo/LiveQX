@@ -52,6 +52,7 @@
 #ifdef LIVEQX_HAVE_MOSQUITTO
 #include "mqtt/MosquittoClient.h"
 #endif
+#include "players/CommandService.h"
 #include "players/DeviceApi.h"
 #include "players/EnrollService.h"
 #include "players/PresenceService.h"
@@ -959,9 +960,15 @@ int main(int argc, char* argv[]) {
             liveqx::mqtt::BrokerLink* link{nullptr};
             void poke() { std::lock_guard<std::mutex> lk(mu); if (link) link->requestSync(); }
             void set(liveqx::mqtt::BrokerLink* l) { std::lock_guard<std::mutex> lk(mu); link = l; }
+            liveqx::mqtt::PublishResult publish(const liveqx::mqtt::Message& m) {
+                std::lock_guard<std::mutex> lk(mu);
+                return link ? link->publish(m) : liveqx::mqtt::PublishResult::NotConnected;
+            }
         };
         auto broker_hook = std::make_shared<BrokerHook>();
         std::unique_ptr<liveqx::mqtt::BrokerLink> broker_link;
+        std::unique_ptr<liveqx::players::CommandService> command_service;
+        std::jthread command_sweeper;       // settles commands nobody confirmed in time
         struct BrokerHookDetach {
             std::shared_ptr<BrokerHook> h;
             ~BrokerHookDetach() { if (h) h->set(nullptr); }
@@ -1052,6 +1059,20 @@ int main(int argc, char* argv[]) {
             presence_service = std::make_unique<liveqx::players::PresenceService>(players_db, std::move(pr));
             presence_service->start();
             LOG_INFO("Players: presence — offline after {} s of silence", pr_offline_after_s);
+
+            // Commands to players: sent through the broker link, confirmed by the
+            // player's heartbeat, settled by timeout when it never confirms.
+            liveqx::players::CommandServiceOptions cso;
+            cso.events  = &event_bus;
+            cso.publish = [broker_hook](const liveqx::mqtt::Message& m) { return broker_hook->publish(m); };
+            command_service = std::make_unique<liveqx::players::CommandService>(players_db, *players_service, std::move(cso));
+            command_sweeper = std::jthread([svc = command_service.get()](std::stop_token st) {
+                while (!st.stop_requested()) {
+                    svc->sweep();
+                    for (int i = 0; i < 15 && !st.stop_requested(); ++i)
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+            });
 
             // The MQTT broker (players.broker): the server's standing connection
             // and the upkeep of the players' records on it. Off unless enabled;
@@ -1296,6 +1317,10 @@ int main(int argc, char* argv[]) {
                     dopt.events    = &event_bus;
                     dopt.renew     = renew_service.get();
                     dopt.presence  = presence_service.get();
+                    if (command_service)
+                        dopt.on_command_result = [svc = command_service.get()](
+                            const std::string& pid, const std::string& cid, const std::string& status,
+                            std::optional<std::int64_t> uptime) { svc->onResult(pid, cid, status, uptime); };
                     // Refusals and renewals go into the same HMAC-chained trail
                     // as the admin API; the UI is nudged to refetch over SSE.
                     dopt.audit     = [&audit_logger, &event_bus](const liveqx::players::DeviceAuditEvent& e) {
@@ -1376,7 +1401,7 @@ int main(int argc, char* argv[]) {
                            &master_key, &mounts_mgr, tls_bindings,
                            &time_repo, &time_src, sntp_client.get(),
                            &audit_logger, &audit_rate, players_service.get(),
-                           enroll_service.get());
+                           enroll_service.get(), command_service.get());
             api.setOnTlsReload([&]() {
                 tls_reload_pending.store(true, std::memory_order_release);
                 g_running.store(false, std::memory_order_release);

@@ -171,6 +171,8 @@ add_executable(liveqx-tests
     ../src/utils/ClientIp.cpp
     ../src/players/PlayersDb.cpp
     ../src/players/PlayersService.cpp
+    ../src/players/CommandService.cpp
+    test_command_service.cpp
     ../src/mqtt/BrokerAdmin.cpp
     ../src/mqtt/BrokerLink.cpp
     test_broker_admin.cpp
@@ -351,6 +353,7 @@ add_executable(liveqx-itests
     test_control_api_mounts.cpp
     test_control_api_players.cpp
     test_player_scope_rest.cpp
+    test_player_command_rest.cpp
     test_metrics_mounts.cpp
     ../src/mounts/MountSpec.cpp
     ../src/mounts/RpcProtocol.cpp
@@ -466,6 +469,7 @@ add_executable(liveqx-itests
     ../src/utils/ClientIp.cpp
     ../src/players/PlayersDb.cpp
     ../src/players/PlayersService.cpp
+    ../src/players/CommandService.cpp
     ../src/mqtt/BrokerAdmin.cpp
     ../src/players/EnrollService.cpp
     ../src/players/PlayerAccess.cpp

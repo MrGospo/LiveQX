@@ -538,7 +538,7 @@ TEST_F(PlayersDbTest, ADatabaseOfVersionOneIsMigratedKeepingItsData) {
         sqlite3* raw = nullptr;
         ASSERT_EQ(sqlite3_open(path_.c_str(), &raw), SQLITE_OK);
         ASSERT_EQ(sqlite3_exec(raw, "DROP INDEX idx_players_group; ALTER TABLE players DROP COLUMN group_id;"
-                               "DROP TABLE player_groups; DROP TABLE player_objects;"
+                               "DROP TABLE player_commands; DROP TABLE player_groups; DROP TABLE player_objects;"
                                "DROP TABLE players_settings; PRAGMA user_version = 1;",
                                nullptr, nullptr, nullptr), SQLITE_OK);
         sqlite3_close(raw);
@@ -788,7 +788,7 @@ TEST_F(PlayersDbTest, ADatabaseOfVersionTwoIsMigratedAndItsPlayersGetAPlace) {
         ASSERT_EQ(sqlite3_open(path_.c_str(), &raw), SQLITE_OK);
         ASSERT_EQ(sqlite3_exec(raw,
             "DROP INDEX idx_players_group; ALTER TABLE players DROP COLUMN group_id;"
-            "DROP TABLE player_groups; DROP TABLE player_objects; PRAGMA user_version = 2;",
+            "DROP TABLE player_commands; DROP TABLE player_groups; DROP TABLE player_objects; PRAGMA user_version = 2;",
             nullptr, nullptr, nullptr), SQLITE_OK);
         sqlite3_close(raw);
     }
@@ -811,3 +811,69 @@ TEST_F(PlayersDbTest, AFreshOrEmptyDatabaseGetsNoInventedObjects) {
     EXPECT_TRUE(db_->listGroups(std::nullopt).empty());
 }
 
+
+// ── commands (schema v4) ────────────────────────────────────────────────────
+TEST_F(PlayersDbTest, ADatabaseOfVersionThreeGainsTheCommandLogAndKeepsItsData) {
+    const auto id = enrolled("MIG03");
+    db_.reset();
+    {
+        sqlite3* raw = nullptr;
+        ASSERT_EQ(sqlite3_open(path_.c_str(), &raw), SQLITE_OK);
+        ASSERT_EQ(sqlite3_exec(raw, "DROP TABLE player_commands; PRAGMA user_version = 3;",
+                               nullptr, nullptr, nullptr), SQLITE_OK);
+        sqlite3_close(raw);
+    }
+    PlayersDb upgraded(path_);
+    ASSERT_TRUE(upgraded.open());
+    EXPECT_EQ(upgraded.schemaVersion(), 4);
+    EXPECT_TRUE(upgraded.findPlayer(id).has_value());
+    CommandRow c;
+    c.id = PlayersDb::newId(); c.player_id = id; c.type = "restart_player";
+    c.issued_at = kT0; c.ttl_seconds = 300; c.deadline_at = kT0 + 300;
+    EXPECT_EQ(upgraded.createCommand(c), CommandCreate::Ok);
+}
+
+TEST_F(PlayersDbTest, OnlyOneUnsettledCommandPerScreenAndTypeCanExist) {
+    const auto id = enrolled("CMD01");
+    CommandRow c;
+    c.id = PlayersDb::newId(); c.player_id = id; c.type = "reboot_screen";
+    c.issued_at = kT0; c.ttl_seconds = 300; c.deadline_at = kT0 + 1200;
+    ASSERT_EQ(db_->createCommand(c), CommandCreate::Ok);
+
+    CommandRow second = c;
+    second.id = PlayersDb::newId();
+    std::string busy;
+    EXPECT_EQ(db_->createCommand(second, &busy), CommandCreate::Busy);
+    EXPECT_EQ(busy, c.id);
+
+    CommandRow other = second;
+    other.type = "restart_player";
+    EXPECT_EQ(db_->createCommand(other), CommandCreate::Ok) << "another type is another matter";
+
+    ASSERT_TRUE(db_->settleCommand(c.id, "executed", "executed", kT0 + 10).has_value());
+    EXPECT_FALSE(db_->settleCommand(c.id, "failed", "late", kT0 + 20).has_value()) << "settled once";
+    EXPECT_EQ(db_->findCommand(c.id)->state, "executed");
+    second.id = PlayersDb::newId();
+    EXPECT_EQ(db_->createCommand(second), CommandCreate::Ok) << "settling frees the screen";
+}
+
+TEST_F(PlayersDbTest, TimeoutsTakeOnlyPendingCommandsPastTheirDeadline) {
+    const auto id = enrolled("CMD02");
+    CommandRow early, late, done;
+    early.id = PlayersDb::newId(); early.player_id = id; early.type = "restart_player";
+    early.issued_at = kT0; early.ttl_seconds = 300; early.deadline_at = kT0 + 100;
+    late = early; late.id = PlayersDb::newId(); late.type = "reboot_screen"; late.deadline_at = kT0 + 900;
+    done = early; done.id = PlayersDb::newId(); done.type = "reload_playlist"; done.deadline_at = kT0 + 50;
+    ASSERT_EQ(db_->createCommand(early), CommandCreate::Ok);
+    ASSERT_EQ(db_->createCommand(late), CommandCreate::Ok);
+    ASSERT_EQ(db_->createCommand(done), CommandCreate::Ok);
+    db_->settleCommand(done.id, "executed", "executed", kT0 + 10);
+
+    auto t = db_->timeoutCommands(kT0 + 500);
+    ASSERT_EQ(t.size(), 1u);
+    EXPECT_EQ(t[0].id, early.id);
+    EXPECT_EQ(db_->findCommand(early.id)->state, "timeout");
+    EXPECT_EQ(db_->findCommand(late.id)->state, "pending");
+    EXPECT_EQ(db_->findCommand(done.id)->state, "executed");
+    EXPECT_TRUE(db_->timeoutCommands(kT0 + 500).empty()) << "nothing is timed out twice";
+}

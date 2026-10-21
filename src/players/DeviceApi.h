@@ -78,6 +78,11 @@ struct DeviceApiOptions {
     // write-through one (every heartbeat stored at once, no offline sweeper) —
     // fine for tests, not for a fleet.
     PresenceService*      presence{nullptr};
+    // The player's report on the last command it handled (heartbeat
+    // `last_command_result`), already checked for shape: command id, status,
+    // and the machine's uptime if it was sent. Null = ignored.
+    std::function<void(const std::string& player_id, const std::string& command_id,
+                       const std::string& status, std::optional<std::int64_t> os_uptime_s)> on_command_result;
     // Certificate renewal; null = the route answers 503.
     RenewService*         renew{nullptr};
     std::int64_t          min_renew_interval_s{10};

@@ -142,13 +142,40 @@ struct EventRow {
     std::string  details;
 };
 
+// A command sent to a player, kept until it is settled. States:
+//   pending   sent, waiting for the player to report on it (this blocks a
+//             second command of the same type to the same screen)
+//   executed  the player reports it done
+//   failed    the player refused it (result says why) or the screen did not
+//             restart as ordered
+//   timeout   no confirmation within the time allowed for its type
+//   released  an administrator lifted the block by hand
+//   not_sent  the broker could not take it; it never left the server
+struct CommandRow {
+    std::string                 id;            // UUID, also sent to the player
+    std::string                 player_id;
+    std::string                 type;
+    std::string                 state;
+    std::string                 result;        // the player's status, or a reason
+    std::int64_t                issued_at{0};
+    std::int64_t                ttl_seconds{0};
+    std::int64_t                deadline_at{0};   // when "pending" turns into "timeout"
+    std::optional<std::int64_t> issued_by;
+    std::optional<std::int64_t> finished_at;
+};
+
+enum class CommandCreate { Ok, Busy, Storage };
+
 class PlayersDb {
 public:
-    static constexpr int kSchemaVersion = 3;
+    static constexpr int kSchemaVersion = 4;
     static constexpr std::size_t kMaxPayloadBytes = 64 * 1024;
     static constexpr std::size_t kMaxNameBytes = 120;
     static constexpr std::int64_t kMaxTokenTtlSeconds = 365LL * 86400;
     static constexpr std::size_t kMaxSettingBytes = 32 * 1024;
+
+    // A fresh random UUID v4 (lowercase), the form player and command ids take.
+    static std::string newId();
 
     explicit PlayersDb(std::filesystem::path path);
     ~PlayersDb();
@@ -198,6 +225,21 @@ public:
     bool        finishEnrollment(std::int64_t token_id, const CertRow& cert, std::int64_t now = 0);
     // A renewed certificate for an active player.
     bool        recordRenewal(const CertRow& cert, std::int64_t now = 0);
+
+    // ── commands ─────────────────────────────────────────────────────────
+    // Records a pending command. Busy: the screen already has a pending command
+    // of this type (its id is returned in `busy_id`). Decided inside one
+    // statement, so two requests cannot both win.
+    CommandCreate createCommand(const CommandRow& row, std::string* busy_id = nullptr);
+    std::optional<CommandRow> findCommand(const std::string& id);
+    std::vector<CommandRow>   commandsOf(const std::string& player_id, std::size_t limit);
+    std::vector<CommandRow>   pendingCommandsOf(const std::string& player_id);
+    // Settles a command that is still pending. Returns the row as settled, or
+    // nullopt if it was not pending (already settled, or unknown).
+    std::optional<CommandRow> settleCommand(const std::string& id, const std::string& state,
+                                            const std::string& result, std::int64_t now = 0);
+    // Turns every pending command whose deadline has passed into "timeout".
+    std::vector<CommandRow>   timeoutCommands(std::int64_t now = 0);
 
     // ── certificates and CRLs ────────────────────────────────────────────
     std::vector<CertRow> certsOf(const std::string& player_id);

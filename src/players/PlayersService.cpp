@@ -100,6 +100,16 @@ std::optional<int> parseTtlDays(const std::string& v) {
     return d;
 }
 
+// Seconds, 30 s .. 1 day.
+std::optional<int> parseSeconds(const std::string& v) {
+    if (v.empty() || v.size() > 6 ||
+        !std::all_of(v.begin(), v.end(), [](unsigned char c) { return std::isdigit(c); }))
+        return std::nullopt;
+    const int n = std::stoi(v);
+    if (n < 30 || n > 86400) return std::nullopt;
+    return n;
+}
+
 }  // namespace
 
 PlayersService::PlayersService(PlayersDb& db, PlayersServiceOptions opts)
@@ -118,6 +128,10 @@ PlayersSettings PlayersService::settings() {
     s.ca_cert_pem     = get("ca_cert_pem");
     if (auto d = parseTtlDays(get("token_ttl_days"))) s.token_ttl_days = *d;
     if (auto p = get("clock_policy"); validPolicy(p)) s.clock_policy = p;
+    if (auto n = parseSeconds(get("command_ttl_s"))) s.command_ttl_s = *n;
+    if (auto n = parseSeconds(get("confirm_timeout_restart_s"))) s.confirm_timeout_restart_s = *n;
+    if (auto n = parseSeconds(get("confirm_timeout_reboot_s"))) s.confirm_timeout_reboot_s = *n;
+    if (auto n = parseSeconds(get("confirm_timeout_reload_s"))) s.confirm_timeout_reload_s = *n;
     return s;
 }
 
@@ -127,7 +141,11 @@ nlohmann::json PlayersService::toJson(const PlayersSettings& s) {
             {"mqtt_broker_url", s.mqtt_broker_url},
             {"ca_cert_pem", s.ca_cert_pem},
             {"token_ttl_days", s.token_ttl_days},
-            {"clock_policy", s.clock_policy}};
+            {"clock_policy", s.clock_policy},
+            {"command_ttl_s", s.command_ttl_s},
+            {"confirm_timeout_restart_s", s.confirm_timeout_restart_s},
+            {"confirm_timeout_reboot_s", s.confirm_timeout_reboot_s},
+            {"confirm_timeout_reload_s", s.confirm_timeout_reload_s}};
 }
 
 std::string PlayersService::updateSettings(const std::map<std::string, std::string>& patch) {
@@ -138,6 +156,10 @@ std::string PlayersService::updateSettings(const std::map<std::string, std::stri
         else if (k == "ca_cert_pem")     { if (!v.empty() && !parsesAsCertificate(v)) return "invalid_ca_cert_pem"; }
         else if (k == "token_ttl_days")  { if (!v.empty() && !parseTtlDays(v))        return "invalid_token_ttl_days"; }
         else if (k == "clock_policy")    { if (!v.empty() && !validPolicy(v))         return "invalid_clock_policy"; }
+        else if (k == "command_ttl_s" || k == "confirm_timeout_restart_s" ||
+                 k == "confirm_timeout_reboot_s" || k == "confirm_timeout_reload_s") {
+            if (!v.empty() && !parseSeconds(v)) return "invalid_" + k;
+        }
         else return "unknown_setting";
     }
     return db_.setSettings(patch) ? "" : "storage_error";

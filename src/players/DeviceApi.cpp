@@ -295,7 +295,14 @@ bool DeviceApi::startListener() {
 
         // Online/offline, version changes and the batched status write all
         // live in PresenceService.
-        presence_->onHeartbeat(id, version, sanitiseHeartbeat(body).dump(), startup);
+        const json clean = sanitiseHeartbeat(body);
+        presence_->onHeartbeat(id, version, clean.dump(), startup);
+        if (opts_.on_command_result && clean.contains("last_command_result")) {
+            const auto& r = clean["last_command_result"];
+            std::optional<std::int64_t> uptime;
+            if (clean.contains("os_uptime_seconds")) uptime = clean["os_uptime_seconds"].get<std::int64_t>();
+            opts_.on_command_result(id, r["id"].get<std::string>(), r["status"].get<std::string>(), uptime);
+        }
         res.status = 204;
     });
 

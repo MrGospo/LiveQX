@@ -78,6 +78,10 @@ public:
 
     BrokerLinkStatus status() const;
 
+    // Publishes through the standing connection. NotConnected while there is
+    // none (not set up yet, broker down); never blocks on the network.
+    PublishResult publish(const Message& m);
+
 private:
     void run();
     bool bringUp(std::string& why);
@@ -95,7 +99,8 @@ private:
     bool             poke_{false};              // wake the thread (a request or a state change)
     BrokerLinkStatus status_;
 
-    // Touched by the thread only.
+    // Replaced by the thread only, read by publish() under client_mu_.
+    mutable std::mutex client_mu_;
     std::unique_ptr<IMqttClient> client_;
     std::unique_ptr<BrokerAdmin> admin_;
     std::string                  serial_;

@@ -34,6 +34,13 @@ struct PlayersSettings {
     std::string ca_cert_pem;         // optional override of the server TLS root
     int         token_ttl_days{7};
     std::string clock_policy{"strict"};   // default for new players
+    // Commands (A12/B13), seconds. The broker drops a command that waits longer
+    // than its lifetime; a screen that does not confirm in time gets "no
+    // confirmation" and its block is lifted.
+    int         command_ttl_s{300};
+    int         confirm_timeout_restart_s{300};
+    int         confirm_timeout_reboot_s{1200};
+    int         confirm_timeout_reload_s{120};
 };
 
 struct PlayersServiceOptions {
@@ -86,6 +93,7 @@ public:
     // All-or-nothing. Returns "" or an error code: unknown_setting,
     // invalid_server_url, invalid_device_api_url, invalid_mqtt_broker_url,
     // invalid_ca_cert_pem, invalid_token_ttl_days, invalid_clock_policy,
+    // invalid_command_ttl_s, invalid_confirm_timeout_restart_s, ..._reboot_s, ..._reload_s,
     // storage_error.
     std::string updateSettings(const std::map<std::string, std::string>& patch);
 

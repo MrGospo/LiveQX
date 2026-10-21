@@ -319,6 +319,26 @@ CREATE TABLE players_settings (
 );
 )SQL";
 
+// Version 3 -> 4: the log of commands sent to players.
+constexpr const char* kSchemaV4 = R"SQL(
+CREATE TABLE player_commands (
+    id          TEXT PRIMARY KEY,
+    player_id   TEXT NOT NULL,
+    type        TEXT NOT NULL,
+    state       TEXT NOT NULL,
+    result      TEXT NOT NULL DEFAULT '',
+    issued_at   INTEGER NOT NULL,
+    ttl_seconds INTEGER NOT NULL,
+    deadline_at INTEGER NOT NULL,
+    issued_by   INTEGER,
+    finished_at INTEGER
+);
+CREATE INDEX idx_commands_player ON player_commands(player_id, issued_at);
+CREATE INDEX idx_commands_pending ON player_commands(deadline_at) WHERE state = 'pending';
+-- One unsettled command per screen and type: the block against a second click.
+CREATE UNIQUE INDEX ux_commands_pending ON player_commands(player_id, type) WHERE state = 'pending';
+)SQL";
+
 }  // namespace
 
 const char* toString(PlayerState s) noexcept {
@@ -394,6 +414,7 @@ bool PlayersDb::open() {
         if (version < 1) ok = ok && execSql(raw, kSchemaV1);
         if (version < 2) ok = ok && execSql(raw, kSchemaV2);
         if (version < 3) ok = ok && execSql(raw, kSchemaV3);
+        if (version < 4) ok = ok && execSql(raw, kSchemaV4);
         // Future versions: add `if (version < 4) ...` steps here, in order.
         ok = ok && execSql(raw, ("PRAGMA user_version = " + std::to_string(kSchemaVersion) + ";").c_str());
         if (!ok || !tx.commit()) {
@@ -1166,6 +1187,108 @@ std::vector<EventRow> PlayersDb::events(const std::string& player_id, std::size_
         e.id = s.num(0); e.player_id = s.str(1); e.ts = s.num(2);
         e.kind = s.str(3); e.details = s.str(4);
         out.push_back(std::move(e));
+    }
+    return out;
+}
+
+namespace {
+constexpr const char* kCommandCols =
+    "id,player_id,type,state,result,issued_at,ttl_seconds,deadline_at,issued_by,finished_at";
+CommandRow readCommand(const Stmt& s) {
+    CommandRow c;
+    c.id = s.str(0); c.player_id = s.str(1); c.type = s.str(2); c.state = s.str(3); c.result = s.str(4);
+    c.issued_at = s.num(5); c.ttl_seconds = s.num(6); c.deadline_at = s.num(7);
+    c.issued_by = s.optNum(8); c.finished_at = s.optNum(9);
+    return c;
+}
+}  // namespace
+
+CommandCreate PlayersDb::createCommand(const CommandRow& row, std::string* busy_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return CommandCreate::Storage;
+    Stmt s(db_, "INSERT INTO player_commands(id,player_id,type,state,result,issued_at,ttl_seconds,"
+                "deadline_at,issued_by) VALUES(?,?,?,'pending','',?,?,?,?)");
+    s.text(1, row.id).text(2, row.player_id).text(3, row.type).i64(4, row.issued_at)
+     .i64(5, row.ttl_seconds).i64(6, row.deadline_at).opt(7, row.issued_by);
+    if (s.exec()) return CommandCreate::Ok;
+    if (sqlite3_extended_errcode(db_) == SQLITE_CONSTRAINT_UNIQUE) {
+        if (busy_id) {
+            Stmt q(db_, "SELECT id FROM player_commands WHERE player_id=? AND type=? AND state='pending'");
+            q.text(1, row.player_id).text(2, row.type);
+            if (q.step() == SQLITE_ROW) *busy_id = q.str(0);
+        }
+        return CommandCreate::Busy;
+    }
+    return CommandCreate::Storage;
+}
+
+std::string PlayersDb::newId() { return newUuidV4(); }
+
+std::optional<CommandRow> PlayersDb::findCommand(const std::string& id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return std::nullopt;
+    Stmt s(db_, (std::string("SELECT ") + kCommandCols + " FROM player_commands WHERE id=?").c_str());
+    s.text(1, id);
+    if (s.step() != SQLITE_ROW) return std::nullopt;
+    return readCommand(s);
+}
+
+std::vector<CommandRow> PlayersDb::commandsOf(const std::string& player_id, std::size_t limit) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<CommandRow> out;
+    if (!db_ || limit == 0) return out;
+    Stmt s(db_, (std::string("SELECT ") + kCommandCols +
+                 " FROM player_commands WHERE player_id=? ORDER BY issued_at DESC, rowid DESC LIMIT ?").c_str());
+    s.text(1, player_id).i64(2, static_cast<std::int64_t>(limit));
+    while (s.step() == SQLITE_ROW) out.push_back(readCommand(s));
+    return out;
+}
+
+std::vector<CommandRow> PlayersDb::pendingCommandsOf(const std::string& player_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<CommandRow> out;
+    if (!db_) return out;
+    Stmt s(db_, (std::string("SELECT ") + kCommandCols +
+                 " FROM player_commands WHERE player_id=? AND state='pending' ORDER BY issued_at").c_str());
+    s.text(1, player_id);
+    while (s.step() == SQLITE_ROW) out.push_back(readCommand(s));
+    return out;
+}
+
+std::optional<CommandRow> PlayersDb::settleCommand(const std::string& id, const std::string& state,
+                                                   const std::string& result, std::int64_t now) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return std::nullopt;
+    {
+        Stmt s(db_, "UPDATE player_commands SET state=?, result=?, finished_at=? WHERE id=? AND state='pending'");
+        s.text(1, state).text(2, result).i64(3, nowOr(now)).text(4, id);
+        if (!s.exec() || s.changes() == 0) return std::nullopt;
+    }
+    Stmt q(db_, (std::string("SELECT ") + kCommandCols + " FROM player_commands WHERE id=?").c_str());
+    q.text(1, id);
+    if (q.step() != SQLITE_ROW) return std::nullopt;
+    return readCommand(q);
+}
+
+std::vector<CommandRow> PlayersDb::timeoutCommands(std::int64_t now) {
+    const std::int64_t t = nowOr(now);
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<CommandRow> out;
+    if (!db_) return out;
+    {
+        Stmt s(db_, (std::string("SELECT ") + kCommandCols +
+                     " FROM player_commands WHERE state='pending' AND deadline_at <= ?").c_str());
+        s.i64(1, t);
+        while (s.step() == SQLITE_ROW) out.push_back(readCommand(s));
+    }
+    for (auto& c : out) {
+        Stmt u(db_, "UPDATE player_commands SET state='timeout', result='no_confirmation', finished_at=? "
+                    "WHERE id=? AND state='pending'");
+        u.i64(1, t).text(2, c.id);
+        u.exec();
+        c.state = "timeout";
+        c.result = "no_confirmation";
+        c.finished_at = t;
     }
     return out;
 }

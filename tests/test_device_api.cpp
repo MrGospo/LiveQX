@@ -111,8 +111,14 @@ struct PlayerCreds {
     fs::path    key_path;
 };
 
+struct CommandReport {
+    std::string player, command, status;
+    std::optional<std::int64_t> os_uptime;
+};
+
 class DeviceApiTest : public ::testing::Test {
 protected:
+    std::vector<CommandReport> reports_;          // guarded by audit_mu_
     fs::path dir_;
     std::unique_ptr<liveqx::auth::MasterKey> mk_;
     std::unique_ptr<PlayersDb> db_;
@@ -166,6 +172,11 @@ protected:
         o.now        = [this] { return now_.load(); };
         o.events     = &bus_;
         o.min_heartbeat_interval_s = 10;
+        o.on_command_result = [this](const std::string& pid, const std::string& cid, const std::string& status,
+                                     std::optional<std::int64_t> uptime) {
+            std::lock_guard<std::mutex> lk(audit_mu_);
+            reports_.push_back({pid, cid, status, uptime});
+        };
         api_ = std::make_unique<DeviceApi>(*db_, revocations_, std::move(o));
         ASSERT_TRUE(api_->start());
     }
@@ -411,6 +422,41 @@ TEST_F(DeviceApiTest, UnknownPathsAndWrongMethodsDoNothingEvenWithACertificate) 
     EXPECT_EQ(cli->Get(path(p.id, "heartbeat"))->status, 404) << "heartbeat is PATCH only";
     EXPECT_EQ(cli->Get("/api/channels")->status, 404) << "the admin API does not exist on this port";
     EXPECT_FALSE(db_->status(p.id).has_value());
+}
+
+// ── command reports ─────────────────────────────────────────────────────────
+TEST_F(DeviceApiTest, TheReportOnTheLastCommandIsPassedOnWithTheMachinesUptime) {
+    auto p = pair("Lobby");
+    auto cli = clientWith(p);
+    const std::string cid = "0b8f5c1e-3a2d-4c47-9a6e-1f2d3c4b5a69";
+    ASSERT_EQ(cli->Patch(path(p.id, "heartbeat"),
+                         hb({{"last_command_result", {{"id", cid}, {"status", "executed"}}},
+                             {"os_uptime_seconds", 95}}),
+                         "application/json")->status, 204);
+    std::lock_guard<std::mutex> lk(audit_mu_);
+    ASSERT_EQ(reports_.size(), 1u);
+    EXPECT_EQ(reports_[0].player, p.id) << "the player is the one named by its certificate";
+    EXPECT_EQ(reports_[0].command, cid);
+    EXPECT_EQ(reports_[0].status, "executed");
+    ASSERT_TRUE(reports_[0].os_uptime.has_value());
+    EXPECT_EQ(*reports_[0].os_uptime, 95);
+}
+
+TEST_F(DeviceApiTest, ABadReportIsNotPassedOnAndAHeartbeatWithoutOneStaysQuiet) {
+    auto p = pair("Lobby");
+    auto cli = clientWith(p);
+    ASSERT_EQ(cli->Patch(path(p.id, "heartbeat"), hb(), "application/json")->status, 204);
+    now_ += 11;
+    ASSERT_EQ(cli->Patch(path(p.id, "heartbeat"),
+                         hb({{"last_command_result", {{"id", "not-a-uuid"}, {"status", "executed"}}}}),
+                         "application/json")->status, 204);
+    now_ += 11;
+    ASSERT_EQ(cli->Patch(path(p.id, "heartbeat"),
+                         hb({{"last_command_result", {{"id", "0b8f5c1e-3a2d-4c47-9a6e-1f2d3c4b5a69"},
+                                                      {"status", "exploded"}}}}),
+                         "application/json")->status, 204);
+    std::lock_guard<std::mutex> lk(audit_mu_);
+    EXPECT_TRUE(reports_.empty());
 }
 
 // ── heartbeat input ─────────────────────────────────────────────────────────

@@ -259,6 +259,7 @@ set(SOURCES
     src/utils/CredentialStore.cpp
     src/players/PlayersDb.cpp
     src/players/PlayersService.cpp
+    src/players/CommandService.cpp
     src/mqtt/BrokerAdmin.cpp
     src/mqtt/BrokerLink.cpp
     src/players/EnrollService.cpp

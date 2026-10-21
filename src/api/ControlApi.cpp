@@ -49,6 +49,7 @@ extern "C" {
 #include "plugins/PluginManager.h"
 #include "mounts/MountManager.h"
 #include "mounts/MountSpec.h"
+#include "players/CommandService.h"
 #include "players/EnrollService.h"
 #include "players/PlayerAccess.h"
 #include "utils/ClientIp.h"
@@ -101,6 +102,7 @@ struct ControlApi::Impl {
     liveqx::audit::AuditRateLimiter*       audit_rate;
     liveqx::players::PlayersService*       players;
     liveqx::players::EnrollService*        enroll;
+    liveqx::players::CommandService*       commands;
     TlsBindings                                    tls_bindings;
     liveqx::net::TrustedProxies                    proxies;
     std::function<void()>                          on_tls_reload;
@@ -125,13 +127,14 @@ struct ControlApi::Impl {
          liveqx::audit::AuditRateLimiter* arl,
          liveqx::players::PlayersService* pls,
          liveqx::players::EnrollService* enr,
+         liveqx::players::CommandService* cmd,
          const TlsBindings& tls)
         : bind_addr(tls.bind.empty() ? std::string{"0.0.0.0"} : tls.bind),
           manager(m), metrics(mc), livez(lz), gateways(gw), auth(a),
           ldap_repo(lr), smtp_repo(sr), rbac(rb), events(ev), preview(pv),
           stress(st), plugins(pl), master_key(mk), mounts(mn),
           time_repo(tr), time_src(ts), sntp(sn),
-          audit(al), audit_rate(arl), players(pls), enroll(enr),
+          audit(al), audit_rate(arl), players(pls), enroll(enr), commands(cmd),
           tls_bindings(tls) {
         if (!tls.trust_proxy_cidrs.empty()) {
             std::vector<std::string> bad;
@@ -453,6 +456,9 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     rbac.registerEndpoint("POST /api/player-objects/{id}/groups",   rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("PUT /api/player-groups/{id}",            rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("DELETE /api/player-groups/{id}",         rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("POST /api/players/{id}/command",         rbacRole(RbacRole::Operator)); // and the right to command that screen
+    rbac.registerEndpoint("GET /api/players/{id}/commands",         rbacRole(RbacRole::Viewer));
+    rbac.registerEndpoint("POST /api/players/{id}/commands/{cid}/release", rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("PUT /api/players/{id}/group",            rbacRole(RbacRole::Operator)); // needs the move right on both groups
     rbac.registerEndpoint("GET /api/auth/users/{uid}/player-grants", rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("PUT /api/auth/users/{uid}/player-grants", rbacRole(RbacRole::Admin));
@@ -997,12 +1003,13 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
                        liveqx::audit::AuditLogger* audit,
                        liveqx::audit::AuditRateLimiter* audit_rate,
                        liveqx::players::PlayersService* players,
-                       liveqx::players::EnrollService* enroll)
+                       liveqx::players::EnrollService* enroll,
+                       liveqx::players::CommandService* commands)
     : impl_(std::make_unique<Impl>(manager, metrics, livez, gateways, auth,
                                    ldap_repo, smtp_repo, rbac, events,
                                    preview, stress, plugins, master_key,
                                    mounts, time_repo, time_src, sntp,
-                                   audit, audit_rate, players, enroll, tls)),
+                                   audit, audit_rate, players, enroll, commands, tls)),
       port_(port) {
     auto* impl = impl_.get();
     auto& s    = *impl_->server;
@@ -1021,6 +1028,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     auto* mn   = impl_->mounts;
     auto* pls  = impl_->players;
     auto* enr  = impl_->enroll;
+    auto* cmds = impl_->commands;
     auto* tr   = impl_->time_repo;
     auto* ts   = impl_->time_src;
     auto* sn   = impl_->sntp;
@@ -3486,6 +3494,87 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
                          {"to_group", gid}, {"to_group_name", target->name}},
                     id);
         writeJson(res, 200, playerJson(*pls->db().findPlayer(id), pls->db().status(id), loadHierarchy(pls->db())));
+    });
+
+
+    // ─── Commands to a single screen (A12/A13, B13) ─────────────────────────
+    // The command goes out over MQTT; the player confirms it in a heartbeat.
+    // Until then the screen is blocked against the same command.
+    auto commandJson = [](const liveqx::players::CommandRow& c) {
+        json j = {{"id", c.id}, {"player_id", c.player_id}, {"type", c.type}, {"state", c.state},
+                  {"result", c.result}, {"issued_at", c.issued_at}, {"ttl_seconds", c.ttl_seconds},
+                  {"deadline_at", c.deadline_at}};
+        if (c.issued_by)   j["issued_by"]   = *c.issued_by;
+        if (c.finished_at) j["finished_at"] = *c.finished_at;
+        return j;
+    };
+
+    s.Post(R"(/api/players/([^/]+)/command)",
+           [pls, cmds, players_unavailable, loadHierarchy, placeOf, accessFor, auditPlayer, mountActorOf, commandJson]
+           (const httplib::Request& req, httplib::Response& res) {
+        if (!pls || !cmds) { players_unavailable(res); return; }
+        auto access = accessFor(req);
+        if (!access) { writeJson(res, 401, {{"error", "unauthorized"}}); return; }
+        const std::string id = req.matches[1];
+        json body;
+        if (!parseJsonBody(req, res, body)) return;
+        if (!body.is_object() || !body.contains("type") || !body["type"].is_string()) {
+            writeJson(res, 400, {{"error", "invalid_type"}});
+            return;
+        }
+        const std::string type = body["type"].get<std::string>();
+        auto p = pls->db().findPlayer(id);
+        const auto hier = loadHierarchy(pls->db());
+        if (!p || !access->canView(placeOf(*p, hier))) { writeJson(res, 404, {{"error", "not_found"}}); return; }
+        if (!access->canCommandPlayer(placeOf(*p, hier))) { writeJson(res, 403, {{"error", "forbidden"}}); return; }
+        const auto [actor_id, actor_name] = mountActorOf(req);
+        const auto out = cmds->sendToPlayer(id, type, actor_id);
+        if (!out.ok) {
+            int code = 400;
+            json err = {{"error", out.error}};
+            if (out.error == "command_in_progress") { code = 409; err["command_id"] = out.busy_id; }
+            else if (out.error == "player_not_active") code = 409;
+            else if (out.error == "player_not_found")  code = 404;
+            else if (out.error == "broker_unavailable") code = 503;
+            else if (out.error == "storage_error")     code = 500;
+            writeJson(res, code, err);
+            return;
+        }
+        auditPlayer("player.command_sent",
+                    json{{"type", type}, {"command_id", out.row.id}, {"name", p->name},
+                         {"group_id", p->group_id.value_or(0)}, {"online", out.player_online}},
+                    id);
+        json j = commandJson(out.row);
+        j["player_online"] = out.player_online;
+        writeJson(res, 202, j);
+    });
+
+    s.Get(R"(/api/players/([^/]+)/commands)",
+          [pls, players_unavailable, loadHierarchy, placeOf, accessFor, commandJson]
+          (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        auto access = accessFor(req);
+        if (!access) { writeJson(res, 401, {{"error", "unauthorized"}}); return; }
+        const std::string id = req.matches[1];
+        auto p = pls->db().findPlayer(id);
+        const auto hier = loadHierarchy(pls->db());
+        if (!p || !access->canView(placeOf(*p, hier))) { writeJson(res, 404, {{"error", "not_found"}}); return; }
+        json arr = json::array();
+        for (const auto& c : pls->db().commandsOf(id, 50)) arr.push_back(commandJson(c));
+        writeJson(res, 200, json{{"commands", std::move(arr)}});
+    });
+
+    s.Post(R"(/api/players/([^/]+)/commands/([^/]+)/release)",
+           [pls, cmds, players_unavailable, auditPlayer, commandJson]
+           (const httplib::Request& req, httplib::Response& res) {
+        if (!pls || !cmds) { players_unavailable(res); return; }
+        const std::string id = req.matches[1], cid = req.matches[2];
+        auto c = pls->db().findCommand(cid);
+        if (!c || c->player_id != id) { writeJson(res, 404, {{"error", "command_not_found"}}); return; }
+        auto released = cmds->release(cid);
+        if (!released) { writeJson(res, 409, {{"error", "not_pending"}}); return; }
+        auditPlayer("player.command_release", json{{"command_id", cid}, {"type", c->type}}, id);
+        writeJson(res, 200, commandJson(*released));
     });
 
     // ─── Who may see and command which players (B13) ────────────────────────
