@@ -37,6 +37,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -76,6 +77,12 @@ public:
     // emergency file is also unwritable, the event is dropped and
     // dropped_overflow is incremented. Under normal operation this is 0.
     void log(AuditEvent ev);
+
+    // Says where an event happened, from what it is about (the target). Called
+    // when the event is logged — i.e. at the moment it happens — for events the
+    // producer did not place itself. Set once at startup; null = no places.
+    void setScopeResolver(std::function<std::optional<AuditScope>(const AuditEvent&)> r);
+    std::optional<AuditScope> resolveScope(const AuditEvent& ev) const;
 
     // Broken-glass path — synchronous, never queues. Tries DB first; on
     // failure writes to the emergency file. Used by the auth login path
@@ -133,6 +140,10 @@ private:
     // Bumped by the writer thread around drainBatch so flushForTesting
     // can tell "queue empty" from "queue empty but batch still landing".
     std::atomic<int>          in_flight_batches_{0};
+
+    void fillScope(AuditEvent& ev) const;
+    mutable std::mutex resolver_mu_;
+    std::function<std::optional<AuditScope>(const AuditEvent&)> scope_resolver_;
 
     mutable std::atomic<std::uint64_t> stat_enqueued_        {0};
     mutable std::atomic<std::uint64_t> stat_written_db_      {0};

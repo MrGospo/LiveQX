@@ -4,6 +4,11 @@
 
 #include <chrono>
 #include <filesystem>
+#include <optional>
+#include <set>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include <sqlite3.h>
 
@@ -224,4 +229,265 @@ TEST_F(AuditDbTest, PurgeRespectsCategoryScope) {
     EXPECT_EQ(1, removed);
     // Auth row survives even though it is older than cutoff.
     EXPECT_EQ(1, db.count({}));
+}
+
+// ── the place an event is about (schema v2) ────────────────────────────────
+namespace {
+
+using nlohmann::json;
+
+// What a version-1 binary wrote: the same fields, in the same way, with no
+// place in the signature. Kept here, independent of the current code, so the
+// test proves that rows written years ago still verify.
+std::string oldCanonical(std::int64_t ts, const std::string& category, const std::string& action,
+                         const std::string& summary) {
+    json j;
+    j["ts_unix_ms"]     = ts;
+    j["category"]       = category;
+    j["action"]         = action;
+    j["actor_user_id"]  = 42;
+    j["actor_username"] = "admin";
+    j["actor_role"]     = "admin";
+    j["actor_ip"]       = "10.0.0.5";
+    j["target_type"]    = "player";
+    j["target_id"]      = "abc";
+    j["http_method"]    = "POST";
+    j["http_path"]      = "/api/players";
+    j["http_status"]    = 200;
+    j["elapsed_ms"]     = 0;
+    j["summary"]        = summary;
+    j["details_json"]   = "{}";
+    j["request_id"]     = "";
+    return j.dump();
+}
+
+// A real version-1 database with `n` signed rows.
+void writeVersionOneDatabase(const fs::path& path, MasterKey& key, int n) {
+    sqlite3* raw = nullptr;
+    ASSERT_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(raw, R"sql(
+CREATE TABLE audit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts_unix_ms INTEGER NOT NULL, category TEXT NOT NULL,
+    action TEXT NOT NULL, actor_user_id INTEGER, actor_username TEXT, actor_role TEXT, actor_ip TEXT,
+    target_type TEXT, target_id TEXT, http_method TEXT, http_path TEXT, http_status INTEGER NOT NULL DEFAULT 0,
+    elapsed_ms INTEGER NOT NULL DEFAULT 0, summary TEXT, details_json TEXT NOT NULL DEFAULT '{}',
+    request_id TEXT, prev_mac BLOB, mac BLOB NOT NULL, key_fingerprint TEXT NOT NULL,
+    legacy INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX idx_audit_events_ts ON audit_events(ts_unix_ms DESC);
+CREATE TABLE audit_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+PRAGMA user_version = 1;)sql", nullptr, nullptr, nullptr), SQLITE_OK);
+
+    std::vector<std::uint8_t> prev;
+    for (int i = 0; i < n; ++i) {
+        const std::int64_t ts = 1'700'000'000'000 + i;
+        const std::string summary = "old row " + std::to_string(i);
+        std::string msg(reinterpret_cast<const char*>(prev.data()), prev.size());
+        msg += oldCanonical(ts, "player", "player.register", summary);
+        const auto mac = key.hmacSha256(msg);
+        sqlite3_stmt* st = nullptr;
+        ASSERT_EQ(sqlite3_prepare_v2(raw,
+            "INSERT INTO audit_events(ts_unix_ms,category,action,actor_user_id,actor_username,actor_role,actor_ip,"
+            "target_type,target_id,http_method,http_path,http_status,elapsed_ms,summary,details_json,request_id,"
+            "prev_mac,mac,key_fingerprint,legacy) VALUES(?,?,?,42,'admin','admin','10.0.0.5','player','abc','POST',"
+            "'/api/players',200,0,?,'{}','',?,?,?,0)", -1, &st, nullptr), SQLITE_OK);
+        sqlite3_bind_int64(st, 1, ts);
+        sqlite3_bind_text(st, 2, "player", -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 3, "player.register", -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 4, summary.c_str(), -1, SQLITE_TRANSIENT);
+        if (prev.empty()) sqlite3_bind_null(st, 5); else sqlite3_bind_blob(st, 5, prev.data(), static_cast<int>(prev.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_blob(st, 6, mac.data(), static_cast<int>(mac.size()), SQLITE_TRANSIENT);
+        const std::string fp = key.fingerprint();
+        sqlite3_bind_text(st, 7, fp.c_str(), -1, SQLITE_TRANSIENT);
+        ASSERT_EQ(sqlite3_step(st), SQLITE_DONE);
+        sqlite3_finalize(st);
+        prev.assign(mac.begin(), mac.end());
+    }
+    // The chain tail the old binary kept.
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string hex;
+    for (auto b : prev) { hex.push_back(kHex[b >> 4]); hex.push_back(kHex[b & 15]); }
+    sqlite3_stmt* st = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(raw, "INSERT INTO audit_meta(key,value) VALUES('last_mac',?)", -1, &st, nullptr), SQLITE_OK);
+    sqlite3_bind_text(st, 1, hex.c_str(), -1, SQLITE_TRANSIENT);
+    ASSERT_EQ(sqlite3_step(st), SQLITE_DONE);
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+}
+
+AuditEvent placed(const std::string& action, std::optional<std::int64_t> object, std::optional<std::int64_t> group,
+                  Category c = Category::Player) {
+    AuditEvent e = makeEvent(action, c);
+    e.target_type = "player";
+    e.target_id = "p";
+    e.scope_object_id = object;
+    e.scope_group_id = group;
+    return e;
+}
+
+}  // namespace
+
+TEST_F(AuditDbTest, ARowWrittenBeforePlacesExistedStillVerifiesAndTheChainContinuesWithPlacedRows) {
+    const auto path = tmp_dir_ / "audit.db";
+    writeVersionOneDatabase(path, *key_, 3);
+
+    AuditDb db(path, key_.get());
+    ASSERT_TRUE(db.open()) << "a version-1 database is migrated, not refused";
+    auto before = db.verifyChain();
+    EXPECT_EQ(before.scanned, 3);
+    EXPECT_EQ(before.first_bad_id, 0) << before.first_bad_reason << " — old rows verify exactly as they always did";
+
+    auto old_rows = db.list({});
+    ASSERT_EQ(old_rows.size(), 3u);
+    for (const auto& r : old_rows) {
+        EXPECT_FALSE(r.scoped);
+        EXPECT_FALSE(r.scope_object_id.has_value());
+    }
+
+    auto a = placed("player.command_sent", 7, 71);
+    auto b = placed("player.move", 7, 72);
+    ASSERT_TRUE(db.insert(a).has_value());
+    std::vector<AuditEvent> batch = {b, placed("player.revoke", std::nullopt, std::nullopt)};
+    ASSERT_EQ(db.insertBatch(batch), 2u);
+
+    auto after = db.verifyChain();
+    EXPECT_EQ(after.scanned, 6);
+    EXPECT_EQ(after.first_bad_id, 0) << after.first_bad_reason << " — one unbroken chain across the two formats";
+    auto all = db.list({});
+    int scoped = 0;
+    for (const auto& r : all) scoped += r.scoped;
+    EXPECT_EQ(scoped, 3) << "every new row is of the new format, even without a place";
+}
+
+TEST_F(AuditDbTest, ThePlaceIsInsideTheSignatureOfANewRowAndTheFormatFlagCannotBeFlipped) {
+    const auto path = tmp_dir_ / "audit.db";
+    {
+        AuditDb db(path, key_.get());
+        ASSERT_TRUE(db.open());
+        auto e1 = placed("player.command_sent", 7, 71);
+        auto e2 = placed("player.command_sent", 7, 72);
+        ASSERT_TRUE(db.insert(e1).has_value());
+        ASSERT_TRUE(db.insert(e2).has_value());
+        ASSERT_EQ(db.verifyChain().first_bad_id, 0);
+    }
+    auto tamper = [&](const char* sql) {
+        sqlite3* raw = nullptr;
+        ASSERT_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+        ASSERT_EQ(sqlite3_exec(raw, sql, nullptr, nullptr, nullptr), SQLITE_OK);
+        sqlite3_close(raw);
+    };
+    {   // someone moves an event to a group they would rather it were in
+        tamper("UPDATE audit_events SET scope_group_id = 99 WHERE id = 1;");
+        AuditDb db(path, key_.get());
+        ASSERT_TRUE(db.open());
+        auto v = db.verifyChain();
+        EXPECT_EQ(v.first_bad_id, 1);
+        EXPECT_EQ(v.first_bad_reason, "mac_mismatch");
+    }
+    tamper("UPDATE audit_events SET scope_group_id = 71 WHERE id = 1;");
+    {   // ...or strips the place by claiming the row is of the old format
+        tamper("UPDATE audit_events SET scoped = 0 WHERE id = 2;");
+        AuditDb db(path, key_.get());
+        ASSERT_TRUE(db.open());
+        auto v = db.verifyChain();
+        EXPECT_EQ(v.first_bad_id, 2);
+        EXPECT_EQ(v.first_bad_reason, "mac_mismatch");
+    }
+}
+
+TEST_F(AuditDbTest, AnOldRowCannotBeDressedUpWithAPlaceEither) {
+    const auto path = tmp_dir_ / "audit.db";
+    writeVersionOneDatabase(path, *key_, 2);
+    {
+        sqlite3* raw = nullptr;
+        ASSERT_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+        // the migration adds the columns; here we need them to forge with
+        { AuditDb db(path, key_.get()); ASSERT_TRUE(db.open()); }
+        ASSERT_EQ(sqlite3_exec(raw, "UPDATE audit_events SET scoped = 1, scope_group_id = 5 WHERE id = 1;",
+                               nullptr, nullptr, nullptr), SQLITE_OK);
+        sqlite3_close(raw);
+    }
+    AuditDb db(path, key_.get());
+    ASSERT_TRUE(db.open());
+    EXPECT_EQ(db.verifyChain().first_bad_id, 1);
+}
+
+TEST_F(AuditDbTest, MigratingTwiceChangesNothing) {
+    const auto path = tmp_dir_ / "audit.db";
+    writeVersionOneDatabase(path, *key_, 2);
+    { AuditDb db(path, key_.get()); ASSERT_TRUE(db.open()); }
+    AuditDb db(path, key_.get());
+    ASSERT_TRUE(db.open());
+    EXPECT_EQ(db.count({}), 2);
+    EXPECT_EQ(db.verifyChain().first_bad_id, 0);
+}
+
+TEST_F(AuditDbTest, EventsCanBeFilteredByObjectAndByGroup) {
+    AuditDb db(tmp_dir_ / "audit.db", key_.get());
+    ASSERT_TRUE(db.open());
+    for (auto [o, g] : std::vector<std::pair<int, int>>{{1, 11}, {1, 12}, {2, 21}}) {
+        auto e = placed("player.command_sent", o, g);
+        ASSERT_TRUE(db.insert(e).has_value());
+    }
+    auto none = placed("player.settings_update", std::nullopt, std::nullopt);
+    ASSERT_TRUE(db.insert(none).has_value());
+
+    AuditFilter f;
+    f.scope_object_id = 1;
+    EXPECT_EQ(db.count(f), 2) << "an object finds the events of all its groups";
+    f.scope_group_id = 12;
+    EXPECT_EQ(db.count(f), 1);
+    AuditFilter g;
+    g.scope_group_id = 21;
+    ASSERT_EQ(db.list(g).size(), 1u);
+    EXPECT_EQ(*db.list(g)[0].scope_object_id, 2);
+    EXPECT_EQ(db.count({}), 4) << "no place filter = everything, placed or not";
+}
+
+TEST_F(AuditDbTest, SomeoneWithRightsOnPlacesSeesPlayerEventsOfThosePlacesOnly) {
+    AuditDb db(tmp_dir_ / "audit.db", key_.get());
+    ASSERT_TRUE(db.open());
+    auto add = [&](const char* action, int o, int g, Category c = Category::Player) {
+        auto e = placed(action, o, g, c);
+        ASSERT_TRUE(db.insert(e).has_value());
+    };
+    add("a-g11", 1, 11);
+    add("a-g12", 1, 12);
+    add("a-g21", 2, 21);
+    add("system-in-g11", 1, 11, Category::System);        // right place, wrong kind of event
+    auto unplaced = placed("unplaced", std::nullopt, std::nullopt);
+    ASSERT_TRUE(db.insert(unplaced).has_value());
+
+    auto actions = [&](AuditFilter f) {
+        std::set<std::string> out;
+        for (const auto& e : db.list(f)) out.insert(e.action);
+        return out;
+    };
+    AuditFilter by_group;
+    by_group.restrict_to_places = true;
+    by_group.allowed_group_ids = {11};
+    EXPECT_EQ(actions(by_group), (std::set<std::string>{"a-g11"})) << "not the system row, not the sibling group";
+    EXPECT_EQ(db.count(by_group), 1) << "the count obeys the same rule";
+
+    AuditFilter by_object;
+    by_object.restrict_to_places = true;
+    by_object.allowed_object_ids = {1};
+    EXPECT_EQ(actions(by_object), (std::set<std::string>{"a-g11", "a-g12"}));
+
+    AuditFilter both;
+    both.restrict_to_places = true;
+    both.allowed_object_ids = {2};
+    both.allowed_group_ids = {12};
+    EXPECT_EQ(actions(both), (std::set<std::string>{"a-g12", "a-g21"}));
+
+    AuditFilter nothing;
+    nothing.restrict_to_places = true;
+    EXPECT_TRUE(actions(nothing).empty()) << "no right to any place is no events, never all of them";
+    EXPECT_EQ(db.count(nothing), 0);
+
+    AuditFilter narrowed = by_object;
+    narrowed.scope_group_id = 12;                         // asking for less is fine
+    EXPECT_EQ(actions(narrowed), (std::set<std::string>{"a-g12"}));
+    AuditFilter escaping = by_group;
+    escaping.scope_group_id = 21;                         // asking for more is not
+    EXPECT_TRUE(actions(escaping).empty());
 }

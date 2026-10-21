@@ -34,6 +34,7 @@
 #include "auth/JwtIssuer.h"
 #include "auth/MasterKey.h"
 #include "auth/RbacMiddleware.h"
+#include "players/AuditScope.h"
 #include "players/PlayersDb.h"
 #include "players/PlayersService.h"
 #include "utils/Tls.h"
@@ -101,6 +102,9 @@ struct ScopeFixture {
         G11 = pdb->createGroup(O1, "G11")->id;
         G12 = pdb->createGroup(O1, "G12")->id;
         G21 = pdb->createGroup(O2, "G21")->id;
+        audit_logger->setScopeResolver([this](const liveqx::audit::AuditEvent& e) {
+            return liveqx::players::auditScopeOf(*pdb, e);
+        });
         P11 = pdb->createPlayer("screen-11", 1, "strict", 86400, 1'800'000'000, G11)->player.id;
         P12 = pdb->createPlayer("screen-12", 1, "strict", 86400, 1'800'000'000, G12)->player.id;
         P21 = pdb->createPlayer("screen-21", 1, "strict", 86400, 1'800'000'000, G21)->player.id;
@@ -131,6 +135,27 @@ struct ScopeFixture {
         authdb.reset();
         std::error_code ec;
         fs::remove_all(tmp, ec);
+    }
+
+    // Waits until everything logged so far is in the database.
+    void settleAudit() {
+        for (int i = 0; i < 150; ++i) {
+            const auto st = audit_logger->stats();
+            if (st.queue_depth == 0 && st.written_db >= st.enqueued) return;
+            std::this_thread::sleep_for(20ms);
+        }
+        ADD_FAILURE() << "the audit queue did not drain";
+    }
+    // A row about a screen, as the server would write it (the place is worked out at logging).
+    void logAbout(const std::string& action, const std::string& player,
+                  liveqx::audit::Category cat = liveqx::audit::Category::Player) {
+        liveqx::audit::AuditEvent e;
+        e.category = cat;
+        e.action = action;
+        e.target_type = "player";
+        e.target_id = player;
+        e.actor_username = "someone";
+        audit_logger->log(std::move(e));
     }
 
     httplib::Client client() const {
@@ -410,4 +435,154 @@ TEST(PlayerScopeRest, PlayerManagementOutsideMovesStaysWithAdministrators) {
     EXPECT_EQ(cli.Post(("/api/players/" + f.P11 + "/reissue-token").c_str(), bearer(op.token), "", "application/json")->status, 403);
     EXPECT_EQ(cli.Post("/api/player-objects", bearer(op.token), R"({"name":"x"})", "application/json")->status, 403);
     EXPECT_EQ(cli.Get("/api/players/settings", bearer(op.token))->status, 403);
+}
+
+// ── audit by place (B13) ────────────────────────────────────────────────────
+namespace {
+json eventsOf(ScopeFixture& f, const ScopeFixture::Person& who, const std::string& query, int expect_status = 200) {
+    auto cli = f.client();
+    auto r = cli.Get(("/api/audit/events?" + query).c_str(), bearer(who.token));
+    EXPECT_TRUE(r);
+    if (!r) return json::object();
+    EXPECT_EQ(r->status, expect_status) << r->body;
+    return json::parse(r->body, nullptr, false);
+}
+std::set<std::string> targets(const json& body) {
+    std::set<std::string> out;
+    if (body.is_object() && body.contains("events"))
+        for (const auto& e : body["events"]) out.insert(e["target_id"].get<std::string>());
+    return out;
+}
+json auditGrant(const char* scope, std::int64_t id) {
+    return {{"scope", scope}, {"id", id}, {"can_command_group", false}, {"can_command_object", false},
+            {"can_move", false}, {"can_view_audit", true}};
+}
+}  // namespace
+
+TEST(PlayerAuditRest, AnAdministratorFiltersByObjectByGroupOrSeesAll) {
+    ScopeFixture f(kBasePort + 20);
+    auto admin = f.person("root", sa::Role::Admin);
+    f.logAbout("test.touch", f.P11);
+    f.logAbout("test.touch", f.P12);
+    f.logAbout("test.touch", f.P21);
+    f.settleAudit();
+
+    EXPECT_EQ(targets(eventsOf(f, admin, "action=test.touch")), (std::set<std::string>{f.P11, f.P12, f.P21}));
+    EXPECT_EQ(targets(eventsOf(f, admin, "action=test.touch&object_id=" + std::to_string(f.O1))),
+              (std::set<std::string>{f.P11, f.P12})) << "an object finds the events of all its groups";
+    EXPECT_EQ(targets(eventsOf(f, admin, "action=test.touch&group_id=" + std::to_string(f.G21))),
+              (std::set<std::string>{f.P21}));
+    auto one = eventsOf(f, admin, "action=test.touch&group_id=" + std::to_string(f.G11));
+    ASSERT_EQ(one["events"].size(), 1u);
+    EXPECT_EQ(one["events"][0]["group_id"], f.G11);
+    EXPECT_EQ(one["events"][0]["object_id"], f.O1);
+    EXPECT_EQ(eventsOf(f, admin, "group_id=abc", 400)["error"], "bad_group_id");
+}
+
+TEST(PlayerAuditRest, SomeoneGivenTheAuditOfAGroupSeesPlayerEventsOfThatGroupOnly) {
+    ScopeFixture f(kBasePort + 21);
+    auto admin = f.person("root", sa::Role::Admin);
+    auto op = f.person("op", sa::Role::Operator);
+    ASSERT_EQ(f.putGrants(admin, op.id, json::array({auditGrant("group", f.G11)}))->status, 200);
+    f.logAbout("test.touch", f.P11);
+    f.logAbout("test.touch", f.P12);
+    f.logAbout("test.touch", f.P21);
+    f.logAbout("test.touch", f.P11, liveqx::audit::Category::System);       // right place, but not a player event
+    f.settleAudit();
+
+    auto body = eventsOf(f, op, "action=test.touch");
+    EXPECT_EQ(targets(body), (std::set<std::string>{f.P11}));
+    EXPECT_EQ(body["total"], 1) << "the count obeys the same rule";
+    for (const auto& e : body["events"]) EXPECT_EQ(e["category"], "player");
+}
+
+TEST(PlayerAuditRest, AnObjectAuditCoversItsGroupsAndAViewerMayHaveIt) {
+    ScopeFixture f(kBasePort + 22);
+    auto admin = f.person("root", sa::Role::Admin);
+    auto view = f.person("view", sa::Role::Viewer);
+    ASSERT_EQ(f.putGrants(admin, view.id, json::array({auditGrant("object", f.O1)}))->status, 200);
+    f.logAbout("test.touch", f.P11);
+    f.logAbout("test.touch", f.P12);
+    f.logAbout("test.touch", f.P21);
+    f.settleAudit();
+    EXPECT_EQ(targets(eventsOf(f, view, "action=test.touch")), (std::set<std::string>{f.P11, f.P12}));
+}
+
+TEST(PlayerAuditRest, WithoutTheAuditMarkThereIsNothingToReadAndTheRightIsGoneAtOnceWhenTakenAway) {
+    ScopeFixture f(kBasePort + 23);
+    auto admin = f.person("root", sa::Role::Admin);
+    auto op = f.person("op", sa::Role::Operator);
+    f.logAbout("test.touch", f.P11);
+    f.settleAudit();
+
+    eventsOf(f, op, "action=test.touch", 403);                                       // no rights at all
+    json no_mark = {{"scope", "group"}, {"id", f.G11}, {"can_command_group", true}, {"can_command_object", false},
+                    {"can_move", false}, {"can_view_audit", false}};
+    ASSERT_EQ(f.putGrants(admin, op.id, json::array({no_mark}))->status, 200);
+    eventsOf(f, op, "action=test.touch", 403);                                       // seeing and commanding is not reading the audit
+
+    ASSERT_EQ(f.putGrants(admin, op.id, json::array({auditGrant("group", f.G11)}))->status, 200);
+    EXPECT_EQ(targets(eventsOf(f, op, "action=test.touch")), (std::set<std::string>{f.P11}));
+    ASSERT_EQ(f.putGrants(admin, op.id, json::array())->status, 200);
+    eventsOf(f, op, "action=test.touch", 403);                                       // same token, no re-login
+}
+
+TEST(PlayerAuditRest, AskingForAnotherPlaceNarrowsToNothingNeverWidens) {
+    ScopeFixture f(kBasePort + 24);
+    auto admin = f.person("root", sa::Role::Admin);
+    auto op = f.person("op", sa::Role::Operator);
+    ASSERT_EQ(f.putGrants(admin, op.id, json::array({auditGrant("group", f.G11)}))->status, 200);
+    f.logAbout("test.touch", f.P11);
+    f.logAbout("test.touch", f.P12);
+    f.settleAudit();
+    EXPECT_TRUE(targets(eventsOf(f, op, "action=test.touch&group_id=" + std::to_string(f.G12))).empty());
+    EXPECT_TRUE(targets(eventsOf(f, op, "action=test.touch&object_id=" + std::to_string(f.O2))).empty());
+    EXPECT_EQ(targets(eventsOf(f, op, "action=test.touch&object_id=" + std::to_string(f.O1))), (std::set<std::string>{f.P11}));
+}
+
+TEST(PlayerAuditRest, TheSystemAuditStaysForAdministrators) {
+    ScopeFixture f(kBasePort + 25);
+    auto admin = f.person("root", sa::Role::Admin);
+    auto op = f.person("op", sa::Role::Operator);
+    ASSERT_EQ(f.putGrants(admin, op.id, json::array({auditGrant("object", f.O1)}))->status, 200);
+    auto cli = f.client();
+    for (const char* path : {"/api/audit/verify", "/api/audit/stats", "/api/audit/categories"})
+        EXPECT_EQ(cli.Get(path, bearer(op.token))->status, 403) << path;
+    EXPECT_EQ(cli.Get("/api/audit/verify", bearer(admin.token))->status, 200);
+}
+
+TEST(PlayerAuditRest, ARowAboutADeletedScreenKeepsTheGroupItWasIn) {
+    ScopeFixture f(kBasePort + 26);
+    auto admin = f.person("root", sa::Role::Admin);
+    auto op = f.person("op", sa::Role::Operator);
+    ASSERT_EQ(f.putGrants(admin, op.id, json::array({auditGrant("group", f.G12)}))->status, 200);
+    auto cli = f.client();
+    ASSERT_EQ(cli.Delete(("/api/players/" + f.P12).c_str(), bearer(admin.token))->status, 200);
+    f.settleAudit();
+
+    auto body = eventsOf(f, op, "action=player.delete");
+    ASSERT_EQ(body["events"].size(), 1u) << "placed by the handler, because the screen is gone when the row is written";
+    EXPECT_EQ(body["events"][0]["target_id"], f.P12);
+    EXPECT_EQ(body["events"][0]["group_id"], f.G12);
+    EXPECT_EQ(json::parse(cli.Get("/api/audit/verify", bearer(admin.token))->body)["ok"], true);
+}
+
+TEST(PlayerAuditRest, AMoveIsFiledUnderTheNewPlaceAndEventsThatAreNotAboutAPlaceAreNotSeenByThePlacedReaders) {
+    ScopeFixture f(kBasePort + 27);
+    auto admin = f.person("root", sa::Role::Admin);
+    auto op = f.person("op", sa::Role::Operator);
+    ASSERT_EQ(f.putGrants(admin, op.id, json::array({auditGrant("group", f.G12)}))->status, 200);
+    auto cli = f.client();
+    auto mv = cli.Put(("/api/players/" + f.P11 + "/group").c_str(), bearer(admin.token),
+                      json{{"group_id", f.G12}}.dump(), "application/json");
+    ASSERT_EQ(mv->status, 200) << mv->body;
+    f.settleAudit();
+
+    auto moved = eventsOf(f, op, "action=player.move");
+    ASSERT_EQ(moved["events"].size(), 1u) << "whoever receives a screen can see that it arrived";
+    EXPECT_EQ(moved["events"][0]["group_id"], f.G12);
+    // The grants update (about a person, not a place) is not for them.
+    EXPECT_TRUE(targets(eventsOf(f, op, "action=player.grants_update")).empty());
+    EXPECT_EQ(eventsOf(f, op, "action=player.grants_update")["total"], 0);
+    EXPECT_GE(eventsOf(f, admin, "action=player.grants_update")["total"].get<int>(), 1);
 }

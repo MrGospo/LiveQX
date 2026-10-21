@@ -69,7 +69,30 @@ bool AuditLogger::shouldRejectMutation() const noexcept {
     return queue_.size() > kBacklogHardCap;
 }
 
+void AuditLogger::setScopeResolver(std::function<std::optional<AuditScope>(const AuditEvent&)> r) {
+    std::lock_guard<std::mutex> lk(resolver_mu_);
+    scope_resolver_ = std::move(r);
+}
+
+std::optional<AuditScope> AuditLogger::resolveScope(const AuditEvent& ev) const {
+    std::function<std::optional<AuditScope>(const AuditEvent&)> r;
+    {
+        std::lock_guard<std::mutex> lk(resolver_mu_);
+        r = scope_resolver_;
+    }
+    return r ? r(ev) : std::nullopt;
+}
+
+void AuditLogger::fillScope(AuditEvent& ev) const {
+    if (ev.scope_object_id || ev.scope_group_id) return;           // the producer said where
+    if (auto sc = resolveScope(ev)) {
+        ev.scope_object_id = sc->object_id;
+        ev.scope_group_id  = sc->group_id;
+    }
+}
+
 void AuditLogger::log(AuditEvent ev) {
+    fillScope(ev);
     if (ev.ts_unix_ms == 0) ev.ts_unix_ms = nowUnixMs();
     stat_enqueued_.fetch_add(1, std::memory_order_relaxed);
 
@@ -100,6 +123,7 @@ void AuditLogger::log(AuditEvent ev) {
 }
 
 void AuditLogger::logSyncBrokenGlass(AuditEvent ev) {
+    fillScope(ev);
     if (ev.ts_unix_ms == 0) ev.ts_unix_ms = nowUnixMs();
     stat_enqueued_.fetch_add(1, std::memory_order_relaxed);
 
@@ -254,6 +278,8 @@ std::string AuditLogger::toJsonLine(const AuditEvent& ev) {
     j["summary"]        = ev.summary;
     j["details_json"]   = ev.details_json;
     j["request_id"]     = ev.request_id;
+    j["scope_object_id"] = ev.scope_object_id ? json(*ev.scope_object_id) : json(nullptr);
+    j["scope_group_id"]  = ev.scope_group_id  ? json(*ev.scope_group_id)  : json(nullptr);
     return j.dump();
 }
 

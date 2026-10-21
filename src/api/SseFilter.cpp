@@ -22,6 +22,29 @@ bool playerEventVisible(const liveqx::auth::RequestContext& ctx, const liveqx::e
     return liveqx::players::PlayerAccess::canViewWith(ctx.role, ctx.player_grants, place);
 }
 
+// A hint that an audit row was written. Beyond administrators, only those who were
+// given the audit of the place it is about hear of it — and only player events.
+bool auditEventVisible(const liveqx::auth::RequestContext& ctx, const liveqx::events::Event& e) noexcept {
+    if (ctx.role == liveqx::auth::Role::Admin) return true;
+    try {
+        if (!e.payload.is_object()) return false;
+        auto cat = e.payload.find("category");
+        if (cat == e.payload.end() || !cat->is_string() || cat->get<std::string>() != "player") return false;
+        std::optional<std::int64_t> object, group;
+        if (auto it = e.payload.find("scope_object_id"); it != e.payload.end() && it->is_number_integer())
+            object = it->get<std::int64_t>();
+        if (auto it = e.payload.find("scope_group_id"); it != e.payload.end() && it->is_number_integer())
+            group = it->get<std::int64_t>();
+        for (const auto& g : ctx.player_grants) {
+            if (!g.can_view_audit) continue;
+            if (g.scope == liveqx::auth::PlayerScopeGrant::Scope::Object && object && *object == g.scope_id) return true;
+            if (g.scope == liveqx::auth::PlayerScopeGrant::Scope::Group && group && *group == g.scope_id) return true;
+        }
+    } catch (...) {
+    }
+    return false;
+}
+
 }  // namespace
 
 bool sseEventVisibleTo(const liveqx::auth::RequestContext& ctx,
@@ -30,7 +53,7 @@ bool sseEventVisibleTo(const liveqx::auth::RequestContext& ctx,
     using Role      = liveqx::auth::Role;
     switch (e.type) {
         case EventType::AuditEvent:
-            return ctx.role == Role::Admin;
+            return auditEventVisible(ctx, e);
         case EventType::PluginStatusChange:
         case EventType::StressRunStarted:
         case EventType::StressRunFinished:

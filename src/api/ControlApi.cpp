@@ -520,7 +520,7 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     // Enterprise audit trail (state/audit.db). Admin-only: rows include
     // IPs, target ids and sanitised payloads that should never leak to
     // operator/viewer.
-    rbac.registerEndpoint("GET /api/audit/events",       rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("GET /api/audit/events",       rbacRole(RbacRole::Viewer)); // below the administrator: only the places given the audit of (checked in the handler)
     rbac.registerEndpoint("GET /api/audit/verify",       rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("GET /api/audit/categories",   rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("GET /api/audit/stats",        rbacRole(RbacRole::Admin));
@@ -627,6 +627,9 @@ struct AuditReqCtx {
     std::string target_type_override;
     std::string target_id_override;
     std::optional<liveqx::audit::Category> category_override;
+    // Where the event happened, when the handler knows better than a lookup at
+    // log time can (the thing is gone by then: a deleted screen, group).
+    std::optional<liveqx::audit::AuditScope> scope_override;
 };
 thread_local AuditReqCtx g_audit_ctx;
 
@@ -653,6 +656,12 @@ void setAuditContextOverride(std::string_view action,
 // the route lives under /api/players).
 void setAuditCategoryOverride(liveqx::audit::Category c) {
     g_audit_ctx.category_override = c;
+}
+
+// Places the current request's audit row at a given object / group. Needed for
+// things that no longer exist once the handler is done (a deleted screen).
+void setAuditScopeOverride(std::optional<std::int64_t> object_id, std::optional<std::int64_t> group_id) {
+    g_audit_ctx.scope_override = liveqx::audit::AuditScope{object_id, group_id};
 }
 
 // Login/refresh/logout stay reachable even when the audit backlog is
@@ -840,6 +849,15 @@ void installAuditPostHandler(httplib::Server& s,
                         ? req.get_header_value("Content-Type") : std::string{});
             }
 
+            // Where it happened: what the handler said, else where the target is now.
+            if (g_audit_ctx.scope_override) {
+                ev.scope_object_id = g_audit_ctx.scope_override->object_id;
+                ev.scope_group_id  = g_audit_ctx.scope_override->group_id;
+            } else if (auto sc = audit->resolveScope(ev)) {
+                ev.scope_object_id = sc->object_id;
+                ev.scope_group_id  = sc->group_id;
+            }
+
             // Publish an SSE hint so open audit-trail views can refetch
             // without polling. Payload is a compact snapshot — id/mac
             // aren't known here (assigned by the writer thread), and
@@ -856,6 +874,9 @@ void installAuditPostHandler(httplib::Server& s,
                     {"request_id",  ev.request_id},
                     {"actor_username", ev.actor_username},
                 };
+                // People who may read the audit of some places hear only about those.
+                if (ev.scope_object_id) payload["scope_object_id"] = *ev.scope_object_id;
+                if (ev.scope_group_id)  payload["scope_group_id"]  = *ev.scope_group_id;
                 events->publish(liveqx::events::EventType::AuditEvent,
                                 /*channel_id=*/-1, std::move(payload));
             }
@@ -3461,6 +3482,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         if (!pls) { players_unavailable(res); return; }
         const std::int64_t id = std::stoll(req.matches[1]);
         const auto before = pls->db().findGroup(id);
+        if (before) setAuditScopeOverride(before->object_id, id);       // gone after this call
         const auto r = pls->db().deleteGroup(id);
         if (r != liveqx::players::GroupResult::Ok) { writeJson(res, groupStatusFor(r), {{"error", groupErrorName(r)}}); return; }
         if (au) au->dropPlayerGrantsForScope(liveqx::auth::PlayerScopeGrant::Scope::Group, id);
@@ -4149,6 +4171,8 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         const std::string id = req.matches[1];
         std::string name;
         if (auto p = pls->db().findPlayer(id)) name = p->name;
+        // The screen will be gone: say where it was while it can still be asked.
+        if (auto place = pls->db().placeOfPlayer(id)) setAuditScopeOverride(place->object_id, place->group_id);
         auto out = pls->remove(id, *reason);
         if (!out.found) { writeJson(res, 404, {{"error", "not_found"}}); return; }
         auditPlayer("player.delete",
@@ -4821,6 +4845,8 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         if (!readI64("from_ts",       out.from_ts_ms))    return false;
         if (!readI64("to_ts",         out.to_ts_ms))      return false;
         if (!readI64("actor_user_id", out.actor_user_id)) return false;
+        if (!readI64("object_id",     out.scope_object_id)) return false;
+        if (!readI64("group_id",      out.scope_group_id))  return false;
         if (req.has_param("category")) {
             auto c = categoryFromString(req.get_param_value("category"));
             if (!c) { err = "bad_category"; return false; }
@@ -4868,6 +4894,8 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             {"key_fingerprint", e.key_fingerprint},
             {"legacy",     e.legacy},
         };
+        if (e.scope_object_id) one["object_id"] = *e.scope_object_id;
+        if (e.scope_group_id)  one["group_id"]  = *e.scope_group_id;
         if (e.actor_user_id) one["actor_user_id"] = *e.actor_user_id;
         else                 one["actor_user_id"] = nullptr;
         if (!e.mac.empty())      one["mac"]      = macToHex(e.mac);
@@ -4883,7 +4911,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     };
 
     s.Get("/api/audit/events",
-          [al, audit_unavailable, parseAuditFilter, auditEventToJson]
+          [al, au, audit_unavailable, parseAuditFilter, auditEventToJson, accessFor, mountActorOf]
           (const httplib::Request& req, httplib::Response& res) {
         if (!al || !al->db() || !al->db()->ok()) { audit_unavailable(res); return; }
         liveqx::audit::AuditFilter f;
@@ -4891,6 +4919,25 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         if (!parseAuditFilter(req, f, err)) {
             writeJson(res, 400, {{"error", err}});
             return;
+        }
+        // Administrators read everything. Anyone else reads player events of the
+        // objects and groups an administrator gave them the audit of — nothing
+        // from the system audit — and the limit is part of the query itself.
+        auto access = accessFor(req);
+        if (!access) { writeJson(res, 401, {{"error", "unauthorized"}}); return; }
+        if (!access->isAdmin()) {
+            const auto [actor_id, actor_name] = mountActorOf(req);
+            f.restrict_to_places = true;
+            if (actor_id && au)
+                for (const auto& g : au->playerGrantsOf(*actor_id)) {
+                    if (!g.can_view_audit) continue;
+                    if (g.scope == liveqx::auth::PlayerScopeGrant::Scope::Object) f.allowed_object_ids.push_back(g.scope_id);
+                    else                                                           f.allowed_group_ids.push_back(g.scope_id);
+                }
+            if (f.allowed_object_ids.empty() && f.allowed_group_ids.empty()) {
+                writeJson(res, 403, {{"error", "forbidden"}});
+                return;
+            }
         }
         auto* db = al->db();
         const auto total  = db->count(f);

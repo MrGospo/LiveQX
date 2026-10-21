@@ -29,7 +29,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr int  kSchemaVersion   = 1;
+constexpr int  kSchemaVersion   = 2;
 constexpr int  kMaxListLimit    = 1000;
 constexpr auto kMetaLastMacKey  = "last_mac";  // hex-encoded
 
@@ -77,6 +77,20 @@ CREATE TABLE IF NOT EXISTS audit_meta (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
 );
+)sql";
+
+// Version 1 -> 2: the place an event is about. Old rows keep scoped = 0 and are
+// verified by the old rule; new rows carry the place inside their signature.
+constexpr const char* kSchemaSqlV2 = R"sql(
+BEGIN IMMEDIATE;
+ALTER TABLE audit_events ADD COLUMN scoped INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE audit_events ADD COLUMN scope_object_id INTEGER;
+ALTER TABLE audit_events ADD COLUMN scope_group_id INTEGER;
+CREATE INDEX IF NOT EXISTS idx_audit_events_scope_object
+    ON audit_events(scope_object_id, ts_unix_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_events_scope_group
+    ON audit_events(scope_group_id, ts_unix_ms DESC);
+COMMIT;
 )sql";
 
 std::int64_t nowUnixMs() {
@@ -205,6 +219,12 @@ bool AuditDb::runMigrations() {
     if (existing < 1) {
         if (!exec(kSchemaSqlV1)) return false;
     }
+    if (existing < 2) {
+        if (!exec(kSchemaSqlV2)) {
+            exec("ROLLBACK;");                 // all or nothing: a half-migrated table must not stay
+            return false;
+        }
+    }
     if (existing < kSchemaVersion) {
         const std::string set_pragma =
             "PRAGMA user_version=" + std::to_string(kSchemaVersion) + ";";
@@ -304,6 +324,12 @@ std::string AuditDb::canonicalize(const AuditEvent& e) {
     j["summary"]        = e.summary;
     j["details_json"]   = e.details_json;
     j["request_id"]     = e.request_id;
+    // Rows of the current format sign the place too. Appended LAST and only for
+    // them, so the bytes of every older row are what they have always been.
+    if (e.scoped) {
+        j["scope_object_id"] = e.scope_object_id.has_value() ? json(*e.scope_object_id) : json(nullptr);
+        j["scope_group_id"]  = e.scope_group_id.has_value()  ? json(*e.scope_group_id)  : json(nullptr);
+    }
     return j.dump();
 }
 
@@ -312,6 +338,7 @@ std::optional<std::int64_t> AuditDb::insert(AuditEvent& e) {
     if (!db_ || !key_ || !key_->loaded()) return std::nullopt;
 
     if (e.ts_unix_ms == 0) e.ts_unix_ms = nowUnixMs();
+    e.scoped = true;                         // the current format (see canonicalize)
     e.prev_mac = last_mac_;
 
     // HMAC input = prev_mac || canonical(record)
@@ -332,8 +359,9 @@ std::optional<std::int64_t> AuditDb::insert(AuditEvent& e) {
         "  target_type, target_id, "
         "  http_method, http_path, http_status, elapsed_ms, "
         "  summary, details_json, request_id, "
-        "  prev_mac, mac, key_fingerprint, legacy) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        "  prev_mac, mac, key_fingerprint, legacy, "
+        "  scoped, scope_object_id, scope_group_id) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     if (sqlite3_prepare_v2(db_, kSql, -1, &st, nullptr) != SQLITE_OK) {
         LOG_ERROR("AuditDb::insert prepare failed: {}", sqlite3_errmsg(db_));
         return std::nullopt;
@@ -363,6 +391,9 @@ std::optional<std::int64_t> AuditDb::insert(AuditEvent& e) {
                        static_cast<int>(e.mac.size()), SQLITE_TRANSIENT);
     sqlite3_bind_text (st, i++, e.key_fingerprint.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int  (st, i++, e.legacy ? 1 : 0);
+    sqlite3_bind_int  (st, i++, 1);
+    if (e.scope_object_id) sqlite3_bind_int64(st, i++, *e.scope_object_id); else sqlite3_bind_null(st, i++);
+    if (e.scope_group_id)  sqlite3_bind_int64(st, i++, *e.scope_group_id);  else sqlite3_bind_null(st, i++);
 
     const int rc = sqlite3_step(st);
     sqlite3_finalize(st);
@@ -395,8 +426,9 @@ std::size_t AuditDb::insertBatch(std::vector<AuditEvent>& batch) {
         "  target_type, target_id, "
         "  http_method, http_path, http_status, elapsed_ms, "
         "  summary, details_json, request_id, "
-        "  prev_mac, mac, key_fingerprint, legacy) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        "  prev_mac, mac, key_fingerprint, legacy, "
+        "  scoped, scope_object_id, scope_group_id) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     if (sqlite3_prepare_v2(db_, kSql, -1, &st, nullptr) != SQLITE_OK) {
         LOG_ERROR("AuditDb::insertBatch prepare failed: {}", sqlite3_errmsg(db_));
         sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
@@ -409,6 +441,7 @@ std::size_t AuditDb::insertBatch(std::vector<AuditEvent>& batch) {
     std::size_t written = 0;
     for (auto& e : batch) {
         if (e.ts_unix_ms == 0) e.ts_unix_ms = nowUnixMs();
+        e.scoped = true;                     // the current format (see canonicalize)
         e.prev_mac = chain;
 
         std::string msg;
@@ -447,6 +480,9 @@ std::size_t AuditDb::insertBatch(std::vector<AuditEvent>& batch) {
                            static_cast<int>(e.mac.size()), SQLITE_TRANSIENT);
         sqlite3_bind_text (st, i++, e.key_fingerprint.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int  (st, i++, e.legacy ? 1 : 0);
+        sqlite3_bind_int  (st, i++, 1);
+        if (e.scope_object_id) sqlite3_bind_int64(st, i++, *e.scope_object_id); else sqlite3_bind_null(st, i++);
+        if (e.scope_group_id)  sqlite3_bind_int64(st, i++, *e.scope_group_id);  else sqlite3_bind_null(st, i++);
 
         if (sqlite3_step(st) != SQLITE_DONE) {
             LOG_ERROR("AuditDb::insertBatch row {} step failed: {}",
@@ -492,7 +528,8 @@ Query buildListQuery(const AuditFilter& f, bool count_only) {
                "target_type, target_id, "
                "http_method, http_path, http_status, elapsed_ms, "
                "summary, details_json, request_id, "
-               "prev_mac, mac, key_fingerprint, legacy "
+               "prev_mac, mac, key_fingerprint, legacy, "
+               "scoped, scope_object_id, scope_group_id "
                "FROM audit_events";
     }
 
@@ -534,6 +571,33 @@ Query buildListQuery(const AuditFilter& f, bool count_only) {
     if (!f.request_id.empty()) {
         where.push_back("request_id = ?");
         q.texts.emplace_back(idx++, f.request_id);
+    }
+    if (f.scope_object_id) {
+        where.push_back("scope_object_id = ?");
+        q.ints.emplace_back(idx++, *f.scope_object_id);
+    }
+    if (f.scope_group_id) {
+        where.push_back("scope_group_id = ?");
+        q.ints.emplace_back(idx++, *f.scope_group_id);
+    }
+    if (f.restrict_to_places) {
+        // Player events of the permitted places, nothing else. Ids are bound, not
+        // pasted; with no permitted place nothing matches.
+        std::string clause;
+        auto list = [&](const char* column, const std::vector<std::int64_t>& ids) {
+            if (ids.empty()) return;
+            if (!clause.empty()) clause += " OR ";
+            clause += std::string(column) + " IN (";
+            for (std::size_t k = 0; k < ids.size(); ++k) {
+                clause += k ? ",?" : "?";
+                q.ints.emplace_back(idx++, ids[k]);
+            }
+            clause += ")";
+        };
+        list("scope_object_id", f.allowed_object_ids);
+        list("scope_group_id", f.allowed_group_ids);
+        where.push_back(clause.empty() ? std::string("0 = 1")
+                                       : "(category = 'player' AND (" + clause + "))");
     }
 
     if (!where.empty()) {
@@ -593,6 +657,9 @@ std::vector<AuditEvent> AuditDb::list(const AuditFilter& f) {
         e.mac            = colBlob(st, c++);
         e.key_fingerprint= colText(st, c++);
         e.legacy         = sqlite3_column_int(st, c++) != 0;
+        e.scoped         = sqlite3_column_int(st, c++) != 0;
+        e.scope_object_id = colInt64Opt(st, c++);
+        e.scope_group_id  = colInt64Opt(st, c++);
         out.push_back(std::move(e));
     }
     sqlite3_finalize(st);
@@ -650,7 +717,8 @@ ChainVerification AuditDb::verifyChain() {
             "  ts_unix_ms, actor_user_id, actor_username, actor_role, actor_ip, "
             "  target_type, target_id, http_method, http_path, http_status, "
             "  elapsed_ms, summary, details_json, request_id, "
-            "  prev_mac, mac, key_fingerprint "
+            "  prev_mac, mac, key_fingerprint, "
+            "  scoped, scope_object_id, scope_group_id "
             "FROM audit_events ORDER BY id ASC",
             -1, &st, nullptr) != SQLITE_OK) {
         v.first_bad_reason = "prepare_failed";
@@ -686,6 +754,9 @@ ChainVerification AuditDb::verifyChain() {
         e.prev_mac       = colBlob(st, c++);
         e.mac            = colBlob(st, c++);
         e.key_fingerprint= colText(st, c++);
+        e.scoped         = sqlite3_column_int(st, c++) != 0;
+        e.scope_object_id = colInt64Opt(st, c++);
+        e.scope_group_id  = colInt64Opt(st, c++);
 
         // Key rotation — rows signed under a different key cannot be
         // verified with the current one. Reset chain expectation to the

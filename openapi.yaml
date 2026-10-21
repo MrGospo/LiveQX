@@ -5187,6 +5187,67 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/audit/events:
+    get:
+      tags: [Players]
+      summary: Read the audit trail
+      description: |
+        Администратор читает всё. Остальные (в том числе наблюдатель) читают только события
+        категории `player` тех объектов и групп, аудит которых им выдал администратор
+        (отметка `can_view_audit` в правах на плееров); системный аудит им недоступен, а запрос
+        без выданного аудита — `403 forbidden`. Ограничение входит в сам запрос: счётчик
+        `total` и страницы считаются по разрешённому. Запрос другой области сужает до пустого,
+        шире разрешённого не выходит.
+
+        Каждая строка несёт область (`object_id`, `group_id`) — где находился экран на момент
+        события; для переноса — новое место; для удалённого экрана, группы — место до удаления.
+        Область входит в подпись строки (старые строки без области проверяются как раньше).
+        События, не относящиеся к месту (настройки, права), области не имеют и
+        не-администраторам не видны.
+      parameters:
+        - { in: query, name: from_ts, schema: { type: integer, format: int64 } }
+        - { in: query, name: to_ts, schema: { type: integer, format: int64 } }
+        - { in: query, name: category, schema: { type: string } }
+        - { in: query, name: action, schema: { type: string } }
+        - { in: query, name: actor_user_id, schema: { type: integer, format: int64 } }
+        - { in: query, name: actor_username, schema: { type: string } }
+        - { in: query, name: target_type, schema: { type: string } }
+        - { in: query, name: target_id, schema: { type: string } }
+        - { in: query, name: request_id, schema: { type: string } }
+        - { in: query, name: object_id, schema: { type: integer, format: int64 }, description: 'События объекта (всех его групп).' }
+        - { in: query, name: group_id, schema: { type: integer, format: int64 }, description: 'События группы.' }
+        - { in: query, name: limit, schema: { type: integer, maximum: 1000, default: 100 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 } }
+      responses:
+        '200':
+          description: The events, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  events:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer, format: int64 }
+                        ts_ms: { type: integer, format: int64 }
+                        category: { type: string }
+                        action: { type: string }
+                        target_type: { type: string }
+                        target_id: { type: string }
+                        object_id: { type: integer, format: int64, description: 'Только у строк с областью.' }
+                        group_id: { type: integer, format: int64, description: 'Только у строк с областью.' }
+        '403':
+          description: '`forbidden` — не администратор и аудит ни одной области не выдан.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/players/settings:
     get:
       tags: [Players]

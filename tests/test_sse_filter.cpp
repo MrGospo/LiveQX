@@ -234,3 +234,55 @@ TEST(SseFilter, PlayerEventNamesRoundTrip) {
         EXPECT_EQ(*back, t) << name;
     }
 }
+
+// ── audit hints by place ────────────────────────────────────────────────────
+namespace {
+Event auditHint(const std::string& category, std::optional<std::int64_t> object, std::optional<std::int64_t> group) {
+    Event e = evtFor(EventType::AuditEvent);
+    e.payload = {{"category", category}, {"action", "x"}};
+    if (object) e.payload["scope_object_id"] = *object;
+    if (group)  e.payload["scope_group_id"]  = *group;
+    return e;
+}
+PlayerScopeGrant withAudit(PlayerScopeGrant g) { g.can_view_audit = true; return g; }
+}  // namespace
+
+TEST(SseFilterAudit, AdministratorsHearOfEveryRow) {
+    auto ctx = ctxFor(Role::Admin);
+    EXPECT_TRUE(sseEventVisibleTo(ctx, auditHint("system", std::nullopt, std::nullopt)));
+    EXPECT_TRUE(sseEventVisibleTo(ctx, auditHint("player", 1, 11)));
+}
+
+TEST(SseFilterAudit, AnAuditRightOnAGroupOrObjectMeansHearingOfPlayerRowsOfThatPlaceOnly) {
+    auto ctx = ctxFor(Role::Operator);
+    ctx.player_grants = {withAudit(groupGrant(11))};
+    EXPECT_TRUE(sseEventVisibleTo(ctx, auditHint("player", 1, 11)));
+    EXPECT_FALSE(sseEventVisibleTo(ctx, auditHint("player", 1, 12))) << "the sibling group";
+    EXPECT_FALSE(sseEventVisibleTo(ctx, auditHint("player", 1, std::nullopt))) << "an object is not implied by a group";
+    EXPECT_FALSE(sseEventVisibleTo(ctx, auditHint("system", 1, 11))) << "right place, not a player event";
+
+    ctx.player_grants = {withAudit(objectGrant(1))};
+    EXPECT_TRUE(sseEventVisibleTo(ctx, auditHint("player", 1, 12)));
+    EXPECT_TRUE(sseEventVisibleTo(ctx, auditHint("player", 1, std::nullopt)));
+    EXPECT_FALSE(sseEventVisibleTo(ctx, auditHint("player", 2, 21)));
+}
+
+TEST(SseFilterAudit, WithoutTheAuditMarkOrWithoutAPlaceNothingIsHeard) {
+    auto ctx = ctxFor(Role::Operator);
+    ctx.player_grants = {groupGrant(11), objectGrant(1)};                   // access, but no audit mark
+    EXPECT_FALSE(sseEventVisibleTo(ctx, auditHint("player", 1, 11)));
+    ctx.player_grants = {withAudit(objectGrant(1))};
+    EXPECT_FALSE(sseEventVisibleTo(ctx, auditHint("player", std::nullopt, std::nullopt))) << "a row about no place";
+    ctx.player_grants.clear();
+    EXPECT_FALSE(sseEventVisibleTo(ctx, auditHint("player", 1, 11)));
+    Event odd = evtFor(EventType::AuditEvent);
+    odd.payload = "not an object";
+    ctx.player_grants = {withAudit(objectGrant(1))};
+    EXPECT_FALSE(sseEventVisibleTo(ctx, odd));
+}
+
+TEST(SseFilterAudit, AViewerWithTheMarkHearsToo) {
+    auto ctx = ctxFor(Role::Viewer);
+    ctx.player_grants = {withAudit(groupGrant(11))};
+    EXPECT_TRUE(sseEventVisibleTo(ctx, auditHint("player", 1, 11)));
+}

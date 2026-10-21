@@ -52,6 +52,7 @@
 #ifdef LIVEQX_HAVE_MOSQUITTO
 #include "mqtt/MosquittoClient.h"
 #endif
+#include "players/AuditScope.h"
 #include "players/BrokerSettings.h"
 #include "players/CommandService.h"
 #include "players/DeviceApi.h"
@@ -948,6 +949,12 @@ int main(int argc, char* argv[]) {
         // the module (the endpoints answer 503); it must not stop the
         // broadcast.
         liveqx::players::PlayersDb players_db(paths.playersDb());
+        // The audit logger outlives the players database: it must not be able to ask
+        // it for a place once it is gone (set below, cleared here on the way out).
+        struct ScopeResolverGuard {
+            sad::AuditLogger& logger;
+            ~ScopeResolverGuard() { logger.setScopeResolver({}); }
+        } scope_resolver_guard{audit_logger};
         liveqx::players::RevocationList cert_revocations;
         std::unique_ptr<liveqx::players::PlayersService> players_service;
         std::unique_ptr<liveqx::players::EnrollService>  enroll_service;
@@ -1001,6 +1008,13 @@ int main(int argc, char* argv[]) {
             players_service = std::make_unique<liveqx::players::PlayersService>(
                 players_db, std::move(po));
             LOG_INFO("Players: db={}", paths.playersDb().string());
+
+            // Where an audit row happened (B13): the object and group of the screen,
+            // group or object it is about, asked at the moment the row is written.
+            // Things already deleted are placed by the handler that deleted them.
+            audit_logger.setScopeResolver([&players_db](const liveqx::audit::AuditEvent& e) {
+                return liveqx::players::auditScopeOf(players_db, e);
+            });
 
             // The device CA exists only after the root-signing ceremony
             // (--device-ca-*): the server never creates one by itself, so

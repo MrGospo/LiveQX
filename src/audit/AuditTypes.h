@@ -95,10 +95,26 @@ struct AuditEvent {
     std::string                  request_id;
 
     // ── tamper-evidence (filled by AuditDb) ─────────────────────────
+    // ── where it happened (players, B13) ────────────────────────────
+    // The object and group of the screen (or group, or object) the event is about,
+    // as they were WHEN it was written; unset for events that are not about a place.
+    // `scoped` is true for every row written by the current format: from then on
+    // the place is part of what the signature covers. Rows written before that
+    // have scoped = false and are verified exactly as they always were.
+    bool                         scoped{false};
+    std::optional<std::int64_t>  scope_object_id;
+    std::optional<std::int64_t>  scope_group_id;
+
     std::vector<std::uint8_t>    prev_mac;           // 0 or 32 bytes
     std::vector<std::uint8_t>    mac;                // always 32 bytes on read
     std::string                  key_fingerprint;    // 16 hex chars
     bool                         legacy{false};      // 1 iff pre-chain row (backfilled)
+};
+
+// A place an event is about (see AuditEvent::scope_*).
+struct AuditScope {
+    std::optional<std::int64_t> object_id;
+    std::optional<std::int64_t> group_id;
 };
 
 // Filter for AuditDb::list. All conditions AND together. limit is
@@ -113,6 +129,17 @@ struct AuditFilter {
     std::string                  target_type;
     std::string                  target_id;
     std::string                  request_id;
+    // Place: exactly this object / this group (rows carry both, so an object
+    // finds the events of all its groups).
+    std::optional<std::int64_t>  scope_object_id;
+    std::optional<std::int64_t>  scope_group_id;
+    // For people who may read the audit of some places only: player events whose
+    // place is one of these objects or groups, and nothing else. Applied in the
+    // query itself, so the count and the paging respect it. Both lists empty
+    // while this is set = nothing matches.
+    bool                         restrict_to_places{false};
+    std::vector<std::int64_t>    allowed_object_ids;
+    std::vector<std::int64_t>    allowed_group_ids;
     int                          limit{100};
     int                          offset{0};
 };

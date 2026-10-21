@@ -5,6 +5,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <optional>
 #include <thread>
 
 #include "audit/AuditDb.h"
@@ -136,4 +138,77 @@ TEST_F(AuditLoggerTest, ShouldRejectMutationFalseAtStart) {
     lg.start();
     EXPECT_FALSE(lg.shouldRejectMutation());
     lg.stop();
+}
+
+// ── places ─────────────────────────────────────────────────────────────────
+TEST_F(AuditLoggerTest, AnEventIsPlacedWhereItsTargetIsWhenItIsLoggedAndTheProducerCanSayOtherwise) {
+    AuditDb db(tmp_dir_ / "audit.db", key_.get());
+    ASSERT_TRUE(db.open());
+    AuditLogger lg(&db, tmp_dir_ / "audit-emergency.jsonl");
+    // The screen "p1" sits in group 11 of object 1.
+    lg.setScopeResolver([](const AuditEvent& e) -> std::optional<liveqx::audit::AuditScope> {
+        if (e.target_type == "player" && e.target_id == "p1") return liveqx::audit::AuditScope{1, 11};
+        return std::nullopt;
+    });
+    lg.start();
+
+    AuditEvent resolved = mk("player.command_sent");
+    resolved.category = Category::Player;
+    resolved.target_type = "player";
+    resolved.target_id = "p1";
+    lg.log(resolved);
+
+    AuditEvent unknown = mk("player.command_sent");
+    unknown.category = Category::Player;
+    unknown.target_type = "player";
+    unknown.target_id = "someone-else";
+    lg.log(unknown);
+
+    AuditEvent told = mk("player.delete");                 // the producer knew better: the screen is already gone
+    told.category = Category::Player;
+    told.target_type = "player";
+    told.target_id = "p1";
+    told.scope_object_id = 5;
+    told.scope_group_id = 55;
+    lg.log(told);
+
+    ASSERT_TRUE(waitFor([&] { return lg.stats().written_db >= 3; }, std::chrono::seconds(3)));
+    lg.stop();
+    auto rows = db.list({});
+    ASSERT_EQ(rows.size(), 3u);
+    std::map<std::string, AuditEvent> by;                  // newest first
+    int n = 0;
+    for (const auto& r : rows) by[std::to_string(n++)] = r;
+    EXPECT_EQ(by["2"].scope_group_id, 11);
+    EXPECT_EQ(by["2"].scope_object_id, 1);
+    EXPECT_FALSE(by["1"].scope_group_id.has_value());
+    EXPECT_EQ(by["0"].scope_group_id, 55) << "what the producer said is not overwritten";
+    EXPECT_EQ(by["0"].scope_object_id, 5);
+    EXPECT_EQ(db.verifyChain().first_bad_id, 0);
+}
+
+TEST_F(AuditLoggerTest, WithoutAResolverEventsSimplyHaveNoPlace) {
+    AuditDb db(tmp_dir_ / "audit.db", key_.get());
+    ASSERT_TRUE(db.open());
+    AuditLogger lg(&db, tmp_dir_ / "audit-emergency.jsonl");
+    lg.start();
+    lg.log(mk("channel.update"));
+    ASSERT_TRUE(waitFor([&] { return lg.stats().written_db >= 1; }, std::chrono::seconds(3)));
+    lg.stop();
+    EXPECT_FALSE(db.list({})[0].scope_group_id.has_value());
+}
+
+TEST_F(AuditLoggerTest, TheEmergencyFileCarriesThePlaceToo) {
+    const auto emerg = tmp_dir_ / "audit-emergency.jsonl";
+    AuditLogger lg(nullptr, emerg);
+    lg.setScopeResolver([](const AuditEvent&) { return std::optional<liveqx::audit::AuditScope>{{3, 33}}; });
+    lg.start();
+    lg.log(mk("player.command_sent"));
+    ASSERT_TRUE(waitFor([&] { return lg.stats().written_emergency >= 1; }, std::chrono::seconds(3)));
+    lg.stop();
+    std::ifstream f(emerg);
+    std::string line;
+    ASSERT_TRUE(std::getline(f, line));
+    EXPECT_NE(line.find("\"scope_group_id\":33"), std::string::npos) << line;
+    EXPECT_NE(line.find("\"scope_object_id\":3"), std::string::npos) << line;
 }
