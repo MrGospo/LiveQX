@@ -206,6 +206,7 @@ PairingResult PlayersService::create(const std::string& name, std::optional<std:
     }
     r.ok = true;
     r.player = created->player;
+    if (opts_.on_player_created) opts_.on_player_created(r.player.id);
     if (opts_.events) {
         nlohmann::json payload = {{"player_id", r.player.id}, {"name", r.player.name}};
         if (auto place = db_.placeOfPlayer(r.player.id)) {
@@ -245,6 +246,7 @@ RemovalResult PlayersService::revoke(const std::string& player_id, const std::st
     if (!certs) return out;
     out.found = true;
     out.revoked_certs = certs->size();
+    if (opts_.on_player_gone) opts_.on_player_gone(player_id);
     if (!certs->empty() && opts_.on_certs_revoked) opts_.on_certs_revoked(*certs);
     return out;
 }

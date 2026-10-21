@@ -46,6 +46,11 @@ struct PlayersServiceOptions {
     // Called with the certificates revoked by a revoke/remove call, so the
     // CRL can be rebuilt and the broker told. Not called for an empty set.
     std::function<void(const std::vector<CertRow>&)> on_certs_revoked;
+    // A player now exists / no longer may be served (revoked or removed). The
+    // broker is told from here; it can be down, and the periodic reconciliation
+    // then catches up, so these must never fail the call.
+    std::function<void(const std::string& player_id)> on_player_created;
+    std::function<void(const std::string& player_id)> on_player_gone;
 };
 
 struct PairingResult {

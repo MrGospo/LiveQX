@@ -48,6 +48,10 @@
 #include "mounts/MountManager.h"
 #include "mounts/MountdRpcClient.h"
 #include "mounts/MountsDb.h"
+#include "mqtt/BrokerLink.h"
+#ifdef LIVEQX_HAVE_MOSQUITTO
+#include "mqtt/MosquittoClient.h"
+#endif
 #include "players/DeviceApi.h"
 #include "players/EnrollService.h"
 #include "players/PresenceService.h"
@@ -948,6 +952,20 @@ int main(int argc, char* argv[]) {
         std::unique_ptr<liveqx::players::RenewService>   renew_service;
         std::unique_ptr<liveqx::players::PresenceService> presence_service;
         std::unique_ptr<liveqx::players::DeviceApi>      device_api;        // started once TLS is resolved
+        // Told when the set of players changes; the broker link (created later,
+        // destroyed earlier) is reached through it and only while it exists.
+        struct BrokerHook {
+            std::mutex mu;
+            liveqx::mqtt::BrokerLink* link{nullptr};
+            void poke() { std::lock_guard<std::mutex> lk(mu); if (link) link->requestSync(); }
+            void set(liveqx::mqtt::BrokerLink* l) { std::lock_guard<std::mutex> lk(mu); link = l; }
+        };
+        auto broker_hook = std::make_shared<BrokerHook>();
+        std::unique_ptr<liveqx::mqtt::BrokerLink> broker_link;
+        struct BrokerHookDetach {
+            std::shared_ptr<BrokerHook> h;
+            ~BrokerHookDetach() { if (h) h->set(nullptr); }
+        } broker_hook_detach{broker_hook};
         std::function<std::shared_ptr<const liveqx::tls::DeviceCa>()> device_ca_provider;
         if (players_db.open()) {
             liveqx::players::PlayersServiceOptions po;
@@ -961,6 +979,8 @@ int main(int argc, char* argv[]) {
             po.on_certs_revoked = [&cert_revocations](const std::vector<liveqx::players::CertRow>& c) {
                 cert_revocations.add(c);
             };
+            po.on_player_created = [broker_hook](const std::string&) { broker_hook->poke(); };
+            po.on_player_gone    = [broker_hook](const std::string&) { broker_hook->poke(); };
             po.ntp_hint     = [&time_repo]() -> std::vector<std::string> {
                 auto cur = time_repo.load();
                 if (cur && cur->ntp.enabled) return cur->ntp.servers;
@@ -1032,6 +1052,55 @@ int main(int argc, char* argv[]) {
             presence_service = std::make_unique<liveqx::players::PresenceService>(players_db, std::move(pr));
             presence_service->start();
             LOG_INFO("Players: presence — offline after {} s of silence", pr_offline_after_s);
+
+            // The MQTT broker (players.broker): the server's standing connection
+            // and the upkeep of the players' records on it. Off unless enabled;
+            // a missing broker or CA only keeps it waiting, never stops the server.
+            // players.broker: enabled (false), host ("127.0.0.1"), port (8883),
+            // verify_hostname (true), reconcile_interval_s (300).
+            json bcfg = json::object();
+            if (cfg.contains("players") && cfg["players"].is_object() &&
+                cfg["players"].contains("broker") && cfg["players"]["broker"].is_object())
+                bcfg = cfg["players"]["broker"];
+            if (bcfg.value("enabled", false)) {
+                liveqx::mqtt::BrokerLinkOptions bo;
+                bo.host                 = bcfg.value("host", std::string("127.0.0.1"));
+                bo.port                 = std::clamp(bcfg.value("port", 8883), 1, 65535);
+                bo.verify_hostname      = bcfg.value("verify_hostname", true);
+                bo.reconcile_interval_s = std::clamp(bcfg.value("reconcile_interval_s", 300), 10, 86400);
+                const auto broker_ca_dir = paths.deviceCaDir();
+                bo.identity = [device_ca_provider, broker_ca_dir, &master_key](
+                                  liveqx::mqtt::BrokerIdentityPem& out, std::string& why) {
+                    auto ca = device_ca_provider();
+                    if (!ca) { why = "the device CA is not set up yet"; return false; }
+                    liveqx::tls::BrokerIdentity id;
+                    if (!liveqx::tls::DeviceCa::ensureBrokerIdentity(broker_ca_dir, master_key, *ca, id, why))
+                        return false;
+                    out.cert_chain_pem = id.cert_chain_pem;
+                    out.key_pem        = id.key_pem;
+                    out.serial         = id.serial_hex;
+                    return true;
+                };
+                bo.trust_pem = [&players_service] { return players_service->caCertPem(); };
+                bo.wanted = [&players_db]() {
+                    std::set<std::string> ids;
+                    for (const auto& p : players_db.listPlayers({}))
+                        if (p.state != liveqx::players::PlayerState::Revoked) ids.insert(p.id);
+                    return ids;
+                };
+#ifdef LIVEQX_HAVE_MOSQUITTO
+                bo.make_client = [](const liveqx::mqtt::ClientOptions& co) -> std::unique_ptr<liveqx::mqtt::IMqttClient> {
+                    return std::make_unique<liveqx::mqtt::MosquittoClient>(co);
+                };
+#else
+                LOG_WARN("Players: players.broker is enabled but this build has no MQTT library");
+#endif
+                broker_link = std::make_unique<liveqx::mqtt::BrokerLink>(std::move(bo));
+                broker_hook->set(broker_link.get());
+                broker_link->start();
+                LOG_INFO("Players: broker link — {}:{}", bcfg.value("host", std::string("127.0.0.1")),
+                         bcfg.value("port", 8883));
+            }
         } else {
             LOG_ERROR("Players: cannot open {} — player integration disabled",
                       paths.playersDb().string());

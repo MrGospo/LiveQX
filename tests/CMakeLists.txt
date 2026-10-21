@@ -171,6 +171,10 @@ add_executable(liveqx-tests
     ../src/utils/ClientIp.cpp
     ../src/players/PlayersDb.cpp
     ../src/players/PlayersService.cpp
+    ../src/mqtt/BrokerAdmin.cpp
+    ../src/mqtt/BrokerLink.cpp
+    test_broker_admin.cpp
+    test_broker_link.cpp
     ../src/players/EnrollService.cpp
     ../src/players/RevocationList.cpp
     ../src/players/DeviceApi.cpp
@@ -462,6 +466,7 @@ add_executable(liveqx-itests
     ../src/utils/ClientIp.cpp
     ../src/players/PlayersDb.cpp
     ../src/players/PlayersService.cpp
+    ../src/mqtt/BrokerAdmin.cpp
     ../src/players/EnrollService.cpp
     ../src/players/PlayerAccess.cpp
     ../src/utils/DeviceCa.cpp

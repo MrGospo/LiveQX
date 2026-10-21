@@ -10,6 +10,8 @@
 //     subscriptions on its own;
 //   * a persistent session keeps a message for an offline client, and an
 //     expired message is not delivered late;
+//   * the server issues and removes players through Dynamic Security itself,
+//     idempotently, and reconciles the broker with a wanted list;
 //   * a client the broker has no record of may connect but can neither receive
 //     nor send anything.
 //
@@ -18,6 +20,7 @@
 
 #include "test_broker.h"
 
+#include "mqtt/BrokerAdmin.h"
 #include "mqtt/MosquittoClient.h"
 
 #include <gtest/gtest.h>
@@ -262,4 +265,101 @@ TEST_F(MosquittoBrokerTest, APlayerTheBrokerDoesNotKnowMayConnectButHasNoRights)
     EXPECT_FALSE(at_server.has(pres.topic, pres.payload)) << "no presence without a record";
     server.stop();
     dev.stop();
+}
+
+namespace {
+
+// The server's connection with the administrator wired in, as main will do it.
+struct AdminRig {
+    mqtt::MosquittoClient client;
+    mqtt::BrokerAdmin     admin;
+    AdminRig(const mqtt::ClientOptions& o) : client(o), admin(client) {
+        client.setMessageHandler([this](const mqtt::Message& m) { admin.handleMessage(m); });
+    }
+    bool up() {
+        if (!client.start()) return false;
+        return waitFor([&] { return client.connected(); });
+    }
+};
+
+}  // namespace
+
+TEST_F(MosquittoBrokerTest, TheServerIssuesAPlayerThroughDynamicSecurityAndThePlayerWorks) {
+    AdminRig rig(broker_->serverOptions());
+    ASSERT_TRUE(rig.up()) << broker_->log();
+    auto base = rig.admin.ensureBaseline();
+    ASSERT_TRUE(base.ok) << base.error << " — the real plugin's wording for 'already there' is accepted";
+
+    auto player = broker_->enrollPlayer(/*provision=*/false);
+    auto issued = rig.admin.provisionPlayer(player.id);
+    ASSERT_TRUE(issued.ok) << issued.error;
+    EXPECT_TRUE(rig.admin.provisionPlayer(player.id).ok) << "twice is the same as once";
+
+    Inbox at_player;
+    mqtt::MosquittoClient dev(broker_->playerOptions(player));
+    dev.setMessageHandler([&](const mqtt::Message& m) { at_player.add(m); });
+    dev.subscribe(commandsOf(player), 1);
+    ASSERT_TRUE(dev.start());
+    ASSERT_TRUE(waitFor([&] { return dev.connected(); })) << broker_->log();
+    mqtt::Message cmd;
+    cmd.topic = commandsOf(player);
+    cmd.payload = "issued-by-server";
+    EXPECT_TRUE(waitFor([&] { rig.client.publish(cmd); return at_player.has(cmd.topic, cmd.payload); }));
+    dev.stop();
+}
+
+TEST_F(MosquittoBrokerTest, RemovingAPlayerClosesItsRightsAtOnce) {
+    AdminRig rig(broker_->serverOptions());
+    ASSERT_TRUE(rig.up());
+    auto player = broker_->enrollPlayer(/*provision=*/false);
+    ASSERT_TRUE(rig.admin.provisionPlayer(player.id).ok);
+
+    Inbox at_player;
+    mqtt::MosquittoClient dev(broker_->playerOptions(player));
+    dev.setMessageHandler([&](const mqtt::Message& m) { at_player.add(m); });
+    dev.subscribe(commandsOf(player), 1);
+    ASSERT_TRUE(dev.start());
+    ASSERT_TRUE(waitFor([&] { return dev.connected(); }));
+    mqtt::Message before;
+    before.topic = commandsOf(player);
+    before.payload = "before";
+    ASSERT_TRUE(waitFor([&] { rig.client.publish(before); return at_player.has(before.topic, "before"); }));
+
+    ASSERT_TRUE(rig.admin.removePlayer(player.id).ok);
+    EXPECT_TRUE(rig.admin.removePlayer(player.id).ok) << "removing again is fine";
+    mqtt::Message after = before;
+    after.payload = "after";
+    for (int i = 0; i < 5; ++i) {
+        rig.client.publish(after);
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+    EXPECT_FALSE(at_player.has(after.topic, "after")) << "nothing reaches a removed player";
+    dev.stop();
+}
+
+TEST_F(MosquittoBrokerTest, ReconcileBringsTheRealBrokerInLineWithTheWantedList) {
+    AdminRig rig(broker_->serverOptions());
+    ASSERT_TRUE(rig.up());
+    auto keep = broker_->enrollPlayer(/*provision=*/true);     // issued by hand, as if earlier
+    auto drop = broker_->enrollPlayer(/*provision=*/true);     // no longer wanted
+    auto fresh = broker_->enrollPlayer(/*provision=*/false);   // wanted, never issued
+
+    auto rep = rig.admin.reconcile({keep.id, fresh.id});
+    EXPECT_TRUE(rep.ok) << rep.error;
+    EXPECT_EQ(rep.issued, 1u);
+    EXPECT_EQ(rep.removed, 1u);
+
+    std::set<std::string> clients, roles;
+    ASSERT_TRUE(rig.admin.listClients(clients).ok);
+    ASSERT_TRUE(rig.admin.listRoles(roles).ok);
+    EXPECT_TRUE(clients.count(keep.id));
+    EXPECT_TRUE(clients.count(fresh.id));
+    EXPECT_FALSE(clients.count(drop.id));
+    EXPECT_FALSE(roles.count("player-" + drop.id));
+    EXPECT_TRUE(clients.count("liveqx-server")) << "the server's own client is never touched";
+    EXPECT_TRUE(roles.count("player-common"));
+
+    auto again = rig.admin.reconcile({keep.id, fresh.id});
+    EXPECT_TRUE(again.ok);
+    EXPECT_EQ(again.issued + again.removed, 0u) << "a second pass finds nothing to do";
 }
