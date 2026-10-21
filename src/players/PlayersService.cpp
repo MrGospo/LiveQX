@@ -143,6 +143,8 @@ PlayersSettings PlayersService::settings() {
     if (auto n = parseSeconds(get("confirm_timeout_reload_s"))) s.confirm_timeout_reload_s = *n;
     if (auto n = parseRange(get("command_batch_size"), 1, 100)) s.command_batch_size = *n;
     if (auto n = parseRange(get("command_batch_stop_percent"), 1, 100)) s.command_batch_stop_percent = *n;
+    if (auto n = parseRange(get("events_retention_days"), 7, 3650)) s.events_retention_days = *n;
+    if (auto n = parseRange(get("commands_retention_days"), 7, 3650)) s.commands_retention_days = *n;
     return s;
 }
 
@@ -158,7 +160,9 @@ nlohmann::json PlayersService::toJson(const PlayersSettings& s) {
             {"confirm_timeout_reboot_s", s.confirm_timeout_reboot_s},
             {"confirm_timeout_reload_s", s.confirm_timeout_reload_s},
             {"command_batch_size", s.command_batch_size},
-            {"command_batch_stop_percent", s.command_batch_stop_percent}};
+            {"command_batch_stop_percent", s.command_batch_stop_percent},
+            {"events_retention_days", s.events_retention_days},
+            {"commands_retention_days", s.commands_retention_days}};
 }
 
 std::string PlayersService::updateSettings(const std::map<std::string, std::string>& patch) {
@@ -176,9 +180,26 @@ std::string PlayersService::updateSettings(const std::map<std::string, std::stri
         else if (k == "command_batch_size" || k == "command_batch_stop_percent") {
             if (!v.empty() && !parseRange(v, 1, 100)) return "invalid_" + k;
         }
+        else if (k == "events_retention_days" || k == "commands_retention_days") {
+            if (!v.empty() && !parseRange(v, 7, 3650)) return "invalid_" + k;
+        }
         else return "unknown_setting";
     }
     return db_.setSettings(patch) ? "" : "storage_error";
+}
+
+RetentionReport PlayersService::applyRetention(std::int64_t now) {
+    if (now == 0) now = nowSeconds();
+    const PlayersSettings s = settings();
+    constexpr std::int64_t kDay = 86400;
+    RetentionReport r;
+    r.events       = db_.purgeEventsOlderThan(now - s.events_retention_days * kDay);
+    r.commands     = db_.purgeSettledCommandsOlderThan(now - s.commands_retention_days * kDay);
+    r.jobs         = db_.purgeFinishedJobsOlderThan(now - s.commands_retention_days * kDay);
+    // A certificate that expired is no use to anyone; a month's margin keeps the
+    // record around for any question about a connection that was refused for it.
+    r.certificates = db_.purgeExpiredCerts(now - 30 * kDay);
+    return r;
 }
 
 mqtt::BrokerConnection PlayersService::brokerConnection(const mqtt::BrokerConnection& base) {

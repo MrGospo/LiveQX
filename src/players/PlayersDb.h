@@ -287,6 +287,11 @@ public:
     bool                   finishJob(const std::string& job_id, const std::string& state,
                                      const std::string& reason, std::int64_t now = 0);
 
+    // Retention. Only what is over: a command still pending and a job still
+    // running are never touched, whatever their age. Each returns how many rows went.
+    std::size_t            purgeSettledCommandsOlderThan(std::int64_t ts);
+    std::size_t            purgeFinishedJobsOlderThan(std::int64_t ts);     // its screens go with it
+
     // ── certificates and CRLs ────────────────────────────────────────────
     std::vector<CertRow> certsOf(const std::string& player_id);
     bool                 revokeCert(int generation, const std::string& serial_hex,

@@ -5293,6 +5293,8 @@ paths:
                 confirm_timeout_reload_s: { type: integer, minimum: 30, maximum: 86400 }
                 command_batch_size: { type: integer, minimum: 1, maximum: 100 }
                 command_batch_stop_percent: { type: integer, minimum: 1, maximum: 100 }
+                events_retention_days: { type: integer, minimum: 7, maximum: 3650 }
+                commands_retention_days: { type: integer, minimum: 7, maximum: 3650 }
       responses:
         '200':
           description: Updated settings.
@@ -5686,6 +5688,8 @@ components:
         confirm_timeout_reload_s: { type: integer, minimum: 30, maximum: 86400, description: "Сколько ждать подтверждения reload_playlist, с (120)." }
         command_batch_size: { type: integer, minimum: 1, maximum: 100, description: "Размер пачки при команде многим экранам (10)." }
         command_batch_stop_percent: { type: integer, minimum: 1, maximum: 100, description: "Доля невернувшихся в пачке, выше которой задание останавливается, % (30)." }
+        events_retention_days: { type: integer, minimum: 7, maximum: 3650, description: "Сколько дней хранить события плееров (вход и выход из сети, смена версии, команды) (90). Старше — удаляется раз в сутки." }
+        commands_retention_days: { type: integer, minimum: 7, maximum: 3650, description: "Сколько дней хранить закрытые команды и задания (365). Неподтверждённая команда и идущее задание не удаляются никогда." }
 
     PairingPackage:
       type: object

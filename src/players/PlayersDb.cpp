@@ -1378,6 +1378,22 @@ bool PlayersDb::finishJob(const std::string& job_id, const std::string& state,
     return tx.commit();
 }
 
+std::size_t PlayersDb::purgeSettledCommandsOlderThan(std::int64_t ts) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return 0;
+    Stmt s(db_, "DELETE FROM player_commands WHERE state <> 'pending' AND finished_at IS NOT NULL AND finished_at < ?");
+    s.i64(1, ts);
+    return s.exec() ? static_cast<std::size_t>(s.changes()) : 0;
+}
+
+std::size_t PlayersDb::purgeFinishedJobsOlderThan(std::int64_t ts) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return 0;
+    Stmt s(db_, "DELETE FROM command_jobs WHERE state <> 'running' AND finished_at IS NOT NULL AND finished_at < ?");
+    s.i64(1, ts);
+    return s.exec() ? static_cast<std::size_t>(s.changes()) : 0;       // command_job_items follow (ON DELETE CASCADE)
+}
+
 std::string PlayersDb::newId() { return newUuidV4(); }
 
 std::optional<CommandRow> PlayersDb::findCommand(const std::string& id) {

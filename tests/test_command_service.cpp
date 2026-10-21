@@ -726,3 +726,100 @@ TEST_F(BatchTest, TheJobRecordsWhoStartedItAndWhatWasAbsentAtTheStart) {
     EXPECT_EQ(v->summary.skipped_offline, 1u);
     EXPECT_EQ(v->items.front().item.player_id, absent) << "absent screens are listed first";
 }
+
+// ── retention of the players' journals ──────────────────────────────────────
+class RetentionTest : public CommandServiceTest {
+protected:
+    static constexpr std::int64_t kDay = 86400;
+
+    // A command of `type` sent at kT0 and settled (or left pending).
+    std::string command(const std::string& player, const char* type, bool settle, std::int64_t finished_at = 0) {
+        CommandRow c;
+        c.id = PlayersDb::newId(); c.player_id = player; c.type = type;
+        c.issued_at = kT0; c.ttl_seconds = 300; c.deadline_at = kT0 + 300;
+        EXPECT_EQ(db_->createCommand(c), CommandCreate::Ok);
+        if (settle) EXPECT_TRUE(db_->settleCommand(c.id, "executed", "executed", finished_at).has_value());
+        return c.id;
+    }
+    std::string job(const char* state, std::int64_t created, std::int64_t finished) {
+        JobRow j;
+        j.id = PlayersDb::newId(); j.type = "restart_player"; j.target_kind = "all"; j.target_name = "all";
+        j.batch_size = 10; j.stop_percent = 30; j.created_at = created;
+        EXPECT_TRUE(db_->createJob(j, {{"", "p1", 0, "queued", "", ""}}));
+        if (std::string(state) != "running") EXPECT_TRUE(db_->finishJob(j.id, state, "", finished));
+        return j.id;
+    }
+};
+
+TEST_F(RetentionTest, ByDefaultEventsAreKeptNinetyDaysAndCommandsAYear) {
+    EXPECT_EQ(players_->settings().events_retention_days, 90);
+    EXPECT_EQ(players_->settings().commands_retention_days, 365);
+}
+
+TEST_F(RetentionTest, OldEventsGoAndRecentOnesStay) {
+    const auto a = screen();                                  // its "enrolled" event is from kT0: long past by `now`
+    const std::int64_t now = kT0 + 400 * kDay;
+    db_->addEvent(a, "old-online", "", now - 91 * kDay);
+    db_->addEvent(a, "edge-offline", "", now - 89 * kDay);
+    db_->addEvent(a, "recent-online", "", now - kDay);
+
+    auto r = players_->applyRetention(now);
+    EXPECT_EQ(r.events, 2u) << "the enrollment event and the one of 91 days";
+    std::set<std::string> left;
+    for (const auto& e : db_->events(a, 100)) left.insert(e.kind);
+    EXPECT_EQ(left, (std::set<std::string>{"edge-offline", "recent-online"}));
+}
+
+TEST_F(RetentionTest, SettledCommandsOlderThanTheLimitGoAndUnsettledOnesNeverDoWhateverTheirAge) {
+    const auto a = screen();
+    const std::int64_t now = kT0 + 1000 * kDay;
+    const auto old_done = command(a, "restart_player", true, now - 366 * kDay);
+    const auto new_done = command(a, "reboot_screen", true, now - 364 * kDay);
+    const auto forgotten = command(a, "reload_playlist", false);            // pending since long ago
+
+    auto r = players_->applyRetention(now);
+    EXPECT_EQ(r.commands, 1u);
+    EXPECT_FALSE(db_->findCommand(old_done).has_value());
+    EXPECT_TRUE(db_->findCommand(new_done).has_value());
+    ASSERT_TRUE(db_->findCommand(forgotten).has_value()) << "an unsettled command still blocks its screen: not for retention to remove";
+    EXPECT_EQ(db_->findCommand(forgotten)->state, "pending");
+}
+
+TEST_F(RetentionTest, FinishedJobsGoWithTheirScreensAndRunningOnesStay) {
+    const std::int64_t now = kT0 + 1000 * kDay;
+    const auto old_job = job("done", now - 400 * kDay, now - 399 * kDay);
+    const auto recent_job = job("stopped", now - 10 * kDay, now - 9 * kDay);
+    const auto running = job("running", now - 500 * kDay, 0);
+
+    auto r = players_->applyRetention(now);
+    EXPECT_EQ(r.jobs, 1u);
+    EXPECT_FALSE(db_->findJob(old_job).has_value());
+    EXPECT_TRUE(db_->jobItems(old_job).empty()) << "its screens went with it";
+    EXPECT_TRUE(db_->findJob(recent_job).has_value());
+    EXPECT_TRUE(db_->findJob(running).has_value()) << "a job in progress is never removed";
+    EXPECT_EQ(db_->jobItems(running).size(), 1u);
+}
+
+TEST_F(RetentionTest, TheLimitsAreSettingsWithBounds) {
+    ASSERT_EQ(players_->updateSettings({{"events_retention_days", "30"}, {"commands_retention_days", "180"}}), "");
+    EXPECT_EQ(players_->settings().events_retention_days, 30);
+    EXPECT_EQ(players_->settings().commands_retention_days, 180);
+    EXPECT_EQ(players_->updateSettings({{"events_retention_days", "6"}}), "invalid_events_retention_days");
+    EXPECT_EQ(players_->updateSettings({{"commands_retention_days", "4000"}}), "invalid_commands_retention_days");
+    EXPECT_EQ(players_->updateSettings({{"events_retention_days", ""}}), "");
+    EXPECT_EQ(players_->settings().events_retention_days, 90) << "empty = the default";
+
+    const auto a = screen();
+    const std::int64_t now = kT0 + 400 * kDay;
+    ASSERT_EQ(players_->updateSettings({{"events_retention_days", "30"}}), "");
+    db_->addEvent(a, "online", "", now - 31 * kDay);
+    EXPECT_EQ(players_->applyRetention(now).events >= 1u, true) << "the shorter limit is the one used";
+}
+
+TEST_F(RetentionTest, RunningItTwiceFindsNothingTheSecondTime) {
+    const auto a = screen();
+    const std::int64_t now = kT0 + 1000 * kDay;
+    command(a, "restart_player", true, now - 400 * kDay);
+    EXPECT_GE(players_->applyRetention(now).total(), 1u);
+    EXPECT_EQ(players_->applyRetention(now).total(), 0u);
+}

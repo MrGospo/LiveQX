@@ -981,6 +981,7 @@ int main(int argc, char* argv[]) {
         std::unique_ptr<liveqx::mqtt::BrokerLink> broker_link;
         std::unique_ptr<liveqx::players::CommandService> command_service;
         std::jthread command_sweeper;       // settles commands nobody confirmed in time
+        std::jthread players_retention;     // removes old closed records once a day
         struct BrokerHookDetach {
             std::shared_ptr<BrokerHook> h;
             ~BrokerHookDetach() { if (h) h->set(nullptr); }
@@ -1129,6 +1130,23 @@ int main(int argc, char* argv[]) {
                     if (round % 8 == 0) svc->sweep();
                     for (int i = 0; i < 2 && !st.stop_requested(); ++i)
                         std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+            });
+
+            // Retention of the players' own journals: once a day, a minute after start
+            // (so a long-neglected database is cleaned soon, but not during boot).
+            players_retention = std::jthread([svc = players_service.get()](std::stop_token st) {
+                auto nap = [&](int seconds) {
+                    for (int i = 0; i < seconds && !st.stop_requested(); ++i)
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                };
+                nap(60);
+                while (!st.stop_requested()) {
+                    const auto r = svc->applyRetention();
+                    if (r.total() > 0)
+                        LOG_INFO("Players: retention removed {} event(s), {} command(s), {} job(s), {} expired certificate record(s)",
+                                 r.events, r.commands, r.jobs, r.certificates);
+                    nap(86400);
                 }
             });
 

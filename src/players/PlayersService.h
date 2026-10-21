@@ -47,6 +47,19 @@ struct PlayersSettings {
     // batch did not come back.
     int         command_batch_size{10};
     int         command_batch_stop_percent{30};
+    // How long closed records are kept, in days. Events of a player (online,
+    // offline, version, commands) and the log of commands / jobs. What is over
+    // is deleted once a day; the audit trail has its own, longer retention.
+    int         events_retention_days{90};
+    int         commands_retention_days{365};
+};
+
+struct RetentionReport {
+    std::size_t events{0};
+    std::size_t commands{0};
+    std::size_t jobs{0};
+    std::size_t certificates{0};
+    std::size_t total() const { return events + commands + jobs + certificates; }
 };
 
 struct PlayersServiceOptions {
@@ -102,6 +115,11 @@ public:
     // invalid_command_ttl_s, invalid_confirm_timeout_restart_s, ..._reboot_s, ..._reload_s,
     // storage_error.
     std::string updateSettings(const std::map<std::string, std::string>& patch);
+
+    // Deletes what is past its retention: old events, settled commands, finished
+    // jobs, and the records of certificates that expired more than 30 days ago.
+    // Never touches an unsettled command or a running job.
+    RetentionReport applyRetention(std::int64_t now = 0);
 
     // How the server connects to the MQTT broker. Stored values (set from the
     // interface) win over `base`, which comes from the configuration file; a
