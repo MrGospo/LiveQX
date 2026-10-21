@@ -527,3 +527,54 @@ TEST_F(PresenceTest, AnOfflineWordForAPlayerThatIsNotOnlineChangesNothing) {
     svc_->tick();
     EXPECT_EQ(count(events(), EventType::PlayerOffline), 0) << "already offline: no second event";
 }
+
+// ── a whole batch of screens loses the network and gets it back ─────────────
+TEST_F(PresenceTest, ABatchOfScreensThatLosesTheNetworkAndGetsItBackIsOnlineAgainWithoutAnyoneDoingAnything) {
+    constexpr int kScreens = 300;
+    std::vector<std::string> ids;
+    for (int i = 0; i < kScreens; ++i) {
+        ids.push_back(newPlayer("screen-" + std::to_string(i)));
+        beat(ids.back());
+    }
+    events();                                              // the first sightings
+    ASSERT_EQ(svc_->tick().went_offline, 0u);
+
+    // The switch dies: nothing is heard for five minutes.
+    now_ += 300;
+    EXPECT_EQ(svc_->tick().went_offline, static_cast<std::size_t>(kScreens)) << "after the threshold, all at once";
+    auto down = events();
+    EXPECT_EQ(count(down, EventType::PlayerOffline), kScreens);
+    for (const auto& id : ids) EXPECT_FALSE(svc_->isOnline(id));
+
+    // The switch is back: the screens simply carry on with their heartbeats.
+    now_ += 20;
+    for (const auto& id : ids) beat(id);
+    for (const auto& id : ids) EXPECT_TRUE(svc_->isOnline(id));
+    auto up = events();
+    EXPECT_EQ(count(up, EventType::PlayerOnline), kScreens) << "each one is announced as back";
+    flush();
+    for (const auto& id : ids) EXPECT_TRUE(db_->status(id)->online) << "and stored as online";
+    EXPECT_EQ(svc_->tick().went_offline, 0u) << "nobody is left behind or flapping";
+    EXPECT_EQ(dbEvents(ids.front(), "offline"), 1);
+    EXPECT_EQ(dbEvents(ids.front(), "online"), 2) << "first sight, then the return";
+}
+
+TEST_F(PresenceTest, ABrokerSideOfflineFromTheSameOutageDoesNotHoldScreensDownAfterTheyReturn) {
+    const auto id = newPlayer();
+    beat(id);
+    svc_->onMqttPresence(id, false);                       // the broker's last-will fires during the outage
+    now_ += 60;
+    svc_->tick();
+    ASSERT_FALSE(svc_->isOnline(id));
+    now_ += 240;                                           // five minutes in all
+    svc_->onMqttPresence(id, true);                        // the player reconnects and announces itself
+    EXPECT_TRUE(svc_->isOnline(id));
+    now_ += 120;
+    svc_->tick();
+    EXPECT_TRUE(svc_->isOnline(id)) << "it has the usual time to send its first heartbeat";
+    now_ += 100;                                           // 220 s without a heartbeat
+    svc_->tick();
+    EXPECT_FALSE(svc_->isOnline(id)) << "but MQTT alone does not keep it alive: the heartbeat must follow";
+    beat(id);
+    EXPECT_TRUE(svc_->isOnline(id));
+}
