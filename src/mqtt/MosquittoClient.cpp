@@ -5,6 +5,8 @@
 #include <mosquitto.h>
 #include <mqtt_protocol.h>
 
+#include <arpa/inet.h>
+
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -48,6 +50,19 @@ SslCtx buildContext(const ClientOptions& o, std::string& err) {
     if (!ctx) { err = "cannot create a TLS context"; return nullptr; }
     SSL_CTX_set_min_proto_version(ctx.get(), TLS1_2_VERSION);
     SSL_CTX_set_verify(ctx.get(), SSL_VERIFY_PEER, nullptr);
+
+    // libmosquitto checks the broker's name only in a callback it installs on a
+    // context it builds itself; with ours it checks nothing. So the name goes into
+    // the verification parameters of the context, and OpenSSL enforces it during
+    // the handshake (an address is matched against IP entries, a name against DNS ones).
+    if (o.verify_hostname) {
+        X509_VERIFY_PARAM* param = SSL_CTX_get0_param(ctx.get());
+        unsigned char ip[16];
+        const bool is_ip = inet_pton(AF_INET, o.host.c_str(), ip) == 1 || inet_pton(AF_INET6, o.host.c_str(), ip) == 1;
+        const int ok = is_ip ? X509_VERIFY_PARAM_set1_ip_asc(param, o.host.c_str())
+                             : X509_VERIFY_PARAM_set1_host(param, o.host.c_str(), o.host.size());
+        if (ok != 1) { ERR_clear_error(); err = "the broker address cannot be used for name verification"; return nullptr; }
+    }
 
     int roots = 0;
     {
@@ -200,11 +215,6 @@ bool MosquittoClient::start() {
     mosquitto_disconnect_v5_callback_set(mosq_, &Callbacks::disconnect);
     mosquitto_message_v5_callback_set(mosq_, &Callbacks::message);
     mosquitto_log_callback_set(mosq_, &Callbacks::log);
-    if (opts_.will) {
-        const auto& w = *opts_.will;
-        mosquitto_will_set_v5(mosq_, w.topic.c_str(), static_cast<int>(w.payload.size()), w.payload.data(),
-                              w.qos, w.retain, nullptr);
-    }
 
     stopping_ = false;
     started_  = true;

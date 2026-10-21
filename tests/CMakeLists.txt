@@ -269,7 +269,8 @@ target_link_libraries(liveqx-tests PRIVATE
 if(MOSQUITTO_FOUND)
     target_sources(liveqx-tests PRIVATE
         ../src/mqtt/MosquittoClient.cpp
-        test_mosquitto_client_config.cpp)
+        test_mosquitto_client_config.cpp
+        test_mosquitto_client_broker.cpp)
     target_link_libraries(liveqx-tests PRIVATE PkgConfig::MOSQUITTO)
     target_compile_definitions(liveqx-tests PRIVATE LIVEQX_HAVE_MOSQUITTO=1)
 endif()

@@ -31,13 +31,6 @@ struct Message {
     std::optional<std::uint32_t> expiry_s;
 };
 
-struct Will {
-    std::string topic;
-    std::string payload;
-    int         qos{1};
-    bool        retain{true};
-};
-
 struct ClientOptions {
     std::string host{"127.0.0.1"};
     int         port{8883};
@@ -56,7 +49,6 @@ struct ClientOptions {
     std::uint32_t session_expiry_s{3600};   // how long the broker keeps the session
     int           reconnect_min_s{1};
     int           reconnect_max_s{30};
-    std::optional<Will> will;
 };
 
 enum class PublishResult {
