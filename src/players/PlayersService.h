@@ -41,6 +41,11 @@ struct PlayersSettings {
     int         confirm_timeout_restart_s{300};
     int         confirm_timeout_reboot_s{1200};
     int         confirm_timeout_reload_s{120};
+    // A command to many screens goes in batches: the next batch only after the
+    // previous one is settled, and the job stops if more than this share of a
+    // batch did not come back.
+    int         command_batch_size{10};
+    int         command_batch_stop_percent{30};
 };
 
 struct PlayersServiceOptions {

@@ -166,9 +166,40 @@ struct CommandRow {
 
 enum class CommandCreate { Ok, Busy, Storage };
 
+// A command to a group, an object or everyone, sent in batches (B13). The job
+// lives in the database so that it survives a restart of the server.
+//   state: running | done | stopped (too many screens did not come back) | cancelled
+struct JobRow {
+    std::string                 id;
+    std::string                 type;              // the command
+    std::string                 target_kind;       // group | object | all
+    std::int64_t                target_id{0};
+    std::string                 target_name;
+    std::string                 state;
+    std::string                 stop_reason;
+    std::int64_t                batch_size{10};
+    std::int64_t                stop_percent{30};
+    std::int64_t                next_batch{0};     // the batch to send next
+    std::int64_t                created_at{0};
+    std::optional<std::int64_t> created_by;
+    std::string                 created_by_name;
+    std::string                 created_by_role;
+    std::optional<std::int64_t> finished_at;
+};
+
+// One screen of a job. state: queued | sent | skipped_offline | failed | cancelled
+struct JobItem {
+    std::string  job_id;
+    std::string  player_id;
+    std::int64_t batch_no{0};      // -1 for screens that were not connected when the job began
+    std::string  state;
+    std::string  command_id;
+    std::string  error;
+};
+
 class PlayersDb {
 public:
-    static constexpr int kSchemaVersion = 4;
+    static constexpr int kSchemaVersion = 5;
     static constexpr std::size_t kMaxPayloadBytes = 64 * 1024;
     static constexpr std::size_t kMaxNameBytes = 120;
     static constexpr std::int64_t kMaxTokenTtlSeconds = 365LL * 86400;
@@ -240,6 +271,21 @@ public:
                                             const std::string& result, std::int64_t now = 0);
     // Turns every pending command whose deadline has passed into "timeout".
     std::vector<CommandRow>   timeoutCommands(std::int64_t now = 0);
+
+    // ── bulk command jobs ────────────────────────────────────────────────
+    bool                   createJob(const JobRow& job, const std::vector<JobItem>& items);
+    std::optional<JobRow>  findJob(const std::string& id);
+    std::vector<JobRow>    runningJobs();
+    // Newest first; `created_by` limits to one person's jobs.
+    std::vector<JobRow>    listJobs(std::optional<std::int64_t> created_by, std::size_t limit);
+    std::vector<JobItem>   jobItems(const std::string& job_id);
+    bool                   updateJobItem(const std::string& job_id, const std::string& player_id,
+                                         const std::string& state, const std::string& command_id,
+                                         const std::string& error);
+    bool                   setNextBatch(const std::string& job_id, std::int64_t next_batch);
+    // Ends a running job and cancels what is still queued. False if it was not running.
+    bool                   finishJob(const std::string& job_id, const std::string& state,
+                                     const std::string& reason, std::int64_t now = 0);
 
     // ── certificates and CRLs ────────────────────────────────────────────
     std::vector<CertRow> certsOf(const std::string& player_id);

@@ -505,3 +505,69 @@ TEST(PlayerCommandRest, AViewerCannotCommandAGroupWhateverItHolds) {
     EXPECT_EQ(f.post(viewer, "/api/player-groups/" + std::to_string(f.G11) + "/command",
                      {{"type", "reload_playlist"}, {"dry_run", true}})->status, 403);
 }
+
+// ── jobs ────────────────────────────────────────────────────────────────────
+TEST(PlayerCommandRest, AGroupCommandIsAJobThatTheStarterAndTheAdministratorCanFollowAndCancel) {
+    CommandFixture f(g_port++);
+    auto admin = f.person("admin1", sa::Role::Admin);
+    auto op = f.person("op1", sa::Role::Operator);
+    auto other = f.person("op2", sa::Role::Operator);
+    f.give(admin, op.id, json::array({CommandFixture::groupMark(f.G11, true)}));
+    f.give(admin, other.id, json::array({CommandFixture::groupMark(f.G11, true)}));
+    ASSERT_EQ(f.players->updateSettings({{"command_batch_size", "1"}}), "");
+    // Two more connected screens in the group, so that the job has several batches.
+    f.online(f.P11);
+    const auto extra1 = f.activePlayer("extra-1", f.G11);
+    const auto extra2 = f.activePlayer("extra-2", f.G11);
+    f.online(extra1); f.online(extra2);
+
+    auto start = f.post(op, "/api/player-groups/" + std::to_string(f.G11) + "/command",
+                        {{"type", "reload_playlist"}, {"confirm_phrase", "reload_playlist group O1 / G11"},
+                         {"expected_count", 3}});
+    ASSERT_EQ(start->status, 200) << start->body;
+    const json s = json::parse(start->body);
+    const std::string job = s["job_id"];
+    EXPECT_EQ(s["sent"].size(), 1u) << "only the first batch";
+    EXPECT_EQ(s["queued"], 2);
+    EXPECT_EQ(s["batch_size"], 1);
+
+    auto cli = f.client();
+    auto mine = cli.Get(("/api/command-jobs/" + job).c_str(), bearer(op.token));
+    ASSERT_EQ(mine->status, 200) << mine->body;
+    const json v = json::parse(mine->body);
+    EXPECT_EQ(v["state"], "running");
+    EXPECT_EQ(v["summary"]["queued"], 2);
+    EXPECT_EQ(v["summary"]["pending"], 1);
+    EXPECT_EQ(v["target"]["name"], "O1 / G11");
+    EXPECT_EQ(v["items"].size(), 3u);
+
+    EXPECT_EQ(cli.Get(("/api/command-jobs/" + job).c_str(), bearer(other.token))->status, 404)
+        << "someone else's job is not theirs to see";
+    EXPECT_EQ(cli.Get(("/api/command-jobs/" + job).c_str(), bearer(admin.token))->status, 200);
+    auto list_op = json::parse(cli.Get("/api/command-jobs", bearer(op.token))->body)["jobs"];
+    EXPECT_EQ(list_op.size(), 1u);
+    EXPECT_TRUE(json::parse(cli.Get("/api/command-jobs", bearer(other.token))->body)["jobs"].empty());
+    EXPECT_EQ(json::parse(cli.Get("/api/command-jobs", bearer(admin.token))->body)["jobs"].size(), 1u);
+
+    EXPECT_EQ(cli.Post(("/api/command-jobs/" + job + "/cancel").c_str(), bearer(other.token), "", "application/json")->status, 404);
+    auto cancelled = cli.Post(("/api/command-jobs/" + job + "/cancel").c_str(), bearer(op.token), "", "application/json");
+    ASSERT_EQ(cancelled->status, 200) << cancelled->body;
+    const json c = json::parse(cancelled->body);
+    EXPECT_EQ(c["state"], "cancelled");
+    EXPECT_EQ(c["summary"]["cancelled"], 2);
+    EXPECT_EQ(cli.Post(("/api/command-jobs/" + job + "/cancel").c_str(), bearer(admin.token), "", "application/json")->status, 409)
+        << "already over";
+    f.commands->tick();
+    EXPECT_EQ(f.sentCount(), 1u) << "nothing more goes out";
+}
+
+TEST(PlayerCommandRest, JobsAreNotForViewersAndAnUnknownJobIsNotFound) {
+    CommandFixture f(g_port++);
+    auto admin = f.person("admin1", sa::Role::Admin);
+    auto viewer = f.person("view1", sa::Role::Viewer);
+    auto cli = f.client();
+    EXPECT_EQ(cli.Get("/api/command-jobs", bearer(viewer.token))->status, 403);
+    EXPECT_EQ(cli.Get("/api/command-jobs/nope", bearer(admin.token))->status, 404);
+    EXPECT_EQ(cli.Post("/api/command-jobs/nope/cancel", bearer(admin.token), "", "application/json")->status, 404);
+    EXPECT_EQ(cli.Get("/api/command-jobs")->status, 401);
+}

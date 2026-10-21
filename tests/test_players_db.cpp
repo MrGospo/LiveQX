@@ -538,7 +538,7 @@ TEST_F(PlayersDbTest, ADatabaseOfVersionOneIsMigratedKeepingItsData) {
         sqlite3* raw = nullptr;
         ASSERT_EQ(sqlite3_open(path_.c_str(), &raw), SQLITE_OK);
         ASSERT_EQ(sqlite3_exec(raw, "DROP INDEX idx_players_group; ALTER TABLE players DROP COLUMN group_id;"
-                               "DROP TABLE player_commands; DROP TABLE player_groups; DROP TABLE player_objects;"
+                               "DROP TABLE command_job_items; DROP TABLE command_jobs; DROP TABLE player_commands; DROP TABLE player_groups; DROP TABLE player_objects;"
                                "DROP TABLE players_settings; PRAGMA user_version = 1;",
                                nullptr, nullptr, nullptr), SQLITE_OK);
         sqlite3_close(raw);
@@ -788,7 +788,7 @@ TEST_F(PlayersDbTest, ADatabaseOfVersionTwoIsMigratedAndItsPlayersGetAPlace) {
         ASSERT_EQ(sqlite3_open(path_.c_str(), &raw), SQLITE_OK);
         ASSERT_EQ(sqlite3_exec(raw,
             "DROP INDEX idx_players_group; ALTER TABLE players DROP COLUMN group_id;"
-            "DROP TABLE player_commands; DROP TABLE player_groups; DROP TABLE player_objects; PRAGMA user_version = 2;",
+            "DROP TABLE command_job_items; DROP TABLE command_jobs; DROP TABLE player_commands; DROP TABLE player_groups; DROP TABLE player_objects; PRAGMA user_version = 2;",
             nullptr, nullptr, nullptr), SQLITE_OK);
         sqlite3_close(raw);
     }
@@ -819,13 +819,13 @@ TEST_F(PlayersDbTest, ADatabaseOfVersionThreeGainsTheCommandLogAndKeepsItsData) 
     {
         sqlite3* raw = nullptr;
         ASSERT_EQ(sqlite3_open(path_.c_str(), &raw), SQLITE_OK);
-        ASSERT_EQ(sqlite3_exec(raw, "DROP TABLE player_commands; PRAGMA user_version = 3;",
+        ASSERT_EQ(sqlite3_exec(raw, "DROP TABLE command_job_items; DROP TABLE command_jobs; DROP TABLE player_commands; PRAGMA user_version = 3;",
                                nullptr, nullptr, nullptr), SQLITE_OK);
         sqlite3_close(raw);
     }
     PlayersDb upgraded(path_);
     ASSERT_TRUE(upgraded.open());
-    EXPECT_EQ(upgraded.schemaVersion(), 4);
+    EXPECT_EQ(upgraded.schemaVersion(), PlayersDb::kSchemaVersion);
     EXPECT_TRUE(upgraded.findPlayer(id).has_value());
     CommandRow c;
     c.id = PlayersDb::newId(); c.player_id = id; c.type = "restart_player";
@@ -876,4 +876,90 @@ TEST_F(PlayersDbTest, TimeoutsTakeOnlyPendingCommandsPastTheirDeadline) {
     EXPECT_EQ(db_->findCommand(late.id)->state, "pending");
     EXPECT_EQ(db_->findCommand(done.id)->state, "executed");
     EXPECT_TRUE(db_->timeoutCommands(kT0 + 500).empty()) << "nothing is timed out twice";
+}
+
+// ── bulk command jobs (schema v5) ───────────────────────────────────────────
+TEST_F(PlayersDbTest, ADatabaseOfVersionFourGainsTheJobTablesAndKeepsItsCommands) {
+    const auto id = enrolled("MIG04");
+    CommandRow c;
+    c.id = PlayersDb::newId(); c.player_id = id; c.type = "restart_player";
+    c.issued_at = kT0; c.ttl_seconds = 300; c.deadline_at = kT0 + 300;
+    ASSERT_EQ(db_->createCommand(c), CommandCreate::Ok);
+    db_.reset();
+    {
+        sqlite3* raw = nullptr;
+        ASSERT_EQ(sqlite3_open(path_.c_str(), &raw), SQLITE_OK);
+        ASSERT_EQ(sqlite3_exec(raw, "DROP TABLE command_job_items; DROP TABLE command_jobs; PRAGMA user_version = 4;",
+                               nullptr, nullptr, nullptr), SQLITE_OK);
+        sqlite3_close(raw);
+    }
+    PlayersDb upgraded(path_);
+    ASSERT_TRUE(upgraded.open());
+    EXPECT_EQ(upgraded.schemaVersion(), PlayersDb::kSchemaVersion);
+    EXPECT_TRUE(upgraded.findCommand(c.id).has_value()) << "earlier data survives";
+    JobRow j;
+    j.id = PlayersDb::newId(); j.type = "restart_player"; j.target_kind = "all"; j.target_name = "all";
+    j.created_at = kT0;
+    EXPECT_TRUE(upgraded.createJob(j, {}));
+}
+
+TEST_F(PlayersDbTest, AJobKeepsItsScreensInBatchesAndSurvivesAReopen) {
+    JobRow j;
+    j.id = PlayersDb::newId(); j.type = "reboot_screen"; j.target_kind = "group"; j.target_id = 3;
+    j.target_name = "Main / Hall"; j.batch_size = 2; j.stop_percent = 30; j.created_at = kT0;
+    j.created_by = 5; j.created_by_name = "boss"; j.created_by_role = "admin";
+    std::vector<JobItem> items = {{"", "p1", 0, "queued", "", ""}, {"", "p2", 0, "queued", "", ""},
+                                  {"", "p3", 1, "queued", "", ""}, {"", "p4", -1, "skipped_offline", "", ""}};
+    ASSERT_TRUE(db_->createJob(j, items));
+    ASSERT_TRUE(db_->updateJobItem(j.id, "p1", "sent", "cmd-1", ""));
+    ASSERT_TRUE(db_->setNextBatch(j.id, 1));
+    db_.reset();
+
+    PlayersDb again(path_);
+    ASSERT_TRUE(again.open());
+    auto running = again.runningJobs();
+    ASSERT_EQ(running.size(), 1u) << "a job in progress is still there after a restart";
+    EXPECT_EQ(running[0].next_batch, 1);
+    EXPECT_EQ(running[0].created_by_name, "boss");
+    EXPECT_EQ(running[0].target_name, "Main / Hall");
+    auto got = again.jobItems(j.id);
+    ASSERT_EQ(got.size(), 4u);
+    EXPECT_EQ(got[0].batch_no, -1) << "the screens that were absent come first";
+    int sent = 0, queued = 0;
+    for (const auto& it : got) { sent += it.state == "sent"; queued += it.state == "queued"; }
+    EXPECT_EQ(sent, 1);
+    EXPECT_EQ(queued, 2);
+}
+
+TEST_F(PlayersDbTest, FinishingAJobCancelsWhatWasQueuedAndHappensOnlyOnce) {
+    JobRow j;
+    j.id = PlayersDb::newId(); j.type = "restart_player"; j.target_kind = "all"; j.target_name = "all";
+    j.batch_size = 1; j.stop_percent = 30; j.created_at = kT0;
+    ASSERT_TRUE(db_->createJob(j, {{"", "p1", 0, "sent", "c1", ""}, {"", "p2", 1, "queued", "", ""}}));
+    EXPECT_TRUE(db_->finishJob(j.id, "stopped", "too_many_unconfirmed", kT0 + 50));
+    EXPECT_FALSE(db_->finishJob(j.id, "done", "", kT0 + 60)) << "already over";
+    auto job = db_->findJob(j.id);
+    EXPECT_EQ(job->state, "stopped");
+    EXPECT_EQ(job->stop_reason, "too_many_unconfirmed");
+    EXPECT_EQ(*job->finished_at, kT0 + 50);
+    for (const auto& it : db_->jobItems(j.id)) {
+        if (it.player_id == "p2") EXPECT_EQ(it.state, "cancelled");
+        if (it.player_id == "p1") EXPECT_EQ(it.state, "sent") << "what already went out stays";
+    }
+    EXPECT_TRUE(db_->runningJobs().empty());
+    EXPECT_FALSE(db_->setNextBatch(j.id, 9)) << "a finished job is not advanced";
+}
+
+TEST_F(PlayersDbTest, JobsAreListedNewestFirstAndCanBeLimitedToOnePerson) {
+    for (int i = 0; i < 3; ++i) {
+        JobRow j;
+        j.id = PlayersDb::newId(); j.type = "restart_player"; j.target_kind = "all"; j.target_name = "all";
+        j.batch_size = 10; j.stop_percent = 30; j.created_at = kT0 + i; j.created_by = (i == 1) ? 8 : 7;
+        ASSERT_TRUE(db_->createJob(j, {}));
+    }
+    EXPECT_EQ(db_->listJobs(std::nullopt, 10).size(), 3u);
+    auto mine = db_->listJobs(7, 10);
+    ASSERT_EQ(mine.size(), 2u);
+    EXPECT_GT(mine[0].created_at, mine[1].created_at);
+    EXPECT_EQ(db_->listJobs(std::nullopt, 1).size(), 1u);
 }

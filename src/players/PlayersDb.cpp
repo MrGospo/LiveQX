@@ -339,6 +339,38 @@ CREATE INDEX idx_commands_pending ON player_commands(deadline_at) WHERE state = 
 CREATE UNIQUE INDEX ux_commands_pending ON player_commands(player_id, type) WHERE state = 'pending';
 )SQL";
 
+// Version 4 -> 5: jobs that send a command to many screens in batches.
+constexpr const char* kSchemaV5 = R"SQL(
+CREATE TABLE command_jobs (
+    id              TEXT PRIMARY KEY,
+    type            TEXT NOT NULL,
+    target_kind     TEXT NOT NULL,
+    target_id       INTEGER NOT NULL DEFAULT 0,
+    target_name     TEXT NOT NULL,
+    state           TEXT NOT NULL,
+    stop_reason     TEXT NOT NULL DEFAULT '',
+    batch_size      INTEGER NOT NULL,
+    stop_percent    INTEGER NOT NULL,
+    next_batch      INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL,
+    created_by      INTEGER,
+    created_by_name TEXT NOT NULL DEFAULT '',
+    created_by_role TEXT NOT NULL DEFAULT '',
+    finished_at     INTEGER
+);
+CREATE INDEX idx_jobs_state ON command_jobs(state, created_at);
+CREATE TABLE command_job_items (
+    job_id     TEXT NOT NULL REFERENCES command_jobs(id) ON DELETE CASCADE,
+    player_id  TEXT NOT NULL,
+    batch_no   INTEGER NOT NULL,
+    state      TEXT NOT NULL,
+    command_id TEXT NOT NULL DEFAULT '',
+    error      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (job_id, player_id)
+);
+CREATE INDEX idx_job_items_batch ON command_job_items(job_id, batch_no, state);
+)SQL";
+
 }  // namespace
 
 const char* toString(PlayerState s) noexcept {
@@ -415,6 +447,7 @@ bool PlayersDb::open() {
         if (version < 2) ok = ok && execSql(raw, kSchemaV2);
         if (version < 3) ok = ok && execSql(raw, kSchemaV3);
         if (version < 4) ok = ok && execSql(raw, kSchemaV4);
+        if (version < 5) ok = ok && execSql(raw, kSchemaV5);
         // Future versions: add `if (version < 4) ...` steps here, in order.
         ok = ok && execSql(raw, ("PRAGMA user_version = " + std::to_string(kSchemaVersion) + ";").c_str());
         if (!ok || !tx.commit()) {
@@ -1220,6 +1253,129 @@ CommandCreate PlayersDb::createCommand(const CommandRow& row, std::string* busy_
         return CommandCreate::Busy;
     }
     return CommandCreate::Storage;
+}
+
+namespace {
+constexpr const char* kJobCols =
+    "id,type,target_kind,target_id,target_name,state,stop_reason,batch_size,stop_percent,next_batch,"
+    "created_at,created_by,created_by_name,created_by_role,finished_at";
+JobRow readJob(const Stmt& s) {
+    JobRow j;
+    j.id = s.str(0); j.type = s.str(1); j.target_kind = s.str(2); j.target_id = s.num(3);
+    j.target_name = s.str(4); j.state = s.str(5); j.stop_reason = s.str(6);
+    j.batch_size = s.num(7); j.stop_percent = s.num(8); j.next_batch = s.num(9);
+    j.created_at = s.num(10); j.created_by = s.optNum(11); j.created_by_name = s.str(12);
+    j.created_by_role = s.str(13); j.finished_at = s.optNum(14);
+    return j;
+}
+}  // namespace
+
+bool PlayersDb::createJob(const JobRow& job, const std::vector<JobItem>& items) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+    Tx tx(db_);
+    if (!tx.ok()) return false;
+    {
+        Stmt s(db_, "INSERT INTO command_jobs(id,type,target_kind,target_id,target_name,state,batch_size,"
+                    "stop_percent,next_batch,created_at,created_by,created_by_name,created_by_role) "
+                    "VALUES(?,?,?,?,?,'running',?,?,0,?,?,?,?)");
+        s.text(1, job.id).text(2, job.type).text(3, job.target_kind).i64(4, job.target_id)
+         .text(5, job.target_name).i64(6, job.batch_size).i64(7, job.stop_percent).i64(8, job.created_at)
+         .opt(9, job.created_by).text(10, job.created_by_name).text(11, job.created_by_role);
+        if (!s.exec()) return false;
+    }
+    for (const auto& it : items) {
+        Stmt s(db_, "INSERT INTO command_job_items(job_id,player_id,batch_no,state) VALUES(?,?,?,?)");
+        s.text(1, job.id).text(2, it.player_id).i64(3, it.batch_no).text(4, it.state);
+        if (!s.exec()) return false;
+    }
+    return tx.commit();
+}
+
+std::optional<JobRow> PlayersDb::findJob(const std::string& id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return std::nullopt;
+    Stmt s(db_, (std::string("SELECT ") + kJobCols + " FROM command_jobs WHERE id=?").c_str());
+    s.text(1, id);
+    if (s.step() != SQLITE_ROW) return std::nullopt;
+    return readJob(s);
+}
+
+std::vector<JobRow> PlayersDb::runningJobs() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<JobRow> out;
+    if (!db_) return out;
+    Stmt s(db_, (std::string("SELECT ") + kJobCols + " FROM command_jobs WHERE state='running' ORDER BY created_at").c_str());
+    while (s.step() == SQLITE_ROW) out.push_back(readJob(s));
+    return out;
+}
+
+std::vector<JobRow> PlayersDb::listJobs(std::optional<std::int64_t> created_by, std::size_t limit) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<JobRow> out;
+    if (!db_ || limit == 0) return out;
+    std::string sql = std::string("SELECT ") + kJobCols + " FROM command_jobs";
+    if (created_by) sql += " WHERE created_by=?";
+    sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?";
+    Stmt s(db_, sql.c_str());
+    int i = 1;
+    if (created_by) s.i64(i++, *created_by);
+    s.i64(i, static_cast<std::int64_t>(limit));
+    while (s.step() == SQLITE_ROW) out.push_back(readJob(s));
+    return out;
+}
+
+std::vector<JobItem> PlayersDb::jobItems(const std::string& job_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<JobItem> out;
+    if (!db_) return out;
+    Stmt s(db_, "SELECT job_id,player_id,batch_no,state,command_id,error FROM command_job_items "
+                "WHERE job_id=? ORDER BY batch_no, rowid");
+    s.text(1, job_id);
+    while (s.step() == SQLITE_ROW) {
+        JobItem it;
+        it.job_id = s.str(0); it.player_id = s.str(1); it.batch_no = s.num(2);
+        it.state = s.str(3); it.command_id = s.str(4); it.error = s.str(5);
+        out.push_back(std::move(it));
+    }
+    return out;
+}
+
+bool PlayersDb::updateJobItem(const std::string& job_id, const std::string& player_id,
+                              const std::string& state, const std::string& command_id,
+                              const std::string& error) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+    Stmt s(db_, "UPDATE command_job_items SET state=?, command_id=?, error=? WHERE job_id=? AND player_id=?");
+    s.text(1, state).text(2, command_id).text(3, error).text(4, job_id).text(5, player_id);
+    return s.exec() && s.changes() == 1;
+}
+
+bool PlayersDb::setNextBatch(const std::string& job_id, std::int64_t next_batch) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+    Stmt s(db_, "UPDATE command_jobs SET next_batch=? WHERE id=? AND state='running'");
+    s.i64(1, next_batch).text(2, job_id);
+    return s.exec() && s.changes() == 1;
+}
+
+bool PlayersDb::finishJob(const std::string& job_id, const std::string& state,
+                          const std::string& reason, std::int64_t now) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return false;
+    Tx tx(db_);
+    if (!tx.ok()) return false;
+    {
+        Stmt s(db_, "UPDATE command_jobs SET state=?, stop_reason=?, finished_at=? WHERE id=? AND state='running'");
+        s.text(1, state).text(2, reason).i64(3, nowOr(now)).text(4, job_id);
+        if (!s.exec() || s.changes() != 1) return false;
+    }
+    {
+        Stmt s(db_, "UPDATE command_job_items SET state='cancelled' WHERE job_id=? AND state='queued'");
+        s.text(1, job_id);
+        if (!s.exec()) return false;
+    }
+    return tx.commit();
 }
 
 std::string PlayersDb::newId() { return newUuidV4(); }

@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <ctime>
 
@@ -223,7 +224,8 @@ BulkPlan CommandService::plan(const CommandTarget& target, const std::string& ty
 
 BulkOutcome CommandService::sendToTarget(const CommandTarget& target, const std::string& type,
                                          const std::string& confirm_phrase, std::size_t expected_count,
-                                         std::optional<std::int64_t> issued_by, std::int64_t now) {
+                                         std::optional<std::int64_t> issued_by, std::int64_t now,
+                                         const std::string& actor_name, const std::string& actor_role) {
     BulkOutcome out;
     if (!supportedType(type)) { out.error = "unsupported_type"; return out; }
     out.plan = plan(target, type);
@@ -238,20 +240,155 @@ BulkOutcome CommandService::sendToTarget(const CommandTarget& target, const std:
     if (!opts_.publish) { out.error = "broker_unavailable"; return out; }
     if (now == 0) now = nowSeconds();
 
-    for (const auto& id : out.plan.online) {
-        auto one = sendToPlayer(id, type, issued_by, now);
-        if (one.ok) { out.sent.push_back({id, one.row.id}); continue; }
-        // The broker being away is not a per-screen failure: stop before
-        // leaving a trail of "not sent" for every screen.
-        if (one.error == "broker_unavailable" && out.sent.empty()) {
-            out.failed.clear();
-            out.error = "broker_unavailable";
-            return out;
-        }
-        out.failed.push_back({id, one.error});
+    const PlayersSettings s = players_.settings();
+    JobRow job;
+    job.id          = PlayersDb::newId();
+    job.type        = type;
+    job.target_kind = target.kind == TargetKind::Group ? "group" : target.kind == TargetKind::Object ? "object" : "all";
+    job.target_id   = target.id;
+    job.target_name = out.plan.target_name;
+    job.batch_size  = s.command_batch_size;
+    job.stop_percent = s.command_batch_stop_percent;
+    job.created_at  = now;
+    job.created_by  = issued_by;
+    job.created_by_name = actor_name;
+    job.created_by_role = actor_role;
+
+    std::vector<JobItem> items;
+    for (const auto& id : out.plan.offline) items.push_back({job.id, id, -1, "skipped_offline", "", "offline"});
+    for (std::size_t i = 0; i < out.plan.online.size(); ++i)
+        items.push_back({job.id, out.plan.online[i], static_cast<std::int64_t>(i / static_cast<std::size_t>(job.batch_size)),
+                         "queued", "", ""});
+
+    std::lock_guard<std::mutex> lk(jobs_mu_);
+    if (!db_.createJob(job, items)) { out.error = "storage_error"; return out; }
+    advance(job, now);
+
+    out.job_id     = job.id;
+    out.batch_size = job.batch_size;
+    for (const auto& it : db_.jobItems(job.id)) {
+        if (it.state == "sent") out.sent.push_back({it.player_id, it.command_id});
+        else if (it.state == "failed") out.failed.push_back({it.player_id, it.error});
+        else if (it.state == "queued") ++out.queued;
+    }
+    // The broker being away is not a per-screen failure: take the job back
+    // rather than leave a trail of failures for the whole target.
+    if (out.sent.empty() && !out.failed.empty() &&
+        std::all_of(out.failed.begin(), out.failed.end(),
+                    [](const BulkOutcome::Failed& f) { return f.error == "broker_unavailable"; })) {
+        db_.finishJob(job.id, "cancelled", "broker_unavailable", now);
+        out.failed.clear();
+        out.error = "broker_unavailable";
+        return out;
     }
     out.ok = true;
     return out;
+}
+
+void CommandService::endJob(const std::string& job_id, const std::string& state, const std::string& reason,
+                            std::int64_t now, bool notify) {
+    if (!db_.finishJob(job_id, state, reason, now)) return;
+    if (!notify || !opts_.on_job_end) return;
+    if (auto v = jobView(job_id)) opts_.on_job_end(v->job, v->summary);
+}
+
+void CommandService::advance(JobRow job, std::int64_t now) {
+    for (;;) {
+        const auto items = db_.jobItems(job.id);
+
+        // 1. A batch is out: nothing more until every screen of it is settled.
+        for (const auto& it : items) {
+            if (it.state != "sent") continue;
+            auto c = db_.findCommand(it.command_id);
+            if (c && c->state == "pending") return;
+        }
+
+        // 2. The batch that just finished: did enough of it come back?
+        if (job.next_batch > 0) {
+            std::int64_t members = 0, bad = 0;
+            for (const auto& it : items) {
+                if (it.batch_no != job.next_batch - 1) continue;
+                if (it.state == "failed") { ++members; ++bad; }
+                else if (it.state == "sent") {
+                    ++members;
+                    auto c = db_.findCommand(it.command_id);
+                    if (!c || c->state != "executed") ++bad;
+                }
+            }
+            if (members > 0 && bad * 100 > job.stop_percent * members) {
+                endJob(job.id, "stopped", "too_many_unconfirmed", now, true);
+                return;
+            }
+        }
+
+        // 3. The next batch, or the end.
+        std::int64_t next = -1;
+        for (const auto& it : items)
+            if (it.state == "queued" && (next < 0 || it.batch_no < next)) next = it.batch_no;
+        if (next < 0) { endJob(job.id, "done", "", now, true); return; }
+
+        for (const auto& it : items) {
+            if (it.state != "queued" || it.batch_no != next) continue;
+            // Things change while a job runs: check the screen again at its turn.
+            auto p = db_.findPlayer(it.player_id);
+            auto st = db_.status(it.player_id);
+            if (!p || p->state != PlayerState::Active || !st || !st->online) {
+                db_.updateJobItem(job.id, it.player_id, "skipped_offline", "", p ? "offline" : "gone");
+                continue;
+            }
+            auto one = sendToPlayer(it.player_id, job.type, job.created_by, now);
+            if (one.ok) {
+                db_.updateJobItem(job.id, it.player_id, "sent", one.row.id, "");
+                if (opts_.on_bulk_sent) opts_.on_bulk_sent(one.row, job);
+            } else {
+                db_.updateJobItem(job.id, it.player_id, "failed", "", one.error);
+            }
+        }
+        db_.setNextBatch(job.id, next + 1);
+        job.next_batch = next + 1;
+    }
+}
+
+void CommandService::tick(std::int64_t now) {
+    if (now == 0) now = nowSeconds();
+    std::lock_guard<std::mutex> lk(jobs_mu_);
+    for (auto& job : db_.runningJobs()) advance(job, now);
+}
+
+std::optional<JobRow> CommandService::cancelJob(const std::string& job_id, std::int64_t now) {
+    if (now == 0) now = nowSeconds();
+    std::lock_guard<std::mutex> lk(jobs_mu_);
+    auto job = db_.findJob(job_id);
+    if (!job || job->state != "running") return std::nullopt;
+    endJob(job_id, "cancelled", "cancelled_by_user", now, true);
+    return db_.findJob(job_id);
+}
+
+std::optional<JobView> CommandService::jobView(const std::string& job_id) {
+    auto job = db_.findJob(job_id);
+    if (!job) return std::nullopt;
+    JobView v;
+    v.job = *job;
+    for (auto& it : db_.jobItems(job_id)) {
+        JobItemView iv;
+        iv.item = it;
+        ++v.summary.total;
+        if (it.state == "queued") ++v.summary.queued;
+        else if (it.state == "skipped_offline") ++v.summary.skipped_offline;
+        else if (it.state == "failed") ++v.summary.failed;
+        else if (it.state == "cancelled") ++v.summary.cancelled;
+        else if (it.state == "sent") {
+            if (auto c = db_.findCommand(it.command_id)) {
+                iv.command_state = c->state;
+                iv.command_result = c->result;
+                if (c->state == "pending") ++v.summary.pending;
+                else if (c->state == "executed") ++v.summary.executed;
+                else ++v.summary.unconfirmed;
+            }
+        }
+        v.items.push_back(std::move(iv));
+    }
+    return v;
 }
 
 }  // namespace liveqx::players

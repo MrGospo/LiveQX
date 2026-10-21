@@ -1065,11 +1065,49 @@ int main(int argc, char* argv[]) {
             liveqx::players::CommandServiceOptions cso;
             cso.events  = &event_bus;
             cso.publish = [broker_hook](const liveqx::mqtt::Message& m) { return broker_hook->publish(m); };
+            // Bulk commands: one audit row for every screen reached, in whatever batch,
+            // and one when the job ends. The person who started it is on the job.
+            cso.on_bulk_sent = [&audit_logger](const liveqx::players::CommandRow& c, const liveqx::players::JobRow& j) {
+                sad::AuditEvent ev;
+                ev.category       = sad::Category::Player;
+                ev.action         = "player.command_sent";
+                ev.actor_user_id  = j.created_by;
+                ev.actor_username = j.created_by_name;
+                ev.actor_role     = j.created_by_role;
+                ev.target_type    = "player";
+                ev.target_id      = c.player_id;
+                ev.http_method    = "POST";
+                ev.http_status    = 200;
+                ev.summary        = "player.command_sent via " + j.target_kind;
+                ev.details_json   = json{{"type", c.type}, {"command_id", c.id}, {"via", j.target_kind},
+                                         {"target", j.target_name}, {"job_id", j.id}}.dump();
+                audit_logger.log(std::move(ev));
+            };
+            cso.on_job_end = [&audit_logger](const liveqx::players::JobRow& j, const liveqx::players::JobSummary& s) {
+                sad::AuditEvent ev;
+                ev.category       = sad::Category::Player;
+                ev.action         = "player.command_job_end";
+                ev.actor_user_id  = j.created_by;
+                ev.actor_username = j.created_by_name;
+                ev.actor_role     = j.created_by_role;
+                ev.target_type    = "player_" + j.target_kind;
+                ev.target_id      = std::to_string(j.target_id);
+                ev.summary        = "player.command_job_end " + j.state;
+                ev.details_json   = json{{"job_id", j.id}, {"state", j.state}, {"reason", j.stop_reason},
+                                         {"type", j.type}, {"target", j.target_name},
+                                         {"total", s.total}, {"executed", s.executed},
+                                         {"unconfirmed", s.unconfirmed + s.pending}, {"failed", s.failed},
+                                         {"skipped_offline", s.skipped_offline}, {"cancelled", s.cancelled}}.dump();
+                audit_logger.log(std::move(ev));
+            };
             command_service = std::make_unique<liveqx::players::CommandService>(players_db, *players_service, std::move(cso));
             command_sweeper = std::jthread([svc = command_service.get()](std::stop_token st) {
-                while (!st.stop_requested()) {
-                    svc->sweep();
-                    for (int i = 0; i < 15 && !st.stop_requested(); ++i)
+                // Jobs move on every 2 s (the next batch as soon as the last is settled);
+                // commands nobody confirmed are timed out every ~16 s.
+                for (int round = 0; !st.stop_requested(); ++round) {
+                    svc->tick();
+                    if (round % 8 == 0) svc->sweep();
+                    for (int i = 0; i < 2 && !st.stop_requested(); ++i)
                         std::this_thread::sleep_for(std::chrono::seconds(1));
                 }
             });

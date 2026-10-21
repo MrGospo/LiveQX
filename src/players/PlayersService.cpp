@@ -110,6 +110,15 @@ std::optional<int> parseSeconds(const std::string& v) {
     return n;
 }
 
+std::optional<int> parseRange(const std::string& v, int lo, int hi) {
+    if (v.empty() || v.size() > 4 ||
+        !std::all_of(v.begin(), v.end(), [](unsigned char c) { return std::isdigit(c); }))
+        return std::nullopt;
+    const int n = std::stoi(v);
+    if (n < lo || n > hi) return std::nullopt;
+    return n;
+}
+
 }  // namespace
 
 PlayersService::PlayersService(PlayersDb& db, PlayersServiceOptions opts)
@@ -132,6 +141,8 @@ PlayersSettings PlayersService::settings() {
     if (auto n = parseSeconds(get("confirm_timeout_restart_s"))) s.confirm_timeout_restart_s = *n;
     if (auto n = parseSeconds(get("confirm_timeout_reboot_s"))) s.confirm_timeout_reboot_s = *n;
     if (auto n = parseSeconds(get("confirm_timeout_reload_s"))) s.confirm_timeout_reload_s = *n;
+    if (auto n = parseRange(get("command_batch_size"), 1, 100)) s.command_batch_size = *n;
+    if (auto n = parseRange(get("command_batch_stop_percent"), 1, 100)) s.command_batch_stop_percent = *n;
     return s;
 }
 
@@ -145,7 +156,9 @@ nlohmann::json PlayersService::toJson(const PlayersSettings& s) {
             {"command_ttl_s", s.command_ttl_s},
             {"confirm_timeout_restart_s", s.confirm_timeout_restart_s},
             {"confirm_timeout_reboot_s", s.confirm_timeout_reboot_s},
-            {"confirm_timeout_reload_s", s.confirm_timeout_reload_s}};
+            {"confirm_timeout_reload_s", s.confirm_timeout_reload_s},
+            {"command_batch_size", s.command_batch_size},
+            {"command_batch_stop_percent", s.command_batch_stop_percent}};
 }
 
 std::string PlayersService::updateSettings(const std::map<std::string, std::string>& patch) {
@@ -159,6 +172,9 @@ std::string PlayersService::updateSettings(const std::map<std::string, std::stri
         else if (k == "command_ttl_s" || k == "confirm_timeout_restart_s" ||
                  k == "confirm_timeout_reboot_s" || k == "confirm_timeout_reload_s") {
             if (!v.empty() && !parseSeconds(v)) return "invalid_" + k;
+        }
+        else if (k == "command_batch_size" || k == "command_batch_stop_percent") {
+            if (!v.empty() && !parseRange(v, 1, 100)) return "invalid_" + k;
         }
         else return "unknown_setting";
     }

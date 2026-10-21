@@ -5018,6 +5018,81 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/command-jobs:
+    get:
+      tags: [Players]
+      summary: Jobs that send a command in batches
+      description: |
+        Operator+. Администратор видит все задания, остальные — только свои. Последние 50, новые первыми.
+        Задание создаёт любая групповая, объектная или общая команда: подключённые экраны делятся на
+        пачки (`command_batch_size`, по умолчанию 10); следующая пачка уходит, когда все команды
+        предыдущей закрыты (подтверждены, отклонены, по таймауту или вручную). Если в закрытой пачке
+        не вернулось больше `command_batch_stop_percent` (30) процентов — задание останавливается
+        (`stopped`, `stop_reason: too_many_unconfirmed`), остаток отменяется. Задание хранится в базе
+        и переживает перезапуск сервера.
+      responses:
+        '200':
+          description: The jobs, without their screens.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items: { $ref: '#/components/schemas/CommandJob' }
+
+  /api/command-jobs/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Players]
+      summary: One job with its screens
+      description: Тому, кто запустил, и администратору; чужое задание — `404`.
+      responses:
+        '200':
+          description: The job and every screen of it, by batch (-1 = not connected at the start).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommandJob' }
+        '404':
+          description: '`not_found`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/command-jobs/{id}/cancel:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Players]
+      summary: Stop the rest of a job
+      description: |
+        Тому, кто запустил, и администратору. Что уже ушло — остаётся и подтверждается как обычно;
+        неотправленное отменяется. Аудит: `player.command_job_cancel`.
+      responses:
+        '200':
+          description: The cancelled job.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommandJob' }
+        '404':
+          description: '`not_found`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`not_running` — задание уже закончилось.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/players/settings:
     get:
       tags: [Players]
@@ -5061,6 +5136,8 @@ paths:
                 confirm_timeout_restart_s: { type: integer, minimum: 30, maximum: 86400 }
                 confirm_timeout_reboot_s: { type: integer, minimum: 30, maximum: 86400 }
                 confirm_timeout_reload_s: { type: integer, minimum: 30, maximum: 86400 }
+                command_batch_size: { type: integer, minimum: 1, maximum: 100 }
+                command_batch_stop_percent: { type: integer, minimum: 1, maximum: 100 }
       responses:
         '200':
           description: Updated settings.
@@ -5298,6 +5375,50 @@ components:
               type: array
               items: { $ref: '#/components/schemas/PlayerGroup' }
 
+    CommandJob:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string }
+        target:
+          type: object
+          properties:
+            kind: { type: string, enum: [group, object, all] }
+            id: { type: integer, format: int64 }
+            name: { type: string }
+        state: { type: string, enum: [running, done, stopped, cancelled] }
+        stop_reason: { type: string, description: '`too_many_unconfirmed`, `cancelled_by_user` или пусто.' }
+        batch_size: { type: integer }
+        stop_percent: { type: integer }
+        created_at: { type: integer, format: int64 }
+        created_by: { type: integer, format: int64 }
+        created_by_name: { type: string }
+        finished_at: { type: integer, format: int64 }
+        summary:
+          type: object
+          properties:
+            total: { type: integer }
+            queued: { type: integer }
+            pending: { type: integer }
+            executed: { type: integer }
+            unconfirmed: { type: integer }
+            failed: { type: integer }
+            skipped_offline: { type: integer }
+            cancelled: { type: integer }
+        items:
+          type: array
+          description: Только в ответе на одно задание.
+          items:
+            type: object
+            properties:
+              player_id: { type: string, format: uuid }
+              batch: { type: integer }
+              state: { type: string, enum: [queued, sent, skipped_offline, failed, cancelled] }
+              command_id: { type: string, format: uuid }
+              command_state: { type: string }
+              command_result: { type: string }
+              error: { type: string }
+
     BulkCommandRequest:
       type: object
       required: [type]
@@ -5333,6 +5454,9 @@ components:
               player_id: { type: string, format: uuid }
               command_id: { type: string, format: uuid }
         skipped_offline: { type: array, items: { type: string, format: uuid } }
+        job_id: { type: string, format: uuid, description: 'Задание; из первой пачки отправлено `sent`, остальное в очереди (`queued`).' }
+        queued: { type: integer }
+        batch_size: { type: integer }
         failed:
           type: array
           items:
@@ -5378,6 +5502,8 @@ components:
         confirm_timeout_restart_s: { type: integer, minimum: 30, maximum: 86400, description: "Сколько ждать подтверждения restart_player, с (300)." }
         confirm_timeout_reboot_s: { type: integer, minimum: 30, maximum: 86400, description: "Сколько ждать подтверждения reboot_screen, с (1200)." }
         confirm_timeout_reload_s: { type: integer, minimum: 30, maximum: 86400, description: "Сколько ждать подтверждения reload_playlist, с (120)." }
+        command_batch_size: { type: integer, minimum: 1, maximum: 100, description: "Размер пачки при команде многим экранам (10)." }
+        command_batch_stop_percent: { type: integer, minimum: 1, maximum: 100, description: "Доля невернувшихся в пачке, выше которой задание останавливается, % (30)." }
 
     PairingPackage:
       type: object

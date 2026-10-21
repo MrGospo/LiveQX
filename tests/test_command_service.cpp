@@ -472,3 +472,257 @@ TEST_F(CommandServiceTest, ABrokerThatIsAwayStopsABulkCommandWithoutBlockingAnyo
     broker_ = liveqx::mqtt::PublishResult::Ok;
     EXPECT_TRUE(svc_->sendToTarget(groupOf(group_id_), "restart_player", "restart_player group Main / Hall", 2, 1, kT0 + 1).ok);
 }
+
+// ── batches ─────────────────────────────────────────────────────────────────
+namespace {
+struct JobLog {
+    std::mutex mu;
+    std::vector<std::pair<std::string, std::string>> sent;      // player, job
+    std::vector<std::pair<std::string, JobSummary>> ended;      // state, summary
+    std::vector<std::string> ended_reason;
+};
+}  // namespace
+
+class BatchTest : public CommandServiceTest {
+protected:
+    JobLog log_;
+    std::unique_ptr<CommandService> batcher_;
+
+    void makeBatcher() {
+        CommandServiceOptions co;
+        co.events = &bus_;
+        co.publish = [this](const liveqx::mqtt::Message& m) {
+            std::lock_guard<std::mutex> lk(sent_mu_);
+            if (broker_ == liveqx::mqtt::PublishResult::Ok) sent_.push_back(m);
+            return broker_;
+        };
+        co.on_bulk_sent = [this](const CommandRow& c, const JobRow& j) {
+            std::lock_guard<std::mutex> lk(log_.mu);
+            log_.sent.push_back({c.player_id, j.id});
+        };
+        co.on_job_end = [this](const JobRow& j, const JobSummary& s) {
+            std::lock_guard<std::mutex> lk(log_.mu);
+            log_.ended.push_back({j.state, s});
+            log_.ended_reason.push_back(j.stop_reason);
+        };
+        batcher_ = std::make_unique<CommandService>(*db_, *players_, std::move(co));
+    }
+    void SetUp() override {
+        CommandServiceTest::SetUp();
+        makeBatcher();
+    }
+    std::vector<std::string> connected(int n) {
+        std::vector<std::string> ids;
+        for (int i = 0; i < n; ++i) {
+            ids.push_back(screen("S" + std::to_string(i)));
+            setOnline(ids.back());
+        }
+        return ids;
+    }
+    BulkOutcome startGroup(std::size_t count, const char* type = "restart_player") {
+        return batcher_->sendToTarget(CommandTarget{TargetKind::Group, group_id_}, type,
+                                      std::string(type) + " group Main / Hall", count, 3, kT0, "boss", "admin");
+    }
+    void confirm(const std::string& player, const std::string& cmd, const char* status = "executed") {
+        batcher_->onResult(player, cmd, status, std::nullopt, kT0 + 5);
+    }
+    std::size_t pendingTotal(const std::vector<std::string>& ids) {
+        std::size_t n = 0;
+        for (const auto& id : ids) n += db_->pendingCommandsOf(id).size();
+        return n;
+    }
+};
+
+TEST_F(BatchTest, OnlyTheFirstBatchGoesOutAndTheNextWaitsForTheWholeBatchToBeSettled) {
+    ASSERT_EQ(players_->updateSettings({{"command_batch_size", "2"}}), "");
+    auto ids = connected(5);
+    auto out = startGroup(5);
+    ASSERT_TRUE(out.ok) << out.error;
+    EXPECT_EQ(out.sent.size(), 2u);
+    EXPECT_EQ(out.queued, 3u);
+    EXPECT_EQ(out.batch_size, 2);
+    EXPECT_EQ(sent_.size(), 2u);
+
+    batcher_->tick(kT0 + 10);
+    EXPECT_EQ(sent_.size(), 2u) << "nothing yet: the first two have not answered";
+
+    confirm(out.sent[0].player_id, out.sent[0].command_id);
+    batcher_->tick(kT0 + 11);
+    EXPECT_EQ(sent_.size(), 2u) << "half a batch is not a batch";
+
+    confirm(out.sent[1].player_id, out.sent[1].command_id);
+    batcher_->tick(kT0 + 12);
+    EXPECT_EQ(sent_.size(), 4u) << "now the second batch";
+
+    auto v = batcher_->jobView(out.job_id);
+    ASSERT_TRUE(v.has_value());
+    EXPECT_EQ(v->job.state, "running");
+    EXPECT_EQ(v->summary.queued, 1u);
+    EXPECT_EQ(v->summary.pending, 2u);
+    EXPECT_EQ(v->summary.executed, 2u);
+}
+
+TEST_F(BatchTest, TheJobEndsDoneAfterTheLastBatchIsSettledAndTheAuditSeesEveryCommand) {
+    ASSERT_EQ(players_->updateSettings({{"command_batch_size", "2"}}), "");
+    connected(3);
+    auto out = startGroup(3);
+    for (const auto& s : out.sent) confirm(s.player_id, s.command_id);
+    batcher_->tick(kT0 + 10);
+    auto jv = batcher_->jobView(out.job_id);
+    int guard = 0;
+    while (jv->job.state == "running" && guard++ < 5) {
+        for (const auto& it : jv->items)
+            if (it.item.state == "sent" && it.command_state == "pending") confirm(it.item.player_id, it.item.command_id);
+        batcher_->tick(kT0 + 20 + guard);
+        jv = batcher_->jobView(out.job_id);
+    }
+    EXPECT_EQ(jv->job.state, "done");
+    EXPECT_EQ(jv->summary.executed, 3u);
+    std::lock_guard<std::mutex> lk(log_.mu);
+    EXPECT_EQ(log_.sent.size(), 3u) << "one audit callback per command, whatever the batch";
+    for (const auto& e : log_.sent) EXPECT_EQ(e.second, out.job_id);
+    ASSERT_EQ(log_.ended.size(), 1u);
+    EXPECT_EQ(log_.ended[0].first, "done");
+    EXPECT_EQ(log_.ended[0].second.executed, 3u);
+}
+
+TEST_F(BatchTest, MoreThanThirtyPercentUnconfirmedStopsTheJobAndCancelsTheRest) {
+    auto ids = connected(20);                               // batches of 10
+    auto out = startGroup(20);
+    ASSERT_EQ(out.sent.size(), 10u);
+    for (std::size_t i = 0; i < 6; ++i) confirm(out.sent[i].player_id, out.sent[i].command_id);
+    for (std::size_t i = 6; i < 10; ++i) confirm(out.sent[i].player_id, out.sent[i].command_id, "failed");   // 4 of 10
+
+    batcher_->tick(kT0 + 10);
+    auto v = batcher_->jobView(out.job_id);
+    EXPECT_EQ(v->job.state, "stopped");
+    EXPECT_EQ(v->job.stop_reason, "too_many_unconfirmed");
+    EXPECT_EQ(v->summary.cancelled, 10u) << "the second batch never went out";
+    EXPECT_EQ(sent_.size(), 10u);
+    std::lock_guard<std::mutex> lk(log_.mu);
+    ASSERT_EQ(log_.ended.size(), 1u);
+    EXPECT_EQ(log_.ended[0].first, "stopped");
+}
+
+TEST_F(BatchTest, ExactlyThirtyPercentIsStillAcceptable) {
+    connected(20);
+    auto out = startGroup(20);
+    for (std::size_t i = 0; i < 7; ++i) confirm(out.sent[i].player_id, out.sent[i].command_id);
+    for (std::size_t i = 7; i < 10; ++i) confirm(out.sent[i].player_id, out.sent[i].command_id, "failed");   // 3 of 10
+    batcher_->tick(kT0 + 10);
+    EXPECT_EQ(batcher_->jobView(out.job_id)->job.state, "running");
+    EXPECT_EQ(sent_.size(), 20u) << "the second batch went";
+}
+
+TEST_F(BatchTest, SilenceCountsAsNotComingBack) {
+    ASSERT_EQ(players_->updateSettings({{"command_batch_size", "4"}}), "");
+    connected(8);
+    auto out = startGroup(8);
+    ASSERT_EQ(out.sent.size(), 4u);
+    batcher_->tick(kT0 + 100);
+    EXPECT_EQ(sent_.size(), 4u) << "still waiting inside the time allowed";
+    batcher_->sweep(kT0 + 400);                              // five minutes pass: all four time out
+    batcher_->tick(kT0 + 401);
+    EXPECT_EQ(batcher_->jobView(out.job_id)->job.state, "stopped");
+    EXPECT_EQ(sent_.size(), 4u);
+}
+
+TEST_F(BatchTest, AScreenThatDisappearedBeforeItsTurnIsSkippedNotCounted) {
+    ASSERT_EQ(players_->updateSettings({{"command_batch_size", "2"}}), "");
+    auto ids = connected(4);
+    auto out = startGroup(4);
+    setOnline(out.sent[0].player_id, true);
+    // the two of the second batch: one drops off the network
+    auto before = batcher_->jobView(out.job_id);
+    std::vector<std::string> second;
+    for (const auto& it : before->items) if (it.item.state == "queued") second.push_back(it.item.player_id);
+    ASSERT_EQ(second.size(), 2u);
+    setOnline(second[0], false);
+
+    for (const auto& s : out.sent) confirm(s.player_id, s.command_id);
+    batcher_->tick(kT0 + 10);
+    auto v = batcher_->jobView(out.job_id);
+    EXPECT_EQ(v->summary.skipped_offline, 1u);
+    EXPECT_EQ(v->summary.pending, 1u) << "the other one went";
+    confirm(second[1], db_->pendingCommandsOf(second[1])[0].id);
+    batcher_->tick(kT0 + 20);
+    EXPECT_EQ(batcher_->jobView(out.job_id)->job.state, "done") << "a skipped screen is not a failure";
+}
+
+TEST_F(BatchTest, ABatchWhollyAbsentWhenItsTurnComesDoesNotStallTheJob) {
+    ASSERT_EQ(players_->updateSettings({{"command_batch_size", "1"}}), "");
+    auto ids = connected(3);
+    auto out = startGroup(3);
+    auto before = batcher_->jobView(out.job_id);
+    std::vector<std::string> later;
+    for (const auto& it : before->items) if (it.item.state == "queued") later.push_back(it.item.player_id);
+    setOnline(later[0], false);                             // the whole second batch is gone
+    confirm(out.sent[0].player_id, out.sent[0].command_id);
+    batcher_->tick(kT0 + 10);
+    auto v = batcher_->jobView(out.job_id);
+    EXPECT_EQ(v->summary.skipped_offline, 1u);
+    EXPECT_EQ(v->summary.pending, 1u) << "the job went straight on to the third";
+}
+
+TEST_F(BatchTest, ACancelledJobSendsNothingMoreButWhatWentOutStays) {
+    ASSERT_EQ(players_->updateSettings({{"command_batch_size", "2"}}), "");
+    connected(5);
+    auto out = startGroup(5);
+    auto cancelled = batcher_->cancelJob(out.job_id, kT0 + 5);
+    ASSERT_TRUE(cancelled.has_value());
+    EXPECT_EQ(cancelled->state, "cancelled");
+    EXPECT_EQ(cancelled->stop_reason, "cancelled_by_user");
+    for (const auto& s : out.sent) confirm(s.player_id, s.command_id);
+    batcher_->tick(kT0 + 10);
+    EXPECT_EQ(sent_.size(), 2u);
+    auto v = batcher_->jobView(out.job_id);
+    EXPECT_EQ(v->summary.cancelled, 3u);
+    EXPECT_EQ(v->summary.executed, 2u);
+    EXPECT_FALSE(batcher_->cancelJob(out.job_id, kT0 + 20).has_value()) << "once";
+    EXPECT_FALSE(batcher_->cancelJob("nope", kT0 + 20).has_value());
+    std::lock_guard<std::mutex> lk(log_.mu);
+    ASSERT_EQ(log_.ended.size(), 1u);
+    EXPECT_EQ(log_.ended[0].first, "cancelled");
+}
+
+TEST_F(BatchTest, AJobInProgressContinuesAfterTheServerRestarts) {
+    ASSERT_EQ(players_->updateSettings({{"command_batch_size", "2"}}), "");
+    connected(4);
+    auto out = startGroup(4);
+    ASSERT_EQ(out.sent.size(), 2u);
+    for (const auto& s : out.sent) confirm(s.player_id, s.command_id);
+
+    // The server restarts: a fresh service over the same database.
+    makeBatcher();
+    batcher_->tick(kT0 + 30);
+    EXPECT_EQ(sent_.size(), 4u) << "the second batch went out after the restart";
+    auto v = batcher_->jobView(out.job_id);
+    EXPECT_EQ(v->job.state, "running");
+    EXPECT_EQ(v->summary.pending, 2u);
+}
+
+TEST_F(BatchTest, TheBatchSizeAndTheThresholdAreSettingsWithLimits) {
+    EXPECT_EQ(players_->updateSettings({{"command_batch_size", "0"}}), "invalid_command_batch_size");
+    EXPECT_EQ(players_->updateSettings({{"command_batch_size", "101"}}), "invalid_command_batch_size");
+    EXPECT_EQ(players_->updateSettings({{"command_batch_stop_percent", "0"}}), "invalid_command_batch_stop_percent");
+    EXPECT_EQ(players_->updateSettings({{"command_batch_stop_percent", "50"}, {"command_batch_size", "20"}}), "");
+    EXPECT_EQ(players_->settings().command_batch_size, 20);
+    EXPECT_EQ(players_->settings().command_batch_stop_percent, 50);
+    EXPECT_EQ(players_->updateSettings({{"command_batch_size", ""}}), "");
+    EXPECT_EQ(players_->settings().command_batch_size, 10);
+}
+
+TEST_F(BatchTest, TheJobRecordsWhoStartedItAndWhatWasAbsentAtTheStart) {
+    auto ids = connected(2);
+    const auto absent = screen("gone");                     // paired but not connected
+    auto out = startGroup(3);
+    ASSERT_TRUE(out.ok) << out.error;
+    auto v = batcher_->jobView(out.job_id);
+    EXPECT_EQ(v->job.created_by, 3);
+    EXPECT_EQ(v->job.created_by_name, "boss");
+    EXPECT_EQ(v->job.created_by_role, "admin");
+    EXPECT_EQ(v->job.target_kind, "group");
+    EXPECT_EQ(v->job.target_name, "Main / Hall");
+    EXPECT_EQ(v->summary.skipped_offline, 1u);
+    EXPECT_EQ(v->items.front().item.player_id, absent) << "absent screens are listed first";
+}

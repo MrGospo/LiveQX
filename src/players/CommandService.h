@@ -18,16 +18,45 @@
 #include "players/PlayersService.h"
 
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace liveqx::players {
 
+// Where a job stands, counted from its screens and their commands.
+struct JobSummary {
+    std::size_t total{0};
+    std::size_t queued{0};            // not yet sent
+    std::size_t pending{0};           // sent, waiting for the screen
+    std::size_t executed{0};          // sent and confirmed
+    std::size_t unconfirmed{0};       // sent, and refused / timed out / released
+    std::size_t failed{0};            // could not be sent
+    std::size_t skipped_offline{0};   // not connected (at the start or when its turn came)
+    std::size_t cancelled{0};
+};
+
+struct JobItemView {
+    JobItem     item;
+    std::string command_state;        // empty if nothing was sent
+    std::string command_result;
+};
+
+struct JobView {
+    JobRow                   job;
+    JobSummary               summary;
+    std::vector<JobItemView> items;
+};
+
 struct CommandServiceOptions {
     // Hands a message to the broker; null = no broker in this setup.
     std::function<mqtt::PublishResult(const mqtt::Message&)> publish;
     events::EventBus* events{nullptr};
+    // A command of a job was sent (any batch): for the audit trail.
+    std::function<void(const CommandRow&, const JobRow&)> on_bulk_sent;
+    // A job ended: done, stopped, or cancelled.
+    std::function<void(const JobRow&, const JobSummary&)> on_job_end;
 };
 
 struct CommandOutcome {
@@ -73,6 +102,9 @@ struct BulkOutcome {
     // expected_count_mismatch, screens_busy, broker_unavailable
     std::string error;
     BulkPlan    plan;
+    std::string job_id;
+    std::size_t queued{0};            // waiting for a later batch
+    std::int64_t batch_size{0};
     struct Sent   { std::string player_id, command_id; };
     struct Failed { std::string player_id, error; };
     std::vector<Sent>   sent;
@@ -103,9 +135,24 @@ public:
     // Sends `type` to every connected active screen of the target. The person's
     // phrase and the count they were shown must match the present state, and no
     // targeted screen may be waiting for the same command: otherwise nothing is sent.
+    // The connected screens are split into batches; the first goes out now, the
+    // rest as each previous batch is settled (see tick()). `sent` and `failed`
+    // describe the first batch.
     BulkOutcome sendToTarget(const CommandTarget& target, const std::string& type,
                              const std::string& confirm_phrase, std::size_t expected_count,
-                             std::optional<std::int64_t> issued_by, std::int64_t now = 0);
+                             std::optional<std::int64_t> issued_by, std::int64_t now = 0,
+                             const std::string& actor_name = "", const std::string& actor_role = "");
+
+    // Moves every running job on: waits for a batch to be settled, stops the job
+    // if too many of it did not come back, otherwise sends the next batch.
+    // Called often; cheap when nothing is due.
+    void tick(std::int64_t now = 0);
+
+    // Stops the rest of a running job. What already went out stays. nullopt if
+    // the job is unknown or already over.
+    std::optional<JobRow> cancelJob(const std::string& job_id, std::int64_t now = 0);
+
+    std::optional<JobView> jobView(const std::string& job_id);
 
     // The player's report on a command, taken from a heartbeat. Only the
     // player the command was sent to can settle it; anything else is ignored.
@@ -126,10 +173,15 @@ public:
 
 private:
     void announce(const CommandRow& c);
+    // Runs a job as far as it can go right now. Caller holds jobs_mu_.
+    void advance(JobRow job, std::int64_t now);
+    void endJob(const std::string& job_id, const std::string& state, const std::string& reason,
+                std::int64_t now, bool notify);
 
     PlayersDb&            db_;
     PlayersService&       players_;
     CommandServiceOptions opts_;
+    std::mutex            jobs_mu_;       // one thing at a time may move jobs on
 };
 
 }  // namespace liveqx::players

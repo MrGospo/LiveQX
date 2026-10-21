@@ -462,6 +462,9 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     rbac.registerEndpoint("POST /api/player-groups/{id}/command",   rbacRole(RbacRole::Operator)); // and the right to command the group
     rbac.registerEndpoint("POST /api/player-objects/{id}/command",  rbacRole(RbacRole::Operator)); // and the right to command the object
     rbac.registerEndpoint("POST /api/players/command-all",          rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("GET /api/command-jobs",                  rbacRole(RbacRole::Operator));
+    rbac.registerEndpoint("GET /api/command-jobs/{id}",             rbacRole(RbacRole::Operator));
+    rbac.registerEndpoint("POST /api/command-jobs/{id}/cancel",     rbacRole(RbacRole::Operator)); // the starter, or an administrator
     rbac.registerEndpoint("PUT /api/players/{id}/group",            rbacRole(RbacRole::Operator)); // needs the move right on both groups
     rbac.registerEndpoint("GET /api/auth/users/{uid}/player-grants", rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("PUT /api/auth/users/{uid}/player-grants", rbacRole(RbacRole::Admin));
@@ -3587,7 +3590,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     // both). A target that changed meanwhile, or a screen still waiting for the
     // same command, stops the whole thing before anything is sent. Screens that
     // are not connected are left out and listed.
-    auto bulkCommand = [pls, cmds, al, accessFor, mountActorOf, players_unavailable, auditNode, auditPlayer]
+    auto bulkCommand = [pls, cmds, accessFor, mountActorOf, players_unavailable, auditNode, auditPlayer]
                        (const httplib::Request& req, httplib::Response& res,
                         liveqx::players::TargetKind kind, std::int64_t id) {
         using namespace liveqx::players;
@@ -3659,7 +3662,8 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             phrase = body["confirm_phrase"].get<std::string>();
         const auto [actor_id, actor_name] = mountActorOf(req);
         const auto out = cmds->sendToTarget(target, type, phrase,
-                                            static_cast<std::size_t>(body["expected_count"].get<std::int64_t>()), actor_id);
+                                            static_cast<std::size_t>(body["expected_count"].get<std::int64_t>()), actor_id,
+                                            0, actor_name, access->isAdmin() ? "admin" : "operator");
         if (!out.ok) {
             int code = 400;
             json err = {{"error", out.error}};
@@ -3689,27 +3693,11 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         const std::string action = std::string("player.command_") + kind_name;
         if (kind == TargetKind::All) auditPlayer(action, summary, "");
         else auditNode(action, summary, kind == TargetKind::Group ? "player_group" : "player_object", id);
-        if (al) {
-            for (const auto& x : out.sent) {
-                liveqx::audit::AuditEvent ev;
-                ev.category      = liveqx::audit::Category::Player;
-                ev.action        = "player.command_sent";
-                ev.actor_user_id = actor_id;
-                ev.actor_username = actor_name;
-                ev.actor_role    = access->isAdmin() ? "admin" : "operator";
-                ev.target_type   = "player";
-                ev.target_id     = x.player_id;
-                ev.http_method   = "POST";
-                ev.http_path     = req.path;
-                ev.http_status   = 200;
-                ev.summary       = "player.command_sent via " + std::string(kind_name);
-                ev.details_json  = json{{"type", type}, {"command_id", x.command_id}, {"via", kind_name},
-                                        {"target", out.plan.target_name}}.dump();
-                al->log(std::move(ev));
-            }
-        }
-        writeJson(res, 200, json{{"type", type}, {"target", planJson(out.plan)}, {"sent", std::move(sent)},
-                                 {"skipped_offline", out.plan.offline}, {"failed", std::move(failed)}});
+        // The per-screen audit rows are written by the service as each batch goes out.
+        writeJson(res, 200, json{{"job_id", out.job_id}, {"type", type}, {"target", planJson(out.plan)},
+                                 {"batch_size", out.batch_size}, {"queued", out.queued},
+                                 {"sent", std::move(sent)}, {"skipped_offline", out.plan.offline},
+                                 {"failed", std::move(failed)}});
     };
 
     s.Post(R"(/api/player-groups/(\d+)/command)",
@@ -3723,6 +3711,93 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     s.Post("/api/players/command-all",
            [bulkCommand](const httplib::Request& req, httplib::Response& res) {
         bulkCommand(req, res, liveqx::players::TargetKind::All, 0);
+    });
+
+
+    // ─── Jobs that send a command in batches ────────────────────────────────
+    // Visible to whoever started them and to administrators.
+    auto jobJson = [](const liveqx::players::JobView& v, bool with_items) {
+        const auto& j = v.job;
+        json o = {{"id", j.id}, {"type", j.type},
+                  {"target", {{"kind", j.target_kind}, {"id", j.target_id}, {"name", j.target_name}}},
+                  {"state", j.state}, {"stop_reason", j.stop_reason}, {"batch_size", j.batch_size},
+                  {"stop_percent", j.stop_percent}, {"created_at", j.created_at},
+                  {"created_by_name", j.created_by_name},
+                  {"summary", {{"total", v.summary.total}, {"queued", v.summary.queued},
+                               {"pending", v.summary.pending}, {"executed", v.summary.executed},
+                               {"unconfirmed", v.summary.unconfirmed}, {"failed", v.summary.failed},
+                               {"skipped_offline", v.summary.skipped_offline},
+                               {"cancelled", v.summary.cancelled}}}};
+        if (j.created_by)  o["created_by"] = *j.created_by;
+        if (j.finished_at) o["finished_at"] = *j.finished_at;
+        if (with_items) {
+            json arr = json::array();
+            for (const auto& it : v.items) {
+                json x = {{"player_id", it.item.player_id}, {"batch", it.item.batch_no}, {"state", it.item.state}};
+                if (!it.item.command_id.empty()) x["command_id"] = it.item.command_id;
+                if (!it.command_state.empty())   x["command_state"] = it.command_state;
+                if (!it.command_result.empty())  x["command_result"] = it.command_result;
+                if (!it.item.error.empty())      x["error"] = it.item.error;
+                arr.push_back(std::move(x));
+            }
+            o["items"] = std::move(arr);
+        }
+        return o;
+    };
+    auto mayAccessJob = [accessFor, mountActorOf](const httplib::Request& req, const liveqx::players::JobRow& j,
+                                                  bool& signed_in) {
+        auto access = accessFor(req);
+        signed_in = access.has_value();
+        if (!access) return false;
+        if (access->isAdmin()) return true;
+        const auto [actor_id, actor_name] = mountActorOf(req);
+        return actor_id && j.created_by && *actor_id == *j.created_by;
+    };
+
+    s.Get("/api/command-jobs",
+          [pls, cmds, players_unavailable, accessFor, mountActorOf, jobJson](const httplib::Request& req, httplib::Response& res) {
+        if (!pls || !cmds) { players_unavailable(res); return; }
+        auto access = accessFor(req);
+        if (!access) { writeJson(res, 401, {{"error", "unauthorized"}}); return; }
+        std::optional<std::int64_t> only;
+        if (!access->isAdmin()) {
+            const auto [actor_id, actor_name] = mountActorOf(req);
+            if (!actor_id) { writeJson(res, 200, json{{"jobs", json::array()}}); return; }
+            only = actor_id;
+        }
+        json arr = json::array();
+        for (const auto& j : pls->db().listJobs(only, 50))
+            if (auto v = cmds->jobView(j.id)) arr.push_back(jobJson(*v, false));
+        writeJson(res, 200, json{{"jobs", std::move(arr)}});
+    });
+
+    s.Get(R"(/api/command-jobs/([^/]+))",
+          [pls, cmds, players_unavailable, mayAccessJob, jobJson](const httplib::Request& req, httplib::Response& res) {
+        if (!pls || !cmds) { players_unavailable(res); return; }
+        auto v = cmds->jobView(req.matches[1]);
+        bool signed_in = false;
+        if (!v) { writeJson(res, 404, {{"error", "not_found"}}); return; }
+        if (!mayAccessJob(req, v->job, signed_in)) {
+            writeJson(res, signed_in ? 404 : 401, {{"error", signed_in ? "not_found" : "unauthorized"}});
+            return;
+        }
+        writeJson(res, 200, jobJson(*v, true));
+    });
+
+    s.Post(R"(/api/command-jobs/([^/]+)/cancel)",
+           [pls, cmds, players_unavailable, mayAccessJob, jobJson, auditPlayer](const httplib::Request& req, httplib::Response& res) {
+        if (!pls || !cmds) { players_unavailable(res); return; }
+        const std::string id = req.matches[1];
+        auto before = pls->db().findJob(id);
+        bool signed_in = false;
+        if (!before) { writeJson(res, 404, {{"error", "not_found"}}); return; }
+        if (!mayAccessJob(req, *before, signed_in)) {
+            writeJson(res, signed_in ? 404 : 401, {{"error", signed_in ? "not_found" : "unauthorized"}});
+            return;
+        }
+        if (!cmds->cancelJob(id)) { writeJson(res, 409, {{"error", "not_running"}}); return; }
+        auditPlayer("player.command_job_cancel", json{{"job_id", id}, {"type", before->type}, {"target", before->target_name}}, "");
+        writeJson(res, 200, jobJson(*cmds->jobView(id), true));
     });
 
     // ─── Who may see and command which players (B13) ────────────────────────
