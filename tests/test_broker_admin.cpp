@@ -226,3 +226,46 @@ TEST(BrokerAdmin, ThePlayerIdFilterKeepsOtherNamesSafe) {
     upper[0] = 'F';
     EXPECT_FALSE(BrokerAdmin::looksLikePlayerId(upper)) << "ids are lowercase";
 }
+
+TEST(BrokerAdmin, RemovingAPlayerThenWipesItsRetainedPresenceAndOnlyAfterTheClientIsGone) {
+    Stand s;
+    ASSERT_TRUE(s.admin->ensureBaseline().ok);
+    ASSERT_TRUE(s.admin->provisionPlayer(A).ok);
+    s.fake.published.clear();
+    ASSERT_TRUE(s.admin->removePlayer(A).ok);
+    ASSERT_EQ(s.fake.published.size(), 2u);
+    EXPECT_EQ(s.fake.published[0].topic, "$CONTROL/dynamic-security/v1") << "the client goes first: its will fires then";
+    const auto& wipe = s.fake.published[1];
+    EXPECT_EQ(wipe.topic, "liveqx/v1/players/" + A + "/presence");
+    EXPECT_TRUE(wipe.payload.empty()) << "an empty retained message deletes the retained one";
+    EXPECT_TRUE(wipe.retain);
+}
+
+TEST(BrokerAdmin, NothingIsWipedIfTheRemovalDidNotHappen) {
+    Stand s(std::chrono::milliseconds(100));
+    ASSERT_TRUE(s.admin->ensureBaseline().ok);
+    s.fake.published.clear();
+    s.fake.silent = true;
+    EXPECT_FALSE(s.admin->removePlayer(A).ok);
+    for (const auto& m : s.fake.published) EXPECT_NE(m.topic, "liveqx/v1/players/" + A + "/presence");
+}
+
+TEST(BrokerAdmin, ReconcileWipesThePresenceOfEveryPlayerItRemoves) {
+    Stand s;
+    ASSERT_TRUE(s.admin->reconcile({A, B}).ok);
+    s.fake.published.clear();
+    ASSERT_TRUE(s.admin->reconcile({A}).ok);
+    int wiped = 0;
+    for (const auto& m : s.fake.published)
+        if (m.topic == "liveqx/v1/players/" + B + "/presence" && m.payload.empty() && m.retain) ++wiped;
+    EXPECT_EQ(wiped, 1);
+}
+
+TEST(BrokerAdmin, TheServerMayPublishToPresenceTopicsToWipeThem) {
+    bool found = false;
+    for (const auto& c : BrokerAdmin::baselineCommands())
+        if (c["command"] == "addRoleACL" && c["rolename"] == "server-ops" && c["acltype"] == "publishClientSend" &&
+            c["topic"] == "liveqx/v1/players/+/presence")
+            found = true;
+    EXPECT_TRUE(found);
+}

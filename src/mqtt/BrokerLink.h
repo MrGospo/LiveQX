@@ -83,6 +83,11 @@ public:
 
     BrokerLinkStatus status() const;
 
+    // Asks for the retained message of a topic to be deleted (an empty retained
+    // publish) as soon as the link is up. Safe to call from a message handler:
+    // it only queues, the link's own thread does the publishing.
+    void clearRetained(const std::string& topic);
+
     // Publishes through the standing connection. NotConnected while there is
     // none (not set up yet, broker down); never blocks on the network.
     PublishResult publish(const Message& m);
@@ -101,6 +106,7 @@ private:
     mutable std::mutex mu_;
     std::condition_variable cv_;
     bool             dirty_{true};              // a reconcile is due
+    std::set<std::string> clear_retained_;      // topics waiting to be wiped
     bool             poke_{false};              // wake the thread (a request or a state change)
     BrokerLinkStatus status_;
 

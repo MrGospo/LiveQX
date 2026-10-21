@@ -411,6 +411,7 @@ private:
         ctrl({"addRoleACL", "server-ops", "publishClientSend", "liveqx/v1/broadcast/commands", "allow"});
         ctrl({"addRoleACL", "server-ops", "subscribePattern", "liveqx/v1/players/+/presence", "allow"});
         ctrl({"addRoleACL", "server-ops", "publishClientReceive", "liveqx/v1/players/+/presence", "allow"});
+        ctrl({"addRoleACL", "server-ops", "publishClientSend", "liveqx/v1/players/+/presence", "allow"});
         ctrl({"addClientRole", kBrokerName, "server-ops", "5"});
         return true;
     }

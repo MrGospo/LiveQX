@@ -60,6 +60,8 @@ json BrokerAdmin::baselineCommands() {
     c.push_back(aclCommand(ops, "publishClientSend", kBroadcastTopic));
     c.push_back(aclCommand(ops, "subscribePattern", "liveqx/v1/players/+/presence"));
     c.push_back(aclCommand(ops, "publishClientReceive", "liveqx/v1/players/+/presence"));
+    // To wipe the retained "online"/"offline" of a player that no longer exists.
+    c.push_back(aclCommand(ops, "publishClientSend", "liveqx/v1/players/+/presence"));
     return c;
 }
 
@@ -182,7 +184,22 @@ BrokerAdminResult BrokerAdmin::provisionPlayer(const std::string& id) {
     if (!r.ok) return r;
     return ensureBindings(id, playerBindings(id));
 }
-BrokerAdminResult BrokerAdmin::removePlayer(const std::string& id) { return run(removalCommands(id)); }
+BrokerAdminResult BrokerAdmin::removePlayer(const std::string& id) {
+    auto r = run(removalCommands(id));
+    if (r.ok) clearPresence(id);
+    return r;
+}
+
+bool BrokerAdmin::clearPresence(const std::string& id) {
+    // An empty retained message deletes the retained one. Done AFTER the client
+    // is gone: removing it makes the broker publish its will ("offline"), and
+    // that must not be the last word.
+    Message m;
+    m.topic  = presenceTopic(id);
+    m.retain = true;
+    m.qos    = 1;
+    return client_.publish(m) == PublishResult::Ok;
+}
 
 BrokerAdminResult BrokerAdmin::listClients(std::set<std::string>& out) {
     auto r = run(json::array({{{"command", "listClients"}, {"verbose", false}}}));

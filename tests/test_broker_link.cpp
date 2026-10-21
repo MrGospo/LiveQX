@@ -255,3 +255,50 @@ TEST(BrokerLink, ItListensToTheTopicsItIsGivenAndPassesOnWhatIsNotAReplyToItself
     ASSERT_EQ(got.size(), 1u) << "the administrative reply is not for the others";
     EXPECT_EQ(got[0], "liveqx/v1/players/" + A + "/presence=online");
 }
+
+TEST(BrokerLink, ARetainedMessageAskedToBeWipedIsSentEmptyOnceTheLinkIsUp) {
+    Rig rig;
+    rig.broker_up = false;
+    BrokerLink link(rig.options());
+    link.start();
+    ASSERT_TRUE(waitFor([&] { return rig.madeCount() == 1; }));
+    link.clearRetained("liveqx/v1/players/" + A + "/presence");       // asked while the broker is away
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    auto wipes = [&] {
+        int n = 0;
+        for (const auto& m : rig.last()->published)
+            if (m.topic == "liveqx/v1/players/" + A + "/presence" && m.retain && m.payload.empty()) ++n;
+        return n;
+    };
+    EXPECT_EQ(wipes(), 0);
+    rig.last()->setLink(true);
+    ASSERT_TRUE(waitFor([&] { return wipes() == 1; })) << "sent when the broker came back";
+    link.clearRetained("liveqx/v1/players/" + A + "/presence");
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_GE(wipes(), 1);
+    link.stop();
+}
+
+TEST(BrokerLink, AskingFromTheMessageHandlerDoesNotDeadlockOrBlock) {
+    Rig rig;
+    BrokerLink* self = nullptr;
+    BrokerLinkOptions o = rig.options();
+    o.subscriptions = {"liveqx/v1/players/+/presence"};
+    o.on_message = [&](const liveqx::mqtt::Message& m) { self->clearRetained(m.topic); };
+    BrokerLink link(std::move(o));
+    self = &link;
+    link.start();
+    ASSERT_TRUE(waitFor([&] { return link.status().state == "connected"; }));
+    liveqx::mqtt::Message ghost;
+    ghost.topic = "liveqx/v1/players/" + B + "/presence";
+    ghost.payload = "online";
+    rig.last()->deliver(ghost);
+    ASSERT_TRUE(waitFor([&] {
+        for (const auto& m : rig.last()->published)
+            if (m.topic == ghost.topic && m.retain && m.payload.empty()) return true;
+        return false;
+    }));
+    const auto t0 = std::chrono::steady_clock::now();
+    link.stop();
+    EXPECT_LT(std::chrono::steady_clock::now() - t0, 2s);
+}

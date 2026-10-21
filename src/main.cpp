@@ -960,6 +960,10 @@ int main(int argc, char* argv[]) {
             liveqx::mqtt::BrokerLink* link{nullptr};
             void poke() { std::lock_guard<std::mutex> lk(mu); if (link) link->requestSync(); }
             void set(liveqx::mqtt::BrokerLink* l) { std::lock_guard<std::mutex> lk(mu); link = l; }
+            void clearRetained(const std::string& topic) {
+                std::lock_guard<std::mutex> lk(mu);
+                if (link) link->clearRetained(topic);
+            }
             liveqx::mqtt::PublishResult publish(const liveqx::mqtt::Message& m) {
                 std::lock_guard<std::mutex> lk(mu);
                 return link ? link->publish(m) : liveqx::mqtt::PublishResult::NotConnected;
@@ -1143,10 +1147,15 @@ int main(int argc, char* argv[]) {
                 };
                 // Presence from the broker is the second source next to heartbeats.
                 bo.subscriptions = {"liveqx/v1/players/+/presence"};
-                bo.on_message = [&presence_service](const liveqx::mqtt::Message& m) {
+                bo.on_message = [&presence_service, &players_db, broker_hook](const liveqx::mqtt::Message& m) {
                     if (!presence_service) return;
-                    if (auto p = liveqx::players::PresenceService::parsePresenceMessage(m.topic, m.payload))
-                        presence_service->onMqttPresence(p->first, p->second);
+                    auto p = liveqx::players::PresenceService::parsePresenceMessage(m.topic, m.payload);
+                    if (!p) return;
+                    // Presence of a player the database does not know: it was removed, and
+                    // its retained message outlived it. Wipe it (the broker re-sends retained
+                    // messages at every subscription, so older leftovers go too).
+                    if (!players_db.findPlayer(p->first)) { broker_hook->clearRetained(m.topic); return; }
+                    presence_service->onMqttPresence(p->first, p->second);
                 };
                 bo.trust_pem = [&players_service] { return players_service->caCertPem(); };
                 bo.wanted = [&players_db]() {

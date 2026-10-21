@@ -415,3 +415,50 @@ TEST_F(MosquittoBrokerTest, TheLinkIssuesAPlayerAndHearsItsPresenceEndToEnd) {
     dev.stop();
     link.stop();
 }
+
+TEST_F(MosquittoBrokerTest, RemovingAPlayerLeavesNoRetainedPresenceBehindAndStaleOnesAreSwept) {
+    AdminRig rig(broker_->serverOptions());
+    ASSERT_TRUE(rig.up());
+    ASSERT_TRUE(rig.admin.ensureBaseline().ok);
+    auto gone = broker_->enrollPlayer(/*provision=*/true);
+    auto stays = broker_->enrollPlayer(/*provision=*/true);
+    for (const auto* p : {&gone, &stays}) {
+        mqtt::MosquittoClient dev(broker_->playerOptions(*p));
+        ASSERT_TRUE(dev.start());
+        ASSERT_TRUE(waitFor([&] { return dev.connected(); })) << broker_->log();
+        mqtt::Message hello;
+        hello.topic = presenceOf(*p);
+        hello.payload = "online";
+        hello.retain = true;
+        ASSERT_EQ(dev.publish(hello), mqtt::PublishResult::Ok);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        dev.stop();
+    }
+
+    // What a late subscriber is told: only the retained messages that still exist.
+    auto retainedSeenBy = [&](const std::string& who) {
+        auto o = broker_->serverOptions();
+        o.client_id = who;
+        mqtt::MosquittoClient probe(o);
+        Inbox seen;
+        probe.setMessageHandler([&](const mqtt::Message& m) { seen.add(m); });
+        probe.subscribe("liveqx/v1/players/+/presence", 1);
+        EXPECT_TRUE(probe.start());
+        EXPECT_TRUE(waitFor([&] { return probe.connected(); }));
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        probe.stop();
+        std::lock_guard<std::mutex> lk(seen.mu);
+        std::set<std::string> topics;
+        for (const auto& m : seen.got) if (!m.payload.empty()) topics.insert(m.topic);
+        return topics;
+    };
+    auto before = retainedSeenBy("probe-1");
+    ASSERT_TRUE(before.count(presenceOf(gone)));
+    ASSERT_TRUE(before.count(presenceOf(stays)));
+
+    ASSERT_TRUE(rig.admin.removePlayer(gone.id).ok);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    auto after = retainedSeenBy("probe-2");
+    EXPECT_FALSE(after.count(presenceOf(gone))) << "its retained presence is gone with it";
+    EXPECT_TRUE(after.count(presenceOf(stays)));
+}

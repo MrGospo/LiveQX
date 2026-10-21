@@ -85,8 +85,11 @@ public:
     BrokerAdminResult ensureBaseline();
     // Client + personal role + shared role for one player.
     BrokerAdminResult provisionPlayer(const std::string& player_id);
-    // Removes the player's client and role (and so closes its rights at once).
+    // Removes the player's client and role (and so closes its rights at once),
+    // then wipes the retained presence it left on the broker.
     BrokerAdminResult removePlayer(const std::string& player_id);
+    // Deletes the retained presence message of a player. False if it could not be sent.
+    bool clearPresence(const std::string& player_id);
     // Names of all clients / roles on the broker.
     BrokerAdminResult listClients(std::set<std::string>& out);
     BrokerAdminResult listRoles(std::set<std::string>& out);

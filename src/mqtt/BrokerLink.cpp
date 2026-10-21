@@ -47,6 +47,15 @@ void BrokerLink::requestSync() {
     cv_.notify_all();
 }
 
+void BrokerLink::clearRetained(const std::string& topic) {
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (clear_retained_.size() < 100000) clear_retained_.insert(topic);
+        poke_ = true;
+    }
+    cv_.notify_all();
+}
+
 BrokerLinkStatus BrokerLink::status() const {
     std::lock_guard<std::mutex> lk(mu_);
     return status_;
@@ -186,6 +195,24 @@ void BrokerLink::run() {
             if (rep.issued || rep.removed || !rep.ok)
                 LOG_INFO("Broker: reconciled — {} issued, {} removed, {} failed{}{}", rep.issued, rep.removed,
                          rep.failed, rep.error.empty() ? "" : ": ", rep.error);
+        }
+
+        if (up) {
+            std::set<std::string> wipe;
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                wipe.swap(clear_retained_);
+            }
+            for (const auto& topic : wipe) {
+                Message m;
+                m.topic  = topic;
+                m.retain = true;
+                m.qos    = 1;
+                if (client_->publish(m) != PublishResult::Ok) {      // try again later
+                    std::lock_guard<std::mutex> lk(mu_);
+                    clear_retained_.insert(topic);
+                }
+            }
         }
 
         bool again = false;
