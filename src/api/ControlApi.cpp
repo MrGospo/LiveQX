@@ -459,6 +459,9 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     rbac.registerEndpoint("POST /api/players/{id}/command",         rbacRole(RbacRole::Operator)); // and the right to command that screen
     rbac.registerEndpoint("GET /api/players/{id}/commands",         rbacRole(RbacRole::Viewer));
     rbac.registerEndpoint("POST /api/players/{id}/commands/{cid}/release", rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("POST /api/player-groups/{id}/command",   rbacRole(RbacRole::Operator)); // and the right to command the group
+    rbac.registerEndpoint("POST /api/player-objects/{id}/command",  rbacRole(RbacRole::Operator)); // and the right to command the object
+    rbac.registerEndpoint("POST /api/players/command-all",          rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("PUT /api/players/{id}/group",            rbacRole(RbacRole::Operator)); // needs the move right on both groups
     rbac.registerEndpoint("GET /api/auth/users/{uid}/player-grants", rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("PUT /api/auth/users/{uid}/player-grants", rbacRole(RbacRole::Admin));
@@ -3575,6 +3578,151 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         if (!released) { writeJson(res, 409, {{"error", "not_pending"}}); return; }
         auditPlayer("player.command_release", json{{"command_id", cid}, {"type", c->type}}, id);
         writeJson(res, 200, commandJson(*released));
+    });
+
+
+    // ─── Commands to a group, an object, everyone (B13) ─────────────────────
+    // The person confirms by typing a phrase that names the target and the
+    // command, and by the number of screens they were shown (`dry_run` returns
+    // both). A target that changed meanwhile, or a screen still waiting for the
+    // same command, stops the whole thing before anything is sent. Screens that
+    // are not connected are left out and listed.
+    auto bulkCommand = [pls, cmds, al, accessFor, mountActorOf, players_unavailable, auditNode, auditPlayer]
+                       (const httplib::Request& req, httplib::Response& res,
+                        liveqx::players::TargetKind kind, std::int64_t id) {
+        using namespace liveqx::players;
+        if (!pls || !cmds) { players_unavailable(res); return; }
+        auto access = accessFor(req);
+        if (!access) { writeJson(res, 401, {{"error", "unauthorized"}}); return; }
+        json body;
+        if (!parseJsonBody(req, res, body)) return;
+        if (!body.is_object() || !body.contains("type") || !body["type"].is_string()) {
+            writeJson(res, 400, {{"error", "invalid_type"}});
+            return;
+        }
+        const std::string type = body["type"].get<std::string>();
+        if (!CommandService::supportedType(type)) { writeJson(res, 400, {{"error", "unsupported_type"}}); return; }
+        const bool dry_run = body.contains("dry_run") && body["dry_run"].is_boolean() && body["dry_run"].get<bool>();
+
+        // Who may aim this at what: unseen is "not found", seen but not
+        // allowed is "forbidden". Whole-group reload is open to anyone who may
+        // command a screen of that group; the rest needs the mark.
+        bool visible = false, allowed = false;
+        switch (kind) {
+            case TargetKind::All:
+                visible = true;
+                allowed = access->canCommandAll();
+                break;
+            case TargetKind::Group:
+                if (auto g = pls->db().findGroup(id); g && access->canSeeGroup(g->id, g->object_id)) {
+                    visible = true;
+                    Place place;
+                    place.group_id = g->id;
+                    place.object_id = g->object_id;
+                    allowed = type == CommandService::kReloadPlaylist ? access->canCommandPlayer(place)
+                                                                      : access->canCommandGroup(place);
+                }
+                break;
+            case TargetKind::Object:
+                if (auto o = pls->db().findObject(id);
+                    o && (access->canSeeObject(o->id) || access->seesObjectContaining(o->id))) {
+                    visible = true;
+                    allowed = access->canCommandObject(o->id);
+                }
+                break;
+        }
+        if (!visible) { writeJson(res, 404, {{"error", "not_found"}}); return; }
+        if (!allowed) { writeJson(res, 403, {{"error", "forbidden"}}); return; }
+
+        const CommandTarget target{kind, id};
+        auto planJson = [](const BulkPlan& p) {
+            json busy = json::array();
+            for (const auto& b : p.busy) busy.push_back({{"player_id", b.player_id}, {"command_id", b.command_id}});
+            return json{{"target_name", p.target_name}, {"required_phrase", p.required_phrase},
+                        {"expected_count", p.total}, {"online", p.online.size()},
+                        {"offline", p.offline}, {"busy", std::move(busy)}};
+        };
+        if (dry_run) {
+            const auto plan = cmds->plan(target, type);
+            if (!plan.found) { writeJson(res, 404, {{"error", "not_found"}}); return; }
+            writeJson(res, 200, planJson(plan));
+            return;
+        }
+
+        if (!body.contains("expected_count") || !body["expected_count"].is_number_integer() ||
+            body["expected_count"].get<std::int64_t>() < 0) {
+            writeJson(res, 400, {{"error", "invalid_expected_count"}});
+            return;
+        }
+        std::string phrase;
+        if (body.contains("confirm_phrase") && body["confirm_phrase"].is_string())
+            phrase = body["confirm_phrase"].get<std::string>();
+        const auto [actor_id, actor_name] = mountActorOf(req);
+        const auto out = cmds->sendToTarget(target, type, phrase,
+                                            static_cast<std::size_t>(body["expected_count"].get<std::int64_t>()), actor_id);
+        if (!out.ok) {
+            int code = 400;
+            json err = {{"error", out.error}};
+            if (out.error == "target_not_found")            code = 404;
+            else if (out.error == "no_targets")             code = 409;
+            else if (out.error == "expected_count_mismatch") { code = 409; err["actual"] = out.plan.total; }
+            else if (out.error == "screens_busy") {
+                code = 409;
+                json busy = json::array();
+                for (const auto& b : out.plan.busy) busy.push_back({{"player_id", b.player_id}, {"command_id", b.command_id}});
+                err["busy"] = std::move(busy);
+            }
+            else if (out.error == "broker_unavailable")     code = 503;
+            writeJson(res, code, err);
+            return;
+        }
+
+        json sent = json::array(), failed = json::array();
+        for (const auto& x : out.sent) sent.push_back({{"player_id", x.player_id}, {"command_id", x.command_id}});
+        for (const auto& x : out.failed) failed.push_back({{"player_id", x.player_id}, {"error", x.error}});
+        const char* kind_name = kind == TargetKind::Group ? "group" : kind == TargetKind::Object ? "object" : "all";
+
+        // One row for the act, one for each screen it reached.
+        const json summary = {{"type", type}, {"target", out.plan.target_name},
+                              {"sent", out.sent.size()}, {"skipped_offline", out.plan.offline.size()},
+                              {"failed", out.failed.size()}};
+        const std::string action = std::string("player.command_") + kind_name;
+        if (kind == TargetKind::All) auditPlayer(action, summary, "");
+        else auditNode(action, summary, kind == TargetKind::Group ? "player_group" : "player_object", id);
+        if (al) {
+            for (const auto& x : out.sent) {
+                liveqx::audit::AuditEvent ev;
+                ev.category      = liveqx::audit::Category::Player;
+                ev.action        = "player.command_sent";
+                ev.actor_user_id = actor_id;
+                ev.actor_username = actor_name;
+                ev.actor_role    = access->isAdmin() ? "admin" : "operator";
+                ev.target_type   = "player";
+                ev.target_id     = x.player_id;
+                ev.http_method   = "POST";
+                ev.http_path     = req.path;
+                ev.http_status   = 200;
+                ev.summary       = "player.command_sent via " + std::string(kind_name);
+                ev.details_json  = json{{"type", type}, {"command_id", x.command_id}, {"via", kind_name},
+                                        {"target", out.plan.target_name}}.dump();
+                al->log(std::move(ev));
+            }
+        }
+        writeJson(res, 200, json{{"type", type}, {"target", planJson(out.plan)}, {"sent", std::move(sent)},
+                                 {"skipped_offline", out.plan.offline}, {"failed", std::move(failed)}});
+    };
+
+    s.Post(R"(/api/player-groups/(\d+)/command)",
+           [bulkCommand](const httplib::Request& req, httplib::Response& res) {
+        bulkCommand(req, res, liveqx::players::TargetKind::Group, std::stoll(req.matches[1]));
+    });
+    s.Post(R"(/api/player-objects/(\d+)/command)",
+           [bulkCommand](const httplib::Request& req, httplib::Response& res) {
+        bulkCommand(req, res, liveqx::players::TargetKind::Object, std::stoll(req.matches[1]));
+    });
+    s.Post("/api/players/command-all",
+           [bulkCommand](const httplib::Request& req, httplib::Response& res) {
+        bulkCommand(req, res, liveqx::players::TargetKind::All, 0);
     });
 
     // ─── Who may see and command which players (B13) ────────────────────────

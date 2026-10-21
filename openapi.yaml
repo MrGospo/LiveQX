@@ -4851,6 +4851,173 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/player-groups/{id}/command:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    post:
+      tags: [Players]
+      summary: Send a command to every screen of a group
+      description: |
+        Operator+ с отметкой «команда группе» на этой группе или её объекте. `reload_playlist` — любому
+        оператору с доступом к группе. Чужая группа — `404`.
+        Подтверждение: `confirm_phrase` — фраза вида «<команда> <group|object> <название>» (для
+        группы название — «объект / группа»; для «всех» — «<команда> all»; регистр и пробелы не
+        важны) и `expected_count` — число подключённых и неподключённых экранов цели, которое
+        показал интерфейс. `dry_run: true` ничего не отправляет и возвращает нужную фразу и
+        число. Если состав изменился (`409 expected_count_mismatch`, в ответе `actual`) или
+        какой-то экран ещё ждёт такую же команду (`409 screens_busy`, список `busy`) —
+        не уходит ничего. Экраны не в сети пропускаются и перечисляются в `skipped_offline`.
+        Аудит: сводная строка `player.command_group|object|all` и строка `player.command_sent`
+        на каждого получателя.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkCommandRequest' }
+      responses:
+        '200':
+          description: Отчёт (или план при `dry_run`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BulkCommandReport' }
+        '400':
+          description: '`invalid_type`, `unsupported_type`, `invalid_expected_count`, `confirm_phrase_mismatch`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: '`forbidden` — нет нужной отметки.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`not_found` — цели нет или она вне прав.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`expected_count_mismatch`, `screens_busy`, `no_targets`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: '`broker_unavailable`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/player-objects/{id}/command:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    post:
+      tags: [Players]
+      summary: Send a command to every screen of an object
+      description: |
+        Operator+ с отметкой «команда объекту». Отметка «команда группе» её не заменяет.
+        Подтверждение: `confirm_phrase` — фраза вида «<команда> <group|object> <название>» (для
+        группы название — «объект / группа»; для «всех» — «<команда> all»; регистр и пробелы не
+        важны) и `expected_count` — число подключённых и неподключённых экранов цели, которое
+        показал интерфейс. `dry_run: true` ничего не отправляет и возвращает нужную фразу и
+        число. Если состав изменился (`409 expected_count_mismatch`, в ответе `actual`) или
+        какой-то экран ещё ждёт такую же команду (`409 screens_busy`, список `busy`) —
+        не уходит ничего. Экраны не в сети пропускаются и перечисляются в `skipped_offline`.
+        Аудит: сводная строка `player.command_group|object|all` и строка `player.command_sent`
+        на каждого получателя.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkCommandRequest' }
+      responses:
+        '200':
+          description: Отчёт (или план при `dry_run`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BulkCommandReport' }
+        '400':
+          description: '`invalid_type`, `unsupported_type`, `invalid_expected_count`, `confirm_phrase_mismatch`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: '`forbidden` — нет нужной отметки.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`not_found` — цели нет или она вне прав.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`expected_count_mismatch`, `screens_busy`, `no_targets`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: '`broker_unavailable`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/players/command-all:
+    post:
+      tags: [Players]
+      summary: Send a command to every screen
+      description: |
+        Только администратор.
+        Подтверждение: `confirm_phrase` — фраза вида «<команда> <group|object> <название>» (для
+        группы название — «объект / группа»; для «всех» — «<команда> all»; регистр и пробелы не
+        важны) и `expected_count` — число подключённых и неподключённых экранов цели, которое
+        показал интерфейс. `dry_run: true` ничего не отправляет и возвращает нужную фразу и
+        число. Если состав изменился (`409 expected_count_mismatch`, в ответе `actual`) или
+        какой-то экран ещё ждёт такую же команду (`409 screens_busy`, список `busy`) —
+        не уходит ничего. Экраны не в сети пропускаются и перечисляются в `skipped_offline`.
+        Аудит: сводная строка `player.command_group|object|all` и строка `player.command_sent`
+        на каждого получателя.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkCommandRequest' }
+      responses:
+        '200':
+          description: Отчёт (или план при `dry_run`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BulkCommandReport' }
+        '400':
+          description: '`invalid_type`, `unsupported_type`, `invalid_expected_count`, `confirm_phrase_mismatch`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: '`forbidden` — нет нужной отметки.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`not_found` — цели нет или она вне прав.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`expected_count_mismatch`, `screens_busy`, `no_targets`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: '`broker_unavailable`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/players/settings:
     get:
       tags: [Players]
@@ -5130,6 +5297,49 @@ components:
             groups:
               type: array
               items: { $ref: '#/components/schemas/PlayerGroup' }
+
+    BulkCommandRequest:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string, enum: [restart_player, reboot_screen, reload_playlist] }
+        dry_run: { type: boolean }
+        confirm_phrase: { type: string }
+        expected_count: { type: integer, minimum: 0 }
+
+    BulkCommandReport:
+      type: object
+      description: 'При `dry_run`: `target_name`, `required_phrase`, `expected_count`, `online`, `offline`, `busy`. После отправки: `type`, `target`, `sent`, `skipped_offline`, `failed`.'
+      properties:
+        type: { type: string }
+        target: { type: object }
+        target_name: { type: string }
+        required_phrase: { type: string }
+        expected_count: { type: integer }
+        online: { type: integer }
+        offline: { type: array, items: { type: string, format: uuid } }
+        busy:
+          type: array
+          items:
+            type: object
+            properties:
+              player_id: { type: string, format: uuid }
+              command_id: { type: string, format: uuid }
+        sent:
+          type: array
+          items:
+            type: object
+            properties:
+              player_id: { type: string, format: uuid }
+              command_id: { type: string, format: uuid }
+        skipped_offline: { type: array, items: { type: string, format: uuid } }
+        failed:
+          type: array
+          items:
+            type: object
+            properties:
+              player_id: { type: string, format: uuid }
+              error: { type: string }
 
     PlayerCommand:
       type: object

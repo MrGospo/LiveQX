@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cctype>
 #include <ctime>
 
 namespace liveqx::players {
@@ -21,6 +22,20 @@ std::string rfc3339(std::int64_t unix_s) {
 // A restarted machine has been up for less than the time since the command,
 // allowing for clocks that differ by a minute.
 constexpr std::int64_t kClockSlackS = 60;
+
+// Lower case, single spaces: a phrase typed by a person is compared forgivingly
+// about case and spacing, strictly about the words.
+std::string normalisePhrase(const std::string& in) {
+    std::string out;
+    bool space = true;
+    for (unsigned char c : in) {
+        if (std::isspace(c)) { space = true; continue; }
+        if (space && !out.empty()) out.push_back(' ');
+        space = false;
+        out.push_back(static_cast<char>(std::tolower(c)));
+    }
+    return out;
+}
 
 }  // namespace
 
@@ -152,6 +167,91 @@ std::optional<CommandRow> CommandService::release(const std::string& command_id,
                  nlohmann::json{{"command_id", command_id}, {"type", settled->type}}.dump(), now);
     announce(*settled);
     return settled;
+}
+
+}  // namespace liveqx::players
+
+namespace liveqx::players {
+
+std::string CommandService::requiredPhrase(const std::string& type, TargetKind kind, const std::string& name) {
+    switch (kind) {
+        case TargetKind::Group:  return type + " group " + name;
+        case TargetKind::Object: return type + " object " + name;
+        case TargetKind::All:    return type + " all";
+    }
+    return type;
+}
+
+BulkPlan CommandService::plan(const CommandTarget& target, const std::string& type) {
+    BulkPlan p;
+    ListFilter f;
+    f.state = PlayerState::Active;
+    std::string name;
+    switch (target.kind) {
+        case TargetKind::Group: {
+            auto g = db_.findGroup(target.id);
+            if (!g) return p;
+            auto o = db_.findObject(g->object_id);
+            name = (o ? o->name : std::string()) + " / " + g->name;
+            f.group_id = target.id;
+            break;
+        }
+        case TargetKind::Object: {
+            auto o = db_.findObject(target.id);
+            if (!o) return p;
+            name = o->name;
+            f.object_id = target.id;
+            break;
+        }
+        case TargetKind::All:
+            name = "all";
+            break;
+    }
+    p.found = true;
+    p.target_name = name;
+    p.required_phrase = requiredPhrase(type, target.kind, target.kind == TargetKind::All ? "" : name);
+    for (const auto& pl : db_.listPlayers(f)) {
+        ++p.total;
+        auto st = db_.status(pl.id);
+        if (!st || !st->online) { p.offline.push_back(pl.id); continue; }
+        p.online.push_back(pl.id);
+        for (const auto& c : db_.pendingCommandsOf(pl.id))
+            if (c.type == type) p.busy.push_back({pl.id, c.id});
+    }
+    return p;
+}
+
+BulkOutcome CommandService::sendToTarget(const CommandTarget& target, const std::string& type,
+                                         const std::string& confirm_phrase, std::size_t expected_count,
+                                         std::optional<std::int64_t> issued_by, std::int64_t now) {
+    BulkOutcome out;
+    if (!supportedType(type)) { out.error = "unsupported_type"; return out; }
+    out.plan = plan(target, type);
+    if (!out.plan.found) { out.error = "target_not_found"; return out; }
+    if (out.plan.total == 0) { out.error = "no_targets"; return out; }
+    if (normalisePhrase(confirm_phrase) != normalisePhrase(out.plan.required_phrase)) {
+        out.error = "confirm_phrase_mismatch";
+        return out;
+    }
+    if (expected_count != out.plan.total) { out.error = "expected_count_mismatch"; return out; }
+    if (!out.plan.busy.empty()) { out.error = "screens_busy"; return out; }
+    if (!opts_.publish) { out.error = "broker_unavailable"; return out; }
+    if (now == 0) now = nowSeconds();
+
+    for (const auto& id : out.plan.online) {
+        auto one = sendToPlayer(id, type, issued_by, now);
+        if (one.ok) { out.sent.push_back({id, one.row.id}); continue; }
+        // The broker being away is not a per-screen failure: stop before
+        // leaving a trail of "not sent" for every screen.
+        if (one.error == "broker_unavailable" && out.sent.empty()) {
+            out.failed.clear();
+            out.error = "broker_unavailable";
+            return out;
+        }
+        out.failed.push_back({id, one.error});
+    }
+    out.ok = true;
+    return out;
 }
 
 }  // namespace liveqx::players

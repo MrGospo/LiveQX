@@ -91,6 +91,25 @@ protected:
         EXPECT_TRUE(db_->finishEnrollment(claim.token_id, cert, kT0 + 2));
         return c->player.id;
     }
+    // The screen is connected (or not), as presence would have recorded it.
+    void setOnline(const std::string& id, bool online = true) {
+        StatusRow st;
+        st.player_id = id; st.updated_at = kT0; st.online = online; st.version = "0.3.5";
+        db_->applyStatuses({st});
+    }
+    // A second object with one group and one connected screen.
+    std::string otherObjectScreen() {
+        auto o = db_->createObject("Annex");
+        auto g = db_->createGroup(o->id, "Lobby");
+        auto c = db_->createPlayer("annex", std::nullopt, "strict", 86400, kT0, g->id);
+        auto claim = db_->claimToken(c->player.id, c->token, kT0 + 1);
+        CertRow cert;
+        cert.player_id = c->player.id; cert.serial_hex = "ANX1"; cert.generation = 1;
+        cert.issued_at = kT0; cert.not_before = kT0 - 100; cert.not_after = kT0 + 365 * 86400;
+        EXPECT_TRUE(db_->finishEnrollment(claim.token_id, cert, kT0 + 2));
+        setOnline(c->player.id);
+        return c->player.id;
+    }
     std::vector<liveqx::events::Event> events() { return sub_->drain(std::chrono::milliseconds(20)); }
 };
 
@@ -320,4 +339,136 @@ TEST_F(CommandServiceTest, TwoRequestsAtOnceCannotBothGetThrough) {
     for (auto& t : ts) t.join();
     EXPECT_EQ(ok.load(), 1);
     EXPECT_EQ(busy.load(), 7);
+}
+
+// ── group, object, everyone ─────────────────────────────────────────────────
+namespace {
+CommandTarget groupOf(std::int64_t id) { return {TargetKind::Group, id}; }
+CommandTarget allScreens() { return {TargetKind::All, 0}; }
+}  // namespace
+
+TEST_F(CommandServiceTest, ThePhraseNamesTheCommandAndTheTargetAndDiffersByKind) {
+    auto o = db_->findObject(db_->findGroup(group_id_)->object_id);
+    const auto group = CommandService::requiredPhrase("reboot_screen", TargetKind::Group, "Main / Hall");
+    const auto object = CommandService::requiredPhrase("reboot_screen", TargetKind::Object, "Main");
+    const auto all = CommandService::requiredPhrase("reboot_screen", TargetKind::All, "");
+    EXPECT_EQ(group, "reboot_screen group Main / Hall");
+    EXPECT_EQ(object, "reboot_screen object Main");
+    EXPECT_EQ(all, "reboot_screen all");
+    EXPECT_NE(group, object);
+    EXPECT_NE(object, all);
+    EXPECT_NE(CommandService::requiredPhrase("restart_player", TargetKind::All, ""), all) << "the command is in it";
+    EXPECT_EQ(o->name, "Main");
+}
+
+TEST_F(CommandServiceTest, ThePlanSeparatesConnectedFromAbsentAndShowsWhoIsBusy) {
+    const auto a = screen("A"), b = screen("B"), c = screen("C");
+    setOnline(a); setOnline(b);                      // C is not connected
+    ASSERT_TRUE(svc_->sendToPlayer(b, "reboot_screen", 1, kT0 + 5).ok);
+
+    auto plan = svc_->plan(groupOf(group_id_), "reboot_screen");
+    ASSERT_TRUE(plan.found);
+    EXPECT_EQ(plan.target_name, "Main / Hall");
+    EXPECT_EQ(plan.required_phrase, "reboot_screen group Main / Hall");
+    EXPECT_EQ(plan.total, 3u) << "all paired screens count, connected or not";
+    EXPECT_EQ(plan.online.size(), 2u);
+    ASSERT_EQ(plan.offline.size(), 1u);
+    EXPECT_EQ(plan.offline[0], c);
+    ASSERT_EQ(plan.busy.size(), 1u);
+    EXPECT_EQ(plan.busy[0].player_id, b);
+    EXPECT_FALSE(svc_->plan(groupOf(9999), "reboot_screen").found);
+}
+
+TEST_F(CommandServiceTest, AGroupCommandReachesTheConnectedScreensAndReportsTheRest) {
+    const auto a = screen("A"), b = screen("B"), c = screen("C");
+    setOnline(a); setOnline(b);
+    auto out = svc_->sendToTarget(groupOf(group_id_), "restart_player", "restart_player group Main / Hall", 3, 7, kT0 + 10);
+    ASSERT_TRUE(out.ok) << out.error;
+    EXPECT_EQ(out.sent.size(), 2u);
+    EXPECT_TRUE(out.failed.empty());
+    ASSERT_EQ(out.plan.offline.size(), 1u);
+    EXPECT_EQ(out.plan.offline[0], c);
+    EXPECT_EQ(sent_.size(), 2u);
+    EXPECT_TRUE(db_->pendingCommandsOf(c).empty()) << "an absent screen gets nothing";
+    EXPECT_EQ(db_->pendingCommandsOf(a)[0].issued_by, 7);
+}
+
+TEST_F(CommandServiceTest, ThePhraseIsForgivingAboutCaseAndSpacingButNotAboutWords) {
+    const auto a = screen(); setOnline(a);
+    EXPECT_TRUE(svc_->sendToTarget(groupOf(group_id_), "reload_playlist", "  RELOAD_PLAYLIST   group   main / HALL ", 1, 1, kT0).ok);
+    const auto b = screen("B"); setOnline(b);
+    for (const char* bad : {"", "reload_playlist group Hall", "reload_playlist object Main / Hall",
+                            "reboot_screen group Main / Hall", "yes"}) {
+        auto out = svc_->sendToTarget(groupOf(group_id_), "restart_player", bad, 2, 1, kT0 + 1);
+        EXPECT_EQ(out.error, "confirm_phrase_mismatch") << bad;
+    }
+    EXPECT_EQ(sent_.size(), 1u) << "nothing went out on a wrong phrase";
+}
+
+TEST_F(CommandServiceTest, AChangedTargetStopsTheCommand) {
+    const auto a = screen(); setOnline(a);
+    auto out = svc_->sendToTarget(groupOf(group_id_), "restart_player", "restart_player group Main / Hall", 5, 1, kT0);
+    EXPECT_EQ(out.error, "expected_count_mismatch");
+    EXPECT_EQ(out.plan.total, 1u) << "the caller is told what is there now";
+    EXPECT_TRUE(sent_.empty());
+}
+
+TEST_F(CommandServiceTest, AnyScreenStillWaitingForTheSameCommandStopsTheWholeThing) {
+    const auto a = screen("A"), b = screen("B");
+    setOnline(a); setOnline(b);
+    auto first = svc_->sendToPlayer(b, "reboot_screen", 1, kT0);
+    ASSERT_TRUE(first.ok);
+    sent_.clear();
+    auto out = svc_->sendToTarget(groupOf(group_id_), "reboot_screen", "reboot_screen group Main / Hall", 2, 1, kT0 + 5);
+    EXPECT_EQ(out.error, "screens_busy");
+    ASSERT_EQ(out.plan.busy.size(), 1u);
+    EXPECT_EQ(out.plan.busy[0].player_id, b);
+    EXPECT_EQ(out.plan.busy[0].command_id, first.row.id);
+    EXPECT_TRUE(sent_.empty()) << "not even the free screen got it";
+    EXPECT_TRUE(db_->pendingCommandsOf(a).empty());
+}
+
+TEST_F(CommandServiceTest, ObjectAndEveryoneCoverMoreAndLeaveOutScreensThatAreNotLive) {
+    const auto a = screen("A"); setOnline(a);
+    const auto annex = otherObjectScreen();
+    const auto g2 = db_->createGroup(db_->findGroup(group_id_)->object_id, "Second");
+    auto c = db_->createPlayer("B", std::nullopt, "strict", 86400, kT0, g2->id);   // never paired: pending
+    (void)c;
+
+    auto obj = svc_->plan({TargetKind::Object, db_->findGroup(group_id_)->object_id}, "restart_player");
+    EXPECT_EQ(obj.total, 1u) << "the unpaired screen is not a recipient; the other object is not in it";
+    auto all = svc_->plan(allScreens(), "restart_player");
+    EXPECT_EQ(all.total, 2u);
+    EXPECT_EQ(all.required_phrase, "restart_player all");
+    auto out = svc_->sendToTarget(allScreens(), "restart_player", "restart_player all", 2, 1, kT0);
+    ASSERT_TRUE(out.ok) << out.error;
+    EXPECT_EQ(out.sent.size(), 2u);
+    EXPECT_FALSE(db_->pendingCommandsOf(annex).empty());
+}
+
+TEST_F(CommandServiceTest, RevokedScreensAreNeverRecipients) {
+    const auto a = screen("A"), b = screen("B");
+    setOnline(a); setOnline(b);
+    db_->revokePlayer(b, "gone", kT0 + 1);
+    auto plan = svc_->plan(groupOf(group_id_), "restart_player");
+    EXPECT_EQ(plan.total, 1u);
+}
+
+TEST_F(CommandServiceTest, NothingToSendToAndNoSuchTargetAreSaidPlainly) {
+    EXPECT_EQ(svc_->sendToTarget(groupOf(group_id_), "restart_player", "restart_player group Main / Hall", 0, 1, kT0).error,
+              "no_targets");
+    EXPECT_EQ(svc_->sendToTarget(groupOf(4242), "restart_player", "x", 0, 1, kT0).error, "target_not_found");
+    EXPECT_EQ(svc_->sendToTarget(allScreens(), "format_disk", "x", 0, 1, kT0).error, "unsupported_type");
+}
+
+TEST_F(CommandServiceTest, ABrokerThatIsAwayStopsABulkCommandWithoutBlockingAnyone) {
+    const auto a = screen("A"), b = screen("B");
+    setOnline(a); setOnline(b);
+    broker_ = liveqx::mqtt::PublishResult::NotConnected;
+    auto out = svc_->sendToTarget(groupOf(group_id_), "restart_player", "restart_player group Main / Hall", 2, 1, kT0);
+    EXPECT_EQ(out.error, "broker_unavailable");
+    EXPECT_TRUE(db_->pendingCommandsOf(a).empty());
+    EXPECT_TRUE(db_->pendingCommandsOf(b).empty());
+    broker_ = liveqx::mqtt::PublishResult::Ok;
+    EXPECT_TRUE(svc_->sendToTarget(groupOf(group_id_), "restart_player", "restart_player group Main / Hall", 2, 1, kT0 + 1).ok);
 }

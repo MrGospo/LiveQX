@@ -193,6 +193,24 @@ struct CommandFixture {
         return cli.Post(("/api/players/" + player + "/command").c_str(), bearer(who.token),
                         body.dump(), "application/json");
     }
+    void online(const std::string& id) {
+        StatusRow st;
+        st.player_id = id; st.updated_at = static_cast<std::int64_t>(std::time(nullptr)); st.online = true;
+        st.version = "0.3.5";
+        pdb->applyStatuses({st});
+    }
+    static json objectAccess(std::int64_t id, bool cg, bool co) {
+        return {{"scope", "object"}, {"id", id}, {"can_command_group", cg}, {"can_command_object", co},
+                {"can_move", false}, {"can_view_audit", false}};
+    }
+    static json groupMark(std::int64_t id, bool cg) {
+        return {{"scope", "group"}, {"id", id}, {"can_command_group", cg}, {"can_command_object", false},
+                {"can_move", false}, {"can_view_audit", false}};
+    }
+    httplib::Result post(const Person& who, const std::string& path, const json& body) {
+        auto cli = client();
+        return cli.Post(path.c_str(), bearer(who.token), body.dump(), "application/json");
+    }
     std::size_t sentCount() { std::lock_guard<std::mutex> lk(sent_mu); return sent.size(); }
 };
 
@@ -343,4 +361,147 @@ TEST(PlayerCommandRest, BadInputGetsTheAgreedAnswers) {
                         "{not json", "application/json");
     EXPECT_EQ(bad->status, 400);
     EXPECT_EQ(f.sentCount(), 0u);
+}
+
+// ── group, object, everyone ─────────────────────────────────────────────────
+TEST(PlayerCommandRest, ADryRunTellsTheInterfaceThePhraseAndTheCountAndChangesNothing) {
+    CommandFixture f(g_port++);
+    auto admin = f.person("admin1", sa::Role::Admin);
+    f.online(f.P11);
+    auto r = f.post(admin, "/api/player-groups/" + std::to_string(f.G11) + "/command",
+                    {{"type", "reboot_screen"}, {"dry_run", true}});
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    const json j = json::parse(r->body);
+    EXPECT_EQ(j["required_phrase"], "reboot_screen group O1 / G11");
+    EXPECT_EQ(j["expected_count"], 1);
+    EXPECT_EQ(j["online"], 1);
+    EXPECT_EQ(f.sentCount(), 0u);
+}
+
+TEST(PlayerCommandRest, AGroupCommandNeedsThePhraseAndTheCountAndThenReachesTheConnectedScreens) {
+    CommandFixture f(g_port++);
+    auto admin = f.person("admin1", sa::Role::Admin);
+    f.online(f.P11);
+    const std::string path = "/api/player-groups/" + std::to_string(f.G11) + "/command";
+
+    auto no_phrase = f.post(admin, path, {{"type", "restart_player"}, {"expected_count", 1}});
+    EXPECT_EQ(no_phrase->status, 400);
+    EXPECT_EQ(json::parse(no_phrase->body)["error"], "confirm_phrase_mismatch");
+    auto no_count = f.post(admin, path, {{"type", "restart_player"}, {"confirm_phrase", "restart_player group O1 / G11"}});
+    EXPECT_EQ(no_count->status, 400);
+    EXPECT_EQ(json::parse(no_count->body)["error"], "invalid_expected_count");
+    auto stale = f.post(admin, path, {{"type", "restart_player"}, {"confirm_phrase", "restart_player group O1 / G11"},
+                                      {"expected_count", 4}});
+    EXPECT_EQ(stale->status, 409);
+    EXPECT_EQ(json::parse(stale->body)["actual"], 1);
+    EXPECT_EQ(f.sentCount(), 0u);
+
+    auto ok = f.post(admin, path, {{"type", "restart_player"}, {"confirm_phrase", "restart_player group O1 / G11"},
+                                   {"expected_count", 1}});
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(ok->status, 200) << ok->body;
+    const json j = json::parse(ok->body);
+    ASSERT_EQ(j["sent"].size(), 1u);
+    EXPECT_EQ(j["sent"][0]["player_id"], f.P11);
+    EXPECT_TRUE(j["skipped_offline"].empty());
+    EXPECT_EQ(f.sentCount(), 1u);
+
+    auto again = f.post(admin, path, {{"type", "restart_player"}, {"confirm_phrase", "restart_player group O1 / G11"},
+                                      {"expected_count", 1}});
+    EXPECT_EQ(again->status, 409);
+    const json e = json::parse(again->body);
+    EXPECT_EQ(e["error"], "screens_busy");
+    ASSERT_EQ(e["busy"].size(), 1u);
+    EXPECT_EQ(e["busy"][0]["player_id"], f.P11);
+}
+
+TEST(PlayerCommandRest, ScreensThatAreNotConnectedAreSkippedAndListed) {
+    CommandFixture f(g_port++);
+    auto admin = f.person("admin1", sa::Role::Admin);
+    auto r = f.post(admin, "/api/player-objects/" + std::to_string(f.O1) + "/command",
+                    {{"type", "reload_playlist"}, {"confirm_phrase", "reload_playlist object O1"}, {"expected_count", 2}});
+    ASSERT_TRUE(r);
+    // Nobody is connected: the count matched, nothing was sent, and the report says why.
+    ASSERT_EQ(r->status, 200) << r->body;
+    const json j = json::parse(r->body);
+    EXPECT_TRUE(j["sent"].empty());
+    EXPECT_EQ(j["skipped_offline"].size(), 2u);
+    EXPECT_EQ(f.sentCount(), 0u);
+}
+
+TEST(PlayerCommandRest, TheGroupMarkDecidesWhoMayRebootAGroupButReloadNeedsOnlyAccess) {
+    CommandFixture f(g_port++);
+    auto admin = f.person("admin1", sa::Role::Admin);
+    auto plain = f.person("op-plain", sa::Role::Operator);
+    auto marked = f.person("op-marked", sa::Role::Operator);
+    f.give(admin, plain.id, json::array({CommandFixture::groupMark(f.G11, false)}));
+    f.give(admin, marked.id, json::array({CommandFixture::groupMark(f.G11, true)}));
+    f.online(f.P11);
+    const std::string path = "/api/player-groups/" + std::to_string(f.G11) + "/command";
+
+    EXPECT_EQ(f.post(plain, path, {{"type", "reboot_screen"}, {"dry_run", true}})->status, 403);
+    EXPECT_EQ(f.post(plain, path, {{"type", "reload_playlist"}, {"dry_run", true}})->status, 200)
+        << "reloading the playlist of a group is for anyone who may command its screens";
+    EXPECT_EQ(f.post(marked, path, {{"type", "reboot_screen"}, {"dry_run", true}})->status, 200);
+
+    auto done = f.post(marked, path, {{"type", "reboot_screen"},
+                                      {"confirm_phrase", "reboot_screen group O1 / G11"}, {"expected_count", 1}});
+    EXPECT_EQ(done->status, 200) << done->body;
+    EXPECT_EQ(f.sentCount(), 1u);
+}
+
+TEST(PlayerCommandRest, AGroupOutsideTheRightsIsNotFound) {
+    CommandFixture f(g_port++);
+    auto admin = f.person("admin1", sa::Role::Admin);
+    auto op = f.person("op1", sa::Role::Operator);
+    f.give(admin, op.id, json::array({CommandFixture::groupMark(f.G11, true)}));
+    EXPECT_EQ(f.post(op, "/api/player-groups/" + std::to_string(f.G12) + "/command",
+                     {{"type", "reload_playlist"}, {"dry_run", true}})->status, 404);
+    EXPECT_EQ(f.post(op, "/api/player-groups/9999/command", {{"type", "reload_playlist"}, {"dry_run", true}})->status, 404);
+}
+
+TEST(PlayerCommandRest, AnObjectCommandNeedsTheObjectMarkAndAGroupRightDoesNotImplyIt) {
+    CommandFixture f(g_port++);
+    auto admin = f.person("admin1", sa::Role::Admin);
+    auto group_only = f.person("op-g", sa::Role::Operator);
+    auto group_mark = f.person("op-gm", sa::Role::Operator);
+    auto whole = f.person("op-o", sa::Role::Operator);
+    f.give(admin, group_only.id, json::array({CommandFixture::groupMark(f.G11, false)}));
+    f.give(admin, group_mark.id, json::array({CommandFixture::objectAccess(f.O1, true, false)}));
+    f.give(admin, whole.id, json::array({CommandFixture::objectAccess(f.O1, false, true)}));
+    const std::string path = "/api/player-objects/" + std::to_string(f.O1) + "/command";
+    const json dry = {{"type", "restart_player"}, {"dry_run", true}};
+
+    EXPECT_EQ(f.post(group_only, path, dry)->status, 403) << "the building's name is visible, its command is not";
+    EXPECT_EQ(f.post(group_mark, path, dry)->status, 403) << "commanding every group one by one is not the object";
+    EXPECT_EQ(f.post(whole, path, dry)->status, 200);
+}
+
+TEST(PlayerCommandRest, EveryoneIsForAdministratorsOnly) {
+    CommandFixture f(g_port++);
+    auto admin = f.person("admin1", sa::Role::Admin);
+    auto op = f.person("op1", sa::Role::Operator);
+    f.give(admin, op.id, json::array({CommandFixture::objectAccess(f.O1, true, true)}));
+    f.online(f.P11); f.online(f.P12);
+
+    EXPECT_EQ(f.post(op, "/api/players/command-all", {{"type", "restart_player"}, {"dry_run", true}})->status, 403)
+        << "even with every mark on the only object";
+    auto dry = f.post(admin, "/api/players/command-all", {{"type", "restart_player"}, {"dry_run", true}});
+    ASSERT_EQ(dry->status, 200);
+    EXPECT_EQ(json::parse(dry->body)["required_phrase"], "restart_player all");
+    auto go = f.post(admin, "/api/players/command-all",
+                     {{"type", "restart_player"}, {"confirm_phrase", "restart_player all"}, {"expected_count", 2}});
+    ASSERT_EQ(go->status, 200) << go->body;
+    EXPECT_EQ(json::parse(go->body)["sent"].size(), 2u);
+    EXPECT_EQ(f.sentCount(), 2u);
+}
+
+TEST(PlayerCommandRest, AViewerCannotCommandAGroupWhateverItHolds) {
+    CommandFixture f(g_port++);
+    auto admin = f.person("admin1", sa::Role::Admin);
+    auto viewer = f.person("view1", sa::Role::Viewer);
+    f.give(admin, viewer.id, json::array({CommandFixture::groupAccess(f.G11)}));
+    EXPECT_EQ(f.post(viewer, "/api/player-groups/" + std::to_string(f.G11) + "/command",
+                     {{"type", "reload_playlist"}, {"dry_run", true}})->status, 403);
 }
