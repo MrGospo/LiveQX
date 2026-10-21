@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <ctime>
 
@@ -67,9 +68,9 @@ void PresenceService::publish(const std::vector<Note>& notes) {
             break;
         case Note::Offline:
             db_.addEvent(n.player_id, "offline",
-                         json{{"reason", "heartbeat_timeout"}, {"last_seen", n.last_seen}}.dump(), nowSeconds());
+                         json{{"reason", n.reason}, {"last_seen", n.last_seen}}.dump(), nowSeconds());
             announce(events::EventType::PlayerOffline, n.player_id,
-                     {{"player_id", n.player_id}, {"name", n.name}, {"reason", "heartbeat_timeout"}});
+                     {{"player_id", n.player_id}, {"name", n.name}, {"reason", n.reason}});
             break;
         case Note::Started:
             db_.addEvent(n.player_id, "started", "", nowSeconds());
@@ -126,6 +127,7 @@ void PresenceService::onHeartbeat(const std::string& player_id, const std::strin
         const std::string prev_version = e.version;
         e.online       = true;
         e.updated_at   = now;
+        e.mqtt_offline_at = 0;                 // a heartbeat contradicts a broker "offline"
         e.payload_json = payload_json;
         if (!version.empty()) e.version = version;
         e.dirty = true;
@@ -146,6 +148,77 @@ void PresenceService::onHeartbeat(const std::string& player_id, const std::strin
     publish(notes);
 }
 
+std::optional<std::pair<std::string, bool>> PresenceService::parsePresenceMessage(const std::string& topic,
+                                                                                 const std::string& payload) {
+    static const std::string kPrefix = "liveqx/v1/players/", kSuffix = "/presence";
+    if (topic.size() <= kPrefix.size() + kSuffix.size() || topic.compare(0, kPrefix.size(), kPrefix) != 0 ||
+        topic.compare(topic.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0)
+        return std::nullopt;
+    const std::string id = topic.substr(kPrefix.size(), topic.size() - kPrefix.size() - kSuffix.size());
+    if (id.find('/') != std::string::npos || id.empty()) return std::nullopt;
+    std::string word;
+    for (unsigned char c : payload) if (!std::isspace(c)) word.push_back(static_cast<char>(std::tolower(c)));
+    if (word == "online") return std::make_pair(id, true);
+    if (word == "offline") return std::make_pair(id, false);
+    return std::nullopt;
+}
+
+void PresenceService::onMqttPresence(const std::string& player_id, bool online) {
+    const std::int64_t now = nowSeconds();
+    if (!online) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = entries_.find(player_id);
+        if (it != entries_.end() && it->second.online && it->second.mqtt_offline_at == 0)
+            it->second.mqtt_offline_at = now;               // judged by tick() after the grace
+        return;
+    }
+
+    bool known;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        known = entries_.count(player_id) != 0;
+    }
+    std::string name;
+    std::optional<StatusRow> stored;
+    if (!known) {
+        auto p = db_.findPlayer(player_id);
+        if (!p || p->state == PlayerState::Revoked) return;   // unknown, or no longer allowed to be a player
+        name   = p->name;
+        stored = db_.status(player_id);
+    }
+
+    std::vector<Note> notes;
+    StatusRow write_now;
+    bool do_write = false;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = entries_.find(player_id);
+        if (it == entries_.end()) {
+            Entry e;
+            e.name = name;
+            if (stored) {
+                e.online       = stored->online;
+                e.version      = stored->version;
+                e.payload_json = stored->payload_json;
+                e.updated_at   = stored->updated_at;
+            }
+            it = entries_.emplace(player_id, std::move(e)).first;
+        }
+        Entry& e = it->second;
+        e.mqtt_offline_at = 0;
+        if (!e.online) {
+            e.online     = true;
+            e.updated_at = now;
+            notes.push_back({Note::Online, player_id, e.name, "", "", 0});
+            write_now = rowOf(player_id, e);
+            e.dirty   = false;
+            do_write  = true;
+        }
+    }
+    if (do_write) db_.applyStatuses({write_now});
+    publish(notes);
+}
+
 PresenceService::TickResult PresenceService::tick() {
     const std::int64_t now = nowSeconds();
     TickResult result;
@@ -156,9 +229,13 @@ PresenceService::TickResult PresenceService::tick() {
     {
         std::lock_guard<std::mutex> lk(mu_);
         const bool judging = now >= boot_at_ + opts_.offline_after_s;
-        if (judging)
-            for (const auto& [id, e] : entries_)
-                if (e.online && now - e.updated_at > opts_.offline_after_s) stale.push_back(id);
+        for (const auto& [id, e] : entries_) {
+            if (!e.online) continue;
+            // The broker said offline and no heartbeat came since: believed after the grace.
+            const bool by_broker = e.mqtt_offline_at > 0 && e.updated_at <= e.mqtt_offline_at &&
+                                   now - e.mqtt_offline_at >= opts_.mqtt_offline_grace_s;
+            if (by_broker || (judging && now - e.updated_at > opts_.offline_after_s)) stale.push_back(id);
+        }
     }
 
     // Players deleted meanwhile just disappear.
@@ -173,9 +250,13 @@ PresenceService::TickResult PresenceService::tick() {
             auto it = entries_.find(id);
             if (it == entries_.end() || !it->second.online) continue;
             Entry& e = it->second;
-            if (now - e.updated_at <= opts_.offline_after_s) continue;     // it spoke up meanwhile
+            const bool by_broker = e.mqtt_offline_at > 0 && e.updated_at <= e.mqtt_offline_at &&
+                                   now - e.mqtt_offline_at >= opts_.mqtt_offline_grace_s;
+            const bool by_silence = now - e.updated_at > opts_.offline_after_s;
+            if (!by_broker && !by_silence) continue;                       // it spoke up meanwhile
             e.online = false;
-            notes.push_back({Note::Offline, id, e.name, "", "", e.updated_at});
+            e.mqtt_offline_at = 0;
+            notes.push_back({Note::Offline, id, e.name, "", "", e.updated_at, by_broker && !by_silence ? "mqtt_offline" : "heartbeat_timeout"});
             batch.push_back(rowOf(id, e));
             e.dirty = false;
             ++result.went_offline;

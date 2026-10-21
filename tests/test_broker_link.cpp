@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -219,4 +220,38 @@ TEST(BrokerLink, StoppingIsPromptWhetherWaitingOrConnected) {
         Rig rig;
         BrokerLink never_started(rig.options());      // destroyed without start()
     }
+}
+
+TEST(BrokerLink, ItListensToTheTopicsItIsGivenAndPassesOnWhatIsNotAReplyToItself) {
+    Rig rig;
+    std::mutex mu;
+    std::vector<std::string> got;
+    BrokerLinkOptions o = rig.options();
+    o.subscriptions = {"liveqx/v1/players/+/presence"};
+    o.on_message = [&](const liveqx::mqtt::Message& m) {
+        std::lock_guard<std::mutex> lk(mu);
+        got.push_back(m.topic + "=" + m.payload);
+    };
+    BrokerLink link(std::move(o));
+    link.start();
+    ASSERT_TRUE(waitFor([&] { return link.status().state == "connected"; }));
+    FakeMqttClient* fake = rig.last();
+    ASSERT_NE(fake, nullptr);
+    EXPECT_NE(std::find(fake->subscriptions.begin(), fake->subscriptions.end(), "liveqx/v1/players/+/presence"),
+              fake->subscriptions.end());
+    EXPECT_NE(std::find(fake->subscriptions.begin(), fake->subscriptions.end(), "$CONTROL/dynamic-security/v1/response"),
+              fake->subscriptions.end()) << "the replies to its own administration too";
+
+    liveqx::mqtt::Message presence;
+    presence.topic = "liveqx/v1/players/" + A + "/presence";
+    presence.payload = "online";
+    fake->deliver(presence);
+    liveqx::mqtt::Message reply;
+    reply.topic = "$CONTROL/dynamic-security/v1/response";
+    reply.payload = R"({"responses":[{"command":"x","correlationData":"lqx-999"}]})";
+    fake->deliver(reply);
+    link.stop();
+    std::lock_guard<std::mutex> lk(mu);
+    ASSERT_EQ(got.size(), 1u) << "the administrative reply is not for the others";
+    EXPECT_EQ(got[0], "liveqx/v1/players/" + A + "/presence=online");
 }

@@ -28,6 +28,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace liveqx::mqtt {
 
@@ -52,6 +53,10 @@ struct BrokerLinkOptions {
     std::function<std::set<std::string>()> wanted;
     std::function<std::unique_ptr<IMqttClient>(const ClientOptions&)> make_client;
     BrokerAdmin::Options admin;
+    // Topics to listen to besides the administrative replies, and where their
+    // messages go. Called on the client's thread: keep it short.
+    std::vector<std::string> subscriptions;
+    std::function<void(const Message&)> on_message;
 };
 
 struct BrokerLinkStatus {

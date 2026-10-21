@@ -21,6 +21,7 @@
 #include "test_broker.h"
 
 #include "mqtt/BrokerAdmin.h"
+#include "mqtt/BrokerLink.h"
 #include "mqtt/MosquittoClient.h"
 
 #include <gtest/gtest.h>
@@ -362,4 +363,55 @@ TEST_F(MosquittoBrokerTest, ReconcileBringsTheRealBrokerInLineWithTheWantedList)
     auto again = rig.admin.reconcile({keep.id, fresh.id});
     EXPECT_TRUE(again.ok);
     EXPECT_EQ(again.issued + again.removed, 0u) << "a second pass finds nothing to do";
+}
+
+TEST_F(MosquittoBrokerTest, TheLinkIssuesAPlayerAndHearsItsPresenceEndToEnd) {
+    auto player = broker_->enrollPlayer(/*provision=*/false);
+    const auto server = broker_->serverOptions();
+
+    std::mutex mu;
+    std::vector<std::pair<std::string, std::string>> heard;
+    mqtt::BrokerLinkOptions o;
+    o.host = server.host;
+    o.port = server.port;
+    o.retry_s = 1;
+    o.reconcile_interval_s = 30;
+    o.identity = [&](mqtt::BrokerIdentityPem& id, std::string&) {
+        id.cert_chain_pem = server.cert_chain_pem;
+        id.key_pem = server.key_pem;
+        id.serial = "s1";
+        return true;
+    };
+    o.trust_pem = [&] { return server.ca_pem; };
+    o.wanted = [&] { return std::set<std::string>{player.id}; };
+    o.make_client = [](const mqtt::ClientOptions& co) -> std::unique_ptr<mqtt::IMqttClient> {
+        return std::make_unique<mqtt::MosquittoClient>(co);
+    };
+    o.subscriptions = {"liveqx/v1/players/+/presence"};
+    o.on_message = [&](const mqtt::Message& m) {
+        std::lock_guard<std::mutex> lk(mu);
+        heard.push_back({m.topic, m.payload});
+    };
+    mqtt::BrokerLink link(std::move(o));
+    link.start();
+    ASSERT_TRUE(waitFor([&] { return link.status().last_reconcile_ok; }, 20000))
+        << link.status().detail << "\n" << broker_->log();
+    EXPECT_EQ(link.status().last_report.issued, 1u) << "the link gave the new player its place on the broker";
+
+    // The player connects and announces itself, as the real one does.
+    mqtt::MosquittoClient dev(broker_->playerOptions(player));
+    ASSERT_TRUE(dev.start());
+    ASSERT_TRUE(waitFor([&] { return dev.connected(); })) << broker_->log();
+    mqtt::Message hello;
+    hello.topic = presenceOf(player);
+    hello.payload = "online";
+    hello.retain = true;
+    ASSERT_EQ(dev.publish(hello), mqtt::PublishResult::Ok);
+    EXPECT_TRUE(waitFor([&] {
+        std::lock_guard<std::mutex> lk(mu);
+        for (const auto& h : heard) if (h.first == hello.topic && h.second == "online") return true;
+        return false;
+    })) << "the server hears it";
+    dev.stop();
+    link.stop();
 }

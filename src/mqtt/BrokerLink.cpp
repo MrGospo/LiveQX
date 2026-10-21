@@ -86,7 +86,11 @@ bool BrokerLink::bringUp(std::string& why) {
     if (!client) { why = "the MQTT client is not available in this build"; return false; }
     auto admin = std::make_unique<BrokerAdmin>(*client, opts_.admin);    // subscribes to replies
     BrokerAdmin* raw = admin.get();
-    client->setMessageHandler([raw](const Message& m) { raw->handleMessage(m); });
+    for (const auto& f : opts_.subscriptions) client->subscribe(f, 1);
+    client->setMessageHandler([raw, sink = opts_.on_message](const Message& m) {
+        if (raw->handleMessage(m)) return;                  // a reply to our own administrative call
+        if (sink) sink(m);
+    });
     client->setStateHandler([this](bool, const std::string&) {
         {
             std::lock_guard<std::mutex> lk(mu_);

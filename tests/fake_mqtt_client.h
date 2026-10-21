@@ -48,6 +48,9 @@ public:
         return mqtt::PublishResult::Ok;
     }
 
+    // A message arrives from the broker.
+    void deliver(const mqtt::Message& m) { if (handler_) handler_(m); }
+
     // The link goes up or down, and whoever listens is told.
     void setLink(bool v) {
         up = v;

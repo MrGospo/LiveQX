@@ -1054,6 +1054,7 @@ int main(int argc, char* argv[]) {
                                   std::clamp<std::int64_t>(pcfg.value("missed_intervals", 3), 1, 20) +
                                   std::clamp<std::int64_t>(pcfg.value("grace_s", 15), 0, 600);
             pr.flush_interval_s = std::clamp<std::int64_t>(pcfg.value("flush_interval_s", 5), 0, 300);
+            pr.mqtt_offline_grace_s = std::clamp<std::int64_t>(pcfg.value("mqtt_grace_s", 10), 0, 300);
             pr.events           = &event_bus;
             const auto pr_offline_after_s = pr.offline_after_s;
             presence_service = std::make_unique<liveqx::players::PresenceService>(players_db, std::move(pr));
@@ -1139,6 +1140,13 @@ int main(int argc, char* argv[]) {
                     out.key_pem        = id.key_pem;
                     out.serial         = id.serial_hex;
                     return true;
+                };
+                // Presence from the broker is the second source next to heartbeats.
+                bo.subscriptions = {"liveqx/v1/players/+/presence"};
+                bo.on_message = [&presence_service](const liveqx::mqtt::Message& m) {
+                    if (!presence_service) return;
+                    if (auto p = liveqx::players::PresenceService::parsePresenceMessage(m.topic, m.payload))
+                        presence_service->onMqttPresence(p->first, p->second);
                 };
                 bo.trust_pem = [&players_service] { return players_service->caCertPem(); };
                 bo.wanted = [&players_db]() {

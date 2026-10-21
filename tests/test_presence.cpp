@@ -396,3 +396,134 @@ TEST_F(PresenceTest, TheBackgroundSweeperRunsAndStopsCleanly) {
     svc->stop();
     svc->stop();                                    // twice is fine
 }
+
+// ── presence from the broker (second source) ────────────────────────────────
+TEST(PresenceTopic, OnlyThePresenceTopicOfOnePlayerWithAKnownWordIsUnderstood) {
+    using P = PresenceService;
+    const std::string id = "0b8f5c1e-3a2d-4c47-9a6e-1f2d3c4b5a69";
+    auto on = P::parsePresenceMessage("liveqx/v1/players/" + id + "/presence", "online");
+    ASSERT_TRUE(on.has_value());
+    EXPECT_EQ(on->first, id);
+    EXPECT_TRUE(on->second);
+    auto off = P::parsePresenceMessage("liveqx/v1/players/" + id + "/presence", " OFFLINE\n");
+    ASSERT_TRUE(off.has_value());
+    EXPECT_FALSE(off->second);
+
+    EXPECT_FALSE(P::parsePresenceMessage("liveqx/v1/players/" + id + "/presence", "maybe"));
+    EXPECT_FALSE(P::parsePresenceMessage("liveqx/v1/players/" + id + "/presence", ""));
+    EXPECT_FALSE(P::parsePresenceMessage("liveqx/v1/players/" + id + "/commands", "online"));
+    EXPECT_FALSE(P::parsePresenceMessage("liveqx/v1/broadcast/commands", "online"));
+    EXPECT_FALSE(P::parsePresenceMessage("liveqx/v1/players//presence", "online"));
+    EXPECT_FALSE(P::parsePresenceMessage("liveqx/v1/players/a/b/presence", "online")) << "one level only";
+    EXPECT_FALSE(P::parsePresenceMessage("liveqx/v1/players/presence", "online"));
+}
+
+TEST_F(PresenceTest, TheBrokersOnlineBringsASilentPlayerBackAtOnce) {
+    const auto id = newPlayer();
+    beat(id);
+    now_ += 1000;
+    svc_->tick();
+    ASSERT_FALSE(svc_->isOnline(id));
+    events();
+
+    svc_->onMqttPresence(id, true);
+    EXPECT_TRUE(svc_->isOnline(id));
+    EXPECT_EQ(count(events(), EventType::PlayerOnline), 1);
+    EXPECT_EQ(dbEvents(id, "online"), 2);
+    EXPECT_TRUE(db_->status(id)->online) << "stored at once, not at the next batch";
+}
+
+TEST_F(PresenceTest, AFirstSightFromTheBrokerAloneMakesAPlayerOnline) {
+    const auto id = newPlayer();
+    svc_->onMqttPresence(id, true);
+    EXPECT_TRUE(svc_->isOnline(id));
+    EXPECT_EQ(count(events(), EventType::PlayerOnline), 1);
+    svc_->onMqttPresence(id, true);
+    EXPECT_EQ(count(events(), EventType::PlayerOnline), 0) << "a repeat is not news";
+}
+
+TEST_F(PresenceTest, TheBrokerAloneDoesNotKeepAPlayerAliveThatNoLongerSendsHeartbeats) {
+    const auto id = newPlayer();
+    beat(id);
+    now_ += 120;
+    svc_->onMqttPresence(id, true);                     // says nothing new about a player already online
+    now_ += 100;                                        // 220 s since the last heartbeat
+    svc_->tick();
+    EXPECT_FALSE(svc_->isOnline(id));
+}
+
+TEST_F(PresenceTest, TheBrokersOfflineIsBelievedOnlyAfterTheGraceAndNeedsNoWaitingOutTheWholeThreshold) {
+    const auto id = newPlayer();
+    beat(id);
+    events();
+    svc_->onMqttPresence(id, false);
+    now_ += 5;
+    svc_->tick();
+    EXPECT_TRUE(svc_->isOnline(id)) << "a planned restart looks the same: wait";
+    EXPECT_EQ(count(events(), EventType::PlayerOffline), 0);
+
+    now_ += 6;                                          // 11 s after the broker's word
+    svc_->tick();
+    EXPECT_FALSE(svc_->isOnline(id)) << "far sooner than the 195 s of silence";
+    auto ev = events();
+    ASSERT_EQ(count(ev, EventType::PlayerOffline), 1);
+    for (const auto& e : ev)
+        if (e.type == EventType::PlayerOffline) EXPECT_EQ(e.payload["reason"], "mqtt_offline");
+    EXPECT_EQ(dbEvents(id, "offline"), 1);
+}
+
+TEST_F(PresenceTest, AHeartbeatWithinTheGraceCancelsTheBrokersOffline) {
+    const auto id = newPlayer();
+    beat(id);
+    svc_->onMqttPresence(id, false);
+    now_ += 5;
+    beat(id);                                           // the player was there all along
+    now_ += 20;
+    svc_->tick();
+    EXPECT_TRUE(svc_->isOnline(id));
+}
+
+TEST_F(PresenceTest, TheBrokersOnlineWithinTheGraceCancelsItToo) {
+    const auto id = newPlayer();
+    beat(id);
+    svc_->onMqttPresence(id, false);
+    now_ += 5;
+    svc_->onMqttPresence(id, true);                     // reconnected: the watchdog restart
+    now_ += 20;
+    svc_->tick();
+    EXPECT_TRUE(svc_->isOnline(id));
+}
+
+TEST_F(PresenceTest, HeartbeatSilenceStillReportsItsOwnReason) {
+    const auto id = newPlayer();
+    beat(id);
+    events();
+    now_ += 1000;
+    svc_->tick();
+    for (const auto& e : events())
+        if (e.type == EventType::PlayerOffline) EXPECT_EQ(e.payload["reason"], "heartbeat_timeout");
+}
+
+TEST_F(PresenceTest, TheBrokerCannotReviveARevokedPlayerOrInventAnUnknownOne) {
+    const auto id = newPlayer();
+    db_->revokePlayer(id, "gone", now_);
+    svc_->onMqttPresence(id, true);
+    EXPECT_FALSE(svc_->isOnline(id));
+    svc_->onMqttPresence("00000000-0000-4000-8000-000000000000", true);
+    svc_->onMqttPresence("00000000-0000-4000-8000-000000000000", false);
+    EXPECT_EQ(count(events(), EventType::PlayerOnline), 0);
+}
+
+TEST_F(PresenceTest, AnOfflineWordForAPlayerThatIsNotOnlineChangesNothing) {
+    const auto id = newPlayer();
+    svc_->onMqttPresence(id, false);                    // never seen
+    beat(id);
+    now_ += 1000;
+    svc_->tick();
+    ASSERT_FALSE(svc_->isOnline(id));
+    events();
+    svc_->onMqttPresence(id, false);
+    now_ += 50;
+    svc_->tick();
+    EXPECT_EQ(count(events(), EventType::PlayerOffline), 0) << "already offline: no second event";
+}
