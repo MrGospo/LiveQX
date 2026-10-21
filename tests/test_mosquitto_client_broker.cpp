@@ -462,3 +462,44 @@ TEST_F(MosquittoBrokerTest, RemovingAPlayerLeavesNoRetainedPresenceBehindAndStal
     EXPECT_FALSE(after.count(presenceOf(gone))) << "its retained presence is gone with it";
     EXPECT_TRUE(after.count(presenceOf(stays)));
 }
+
+TEST_F(MosquittoBrokerTest, ARevokedPlayerIsCutOffAtOnceAndWhateverItDoesNextReachesNothing) {
+    // The revoked player's record is removed on the broker (what the server does on a
+    // revocation). This pins down what that alone achieves, without any CRL.
+    AdminRig rig(broker_->serverOptions());
+    ASSERT_TRUE(rig.up());
+    ASSERT_TRUE(rig.admin.ensureBaseline().ok);
+    auto player = broker_->enrollPlayer(/*provision=*/false);
+    ASSERT_TRUE(rig.admin.provisionPlayer(player.id).ok);
+
+    Inbox at_player, at_server;
+    std::atomic<int> drops{0};
+    mqtt::MosquittoClient dev(broker_->playerOptions(player));
+    dev.setMessageHandler([&](const mqtt::Message& m) { at_player.add(m); });
+    dev.setStateHandler([&](bool up, const std::string&) { if (!up) ++drops; });
+    dev.subscribe(commandsOf(player), 1);
+    ASSERT_TRUE(dev.start());
+    ASSERT_TRUE(waitFor([&] { return dev.connected(); })) << broker_->log();
+    mqtt::Message cmd;
+    cmd.topic = commandsOf(player);
+    cmd.payload = "before";
+    ASSERT_TRUE(waitFor([&] { rig.client.publish(cmd); return at_player.has(cmd.topic, "before"); }));
+
+    ASSERT_TRUE(rig.admin.removePlayer(player.id).ok);
+
+    EXPECT_TRUE(waitFor([&] { return drops.load() >= 1; })) << "the open connection is dropped, not left to idle";
+
+    // It will try again (a player does); the broker lets it in (the certificate is
+    // still valid) but it has no record, so nothing reaches it and nothing it sends is heard.
+    rig.client.setMessageHandler([&](const mqtt::Message& m) { at_server.add(m); rig.admin.handleMessage(m); });
+    cmd.payload = "after";
+    mqtt::Message hello;
+    hello.topic = presenceOf(player);
+    hello.payload = "online";
+    for (int i = 0; i < 8; ++i) {
+        rig.client.publish(cmd);
+        dev.publish(hello);
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    EXPECT_FALSE(at_player.has(cmd.topic, "after")) << "no commands for a revoked player";
+}
