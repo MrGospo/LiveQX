@@ -26,6 +26,64 @@ nlohmann::json brokerStatusJson(const BrokerLinkStatus& st) {
 BrokerLink::BrokerLink(BrokerLinkOptions opts) : opts_(std::move(opts)) {
     opts_.retry_s = std::max(1, opts_.retry_s);
     opts_.reconcile_interval_s = std::max(opts_.retry_s, opts_.reconcile_interval_s);
+    conn_.host = opts_.host;
+    conn_.port = opts_.port;
+    conn_.verify_hostname = opts_.verify_hostname;
+    conn_.reconcile_interval_s = opts_.reconcile_interval_s;
+}
+
+BrokerConnection BrokerLink::connection() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return conn_;
+}
+
+void BrokerLink::reconfigure(const BrokerConnection& c) {
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        conn_ = c;
+        pending_conn_ = c;
+        dirty_ = true;
+        poke_ = true;
+    }
+    cv_.notify_all();
+}
+
+BrokerLink::ProbeResult BrokerLink::probe(const BrokerConnection& c) {
+    ProbeResult r;
+    BrokerIdentityPem id;
+    std::string why;
+    if (!opts_.identity || !opts_.identity(id, why)) {
+        r.error = "not_ready: " + (why.empty() ? std::string("no identity for the broker yet") : why);
+        return r;
+    }
+    const std::string trust = opts_.trust_pem ? opts_.trust_pem() : std::string();
+    if (trust.empty()) { r.error = "not_ready: no root to check the broker's certificate against yet"; return r; }
+
+    ClientOptions co;
+    co.host            = c.host;
+    co.port            = c.port;
+    // Another client id: the broker would otherwise drop the running connection
+    // in favour of this one. The identity (and so the rights) is the same.
+    co.client_id       = std::string(BrokerAdmin::kServerClient) + "-probe";
+    co.ca_pem          = trust;
+    co.cert_chain_pem  = id.cert_chain_pem;
+    co.key_pem         = id.key_pem;
+    co.verify_hostname = c.verify_hostname;
+    co.clean_start     = true;
+    co.session_expiry_s = 0;
+    auto client = opts_.make_client ? opts_.make_client(co) : nullptr;
+    if (!client) { r.error = "the MQTT client is not available in this build"; return r; }
+    if (!client->start()) { r.error = client->lastError(); return r; }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, opts_.probe_timeout_s));
+    while (std::chrono::steady_clock::now() < deadline && !client->connected())
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    r.ok = client->connected();
+    if (!r.ok) {
+        r.error = client->lastError();
+        if (r.error.empty()) r.error = "no answer from the broker in time";
+    }
+    client->stop();
+    return r;
 }
 
 BrokerLink::~BrokerLink() { stop(); }
@@ -145,6 +203,22 @@ void BrokerLink::tearDown() {
 
 void BrokerLink::run() {
     while (!stopping_.load()) {
+        // A new address / setting was asked for: close the old connection and open the new.
+        {
+            std::optional<BrokerConnection> fresh;
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                fresh.swap(pending_conn_);
+            }
+            if (fresh) {
+                opts_.host = fresh->host;
+                opts_.port = fresh->port;
+                opts_.verify_hostname = fresh->verify_hostname;
+                opts_.reconcile_interval_s = std::max(opts_.retry_s, fresh->reconcile_interval_s);
+                LOG_INFO("Broker: now connecting to {}:{}", opts_.host, opts_.port);
+                tearDown();
+            }
+        }
         if (!client_) {
             std::string why;
             if (!bringUp(why)) {

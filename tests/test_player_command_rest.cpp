@@ -619,3 +619,52 @@ TEST(PlayerBrokerRest, OnlyAnAdministratorSeesOrNudgesTheBroker) {
     }
     EXPECT_EQ(cli.Get("/api/players/broker")->status, 401);
 }
+
+TEST(PlayerBrokerRest, ChangingTheConnectionGoesThroughTheHookAndOnlyAnAdministratorMayDoIt) {
+    CommandFixture f(g_port++);
+    auto admin = f.person("admin1", sa::Role::Admin);
+    auto op = f.person("op1", sa::Role::Operator);
+    auto cli = f.client();
+
+    // No link: the answer is plain.
+    auto none = cli.Put("/api/players/broker", bearer(admin.token), R"({"port":8884})", "application/json");
+    EXPECT_EQ(none->status, 409);
+    EXPECT_EQ(json::parse(none->body)["error"], "broker_disabled");
+
+    std::mutex mu;
+    std::string last_body;
+    f.api->setBrokerHooks(
+        [] { return std::string(R"({"state":"connected"})"); }, [] {},
+        [&](const std::string& body) {
+            std::lock_guard<std::mutex> lk(mu);
+            last_body = body;
+            ControlApi::BrokerUpdate u;
+            const json j = json::parse(body);
+            if (j.value("port", 0) == 99999) {
+                u.status = 400;
+                u.body = R"({"error":"invalid_port"})";
+            } else if (j.value("host", std::string()) == "dead.lan") {
+                u.status = 502;
+                u.body = R"({"error":"probe_failed","detail":"no answer"})";
+            } else {
+                u.status = 200;
+                u.body = R"({"applied":true})";
+                u.audit = R"({"changed":["port"],"check_only":false})";
+            }
+            return u;
+        });
+
+    auto ok = cli.Put("/api/players/broker", bearer(admin.token), R"({"port":8884})", "application/json");
+    ASSERT_EQ(ok->status, 200) << ok->body;
+    EXPECT_EQ(json::parse(ok->body)["applied"], true);
+    { std::lock_guard<std::mutex> lk(mu); EXPECT_EQ(json::parse(last_body)["port"], 8884); }
+    auto bad = cli.Put("/api/players/broker", bearer(admin.token), R"({"port":99999})", "application/json");
+    EXPECT_EQ(bad->status, 400);
+    auto dead = cli.Put("/api/players/broker", bearer(admin.token), R"({"host":"dead.lan"})", "application/json");
+    EXPECT_EQ(dead->status, 502);
+    EXPECT_EQ(json::parse(dead->body)["error"], "probe_failed");
+    EXPECT_EQ(cli.Put("/api/players/broker", bearer(admin.token), "{nope", "application/json")->status, 400);
+
+    EXPECT_EQ(cli.Put("/api/players/broker", bearer(op.token), R"({"port":8884})", "application/json")->status, 403);
+    EXPECT_EQ(cli.Put("/api/players/broker", R"({"port":8884})", "application/json")->status, 401);
+}

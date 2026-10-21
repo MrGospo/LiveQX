@@ -144,7 +144,11 @@ public:
     // POST /api/players/broker/reconcile. `status` returns JSON text; `sync`
     // asks for a reconciliation now and is empty when there is no link. Set
     // before start(); without them the endpoints say the broker is disabled.
-    void setBrokerHooks(std::function<std::string()> status, std::function<void()> sync);
+    // `update` applies a PUT /api/players/broker body (JSON text) and returns the
+    // HTTP status, the answer (JSON text) and what to put in the audit row (JSON text).
+    struct BrokerUpdate { int status{200}; std::string body; std::string audit; };
+    void setBrokerHooks(std::function<std::string()> status, std::function<void()> sync,
+                        std::function<BrokerUpdate(const std::string& body)> update = {});
 
     void start();
     void stop();

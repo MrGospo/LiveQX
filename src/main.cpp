@@ -52,6 +52,7 @@
 #ifdef LIVEQX_HAVE_MOSQUITTO
 #include "mqtt/MosquittoClient.h"
 #endif
+#include "players/BrokerSettings.h"
 #include "players/CommandService.h"
 #include "players/DeviceApi.h"
 #include "players/EnrollService.h"
@@ -1128,13 +1129,22 @@ int main(int argc, char* argv[]) {
                 bcfg = cfg["players"]["broker"];
             if (bcfg.value("enabled", false)) {
                 liveqx::mqtt::BrokerLinkOptions bo;
-                bo.host                 = bcfg.value("host", std::string("127.0.0.1"));
-                bo.port                 = std::clamp(bcfg.value("port", 8883), 1, 65535);
-                bo.verify_hostname      = bcfg.value("verify_hostname", true);
-                bo.reconcile_interval_s = std::clamp(bcfg.value("reconcile_interval_s", 300), 10, 86400);
+                // The file gives the defaults; what an administrator set from the interface wins.
+                liveqx::mqtt::BrokerConnection base;
+                base.host                 = bcfg.value("host", std::string("127.0.0.1"));
+                base.port                 = std::clamp(bcfg.value("port", 8883), 1, 65535);
+                base.verify_hostname      = bcfg.value("verify_hostname", true);
+                base.reconcile_interval_s = std::clamp(bcfg.value("reconcile_interval_s", 300), 10, 86400);
+                const auto effective = players_service->brokerConnection(base);
+                bo.host                 = effective.host;
+                bo.port                 = effective.port;
+                bo.verify_hostname      = effective.verify_hostname;
+                bo.reconcile_interval_s = effective.reconcile_interval_s;
                 const auto broker_ca_dir = paths.deviceCaDir();
-                bo.identity = [device_ca_provider, broker_ca_dir, &master_key](
+                auto identity_mu = std::make_shared<std::mutex>();    // the link thread and a trial connection both ask
+                bo.identity = [device_ca_provider, broker_ca_dir, &master_key, identity_mu](
                                   liveqx::mqtt::BrokerIdentityPem& out, std::string& why) {
+                    std::lock_guard<std::mutex> lk(*identity_mu);
                     auto ca = device_ca_provider();
                     if (!ca) { why = "the device CA is not set up yet"; return false; }
                     liveqx::tls::BrokerIdentity id;
@@ -1471,11 +1481,21 @@ int main(int argc, char* argv[]) {
                     if (cfg.contains("players") && cfg["players"].is_object() &&
                         cfg["players"].contains("broker") && cfg["players"]["broker"].is_object())
                         cfg_b = cfg["players"]["broker"];
+                    liveqx::mqtt::BrokerConnection conn;
+                    if (broker_link) {
+                        conn = broker_link->connection();
+                    } else {
+                        conn.host                 = cfg_b.value("host", std::string("127.0.0.1"));
+                        conn.port                 = cfg_b.value("port", 8883);
+                        conn.verify_hostname      = cfg_b.value("verify_hostname", true);
+                        conn.reconcile_interval_s = cfg_b.value("reconcile_interval_s", 300);
+                        if (players_service) conn = players_service->brokerConnection(conn);
+                    }
                     j["enabled"]         = cfg_b.value("enabled", false);
-                    j["host"]            = cfg_b.value("host", std::string("127.0.0.1"));
-                    j["port"]            = cfg_b.value("port", 8883);
-                    j["verify_hostname"] = cfg_b.value("verify_hostname", true);
-                    j["reconcile_interval_s"] = cfg_b.value("reconcile_interval_s", 300);
+                    j["host"]            = conn.host;
+                    j["port"]            = conn.port;
+                    j["verify_hostname"] = conn.verify_hostname;
+                    j["reconcile_interval_s"] = conn.reconcile_interval_s;
 #ifdef LIVEQX_HAVE_MOSQUITTO
                     constexpr bool kBuilt = true;
 #else
@@ -1489,7 +1509,21 @@ int main(int argc, char* argv[]) {
                          players_service ? !players_service->settings().mqtt_broker_url.empty() : false}};
                     return j.dump();
                 },
-                broker_link ? std::function<void()>([&]() { broker_link->requestSync(); }) : std::function<void()>{});
+                broker_link ? std::function<void()>([&]() { broker_link->requestSync(); }) : std::function<void()>{},
+                [&](const std::string& body) {
+                    ControlApi::BrokerUpdate out;
+                    auto j = json::parse(body, nullptr, false);
+                    if (!players_service || j.is_discarded()) {
+                        out.status = 400;
+                        out.body = json{{"error", "invalid_body"}}.dump();
+                        return out;
+                    }
+                    auto r = liveqx::players::updateBrokerConnection(j, *players_service, broker_link.get());
+                    out.status = r.status;
+                    out.body   = r.body.dump();
+                    out.audit  = r.audit.dump();
+                    return out;
+                });
             api.mountUi(paths.uiDir());
             api.start();
             const bool tls_on = !tls_bindings.cert_path.empty() &&

@@ -17,6 +17,7 @@
 // Everything outside is injected, so the logic is tested without a broker.
 
 #include "mqtt/BrokerAdmin.h"
+#include "mqtt/BrokerConnection.h"
 #include "mqtt/MqttClient.h"
 
 #include <nlohmann/json.hpp>
@@ -27,6 +28,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -46,6 +48,7 @@ struct BrokerLinkOptions {
     bool        verify_hostname{true};
     int         reconcile_interval_s{300};
     int         retry_s{5};
+    int         probe_timeout_s{8};          // how long a trial connection (probe) may take
 
     // false + reason while the server cannot yet have an identity.
     std::function<bool(BrokerIdentityPem&, std::string& why)> identity;
@@ -88,6 +91,22 @@ public:
 
     BrokerLinkStatus status() const;
 
+    // How it connects now.
+    BrokerConnection connection() const;
+
+    // Switches to another broker address / setting: the connection is closed and
+    // reopened with the new values, and the broker is reconciled again. Never
+    // blocks. The caller is expected to have validated and probed first.
+    void reconfigure(const BrokerConnection& c);
+
+    struct ProbeResult {
+        bool        ok{false};
+        std::string error;            // why not: not ready, or what the connection said
+    };
+    // Tries a throwaway connection with the server's identity to `c`, waits up to
+    // `probe_timeout_s`, and closes it. Does not touch the running link. Blocks.
+    ProbeResult probe(const BrokerConnection& c);
+
     // Asks for the retained message of a topic to be deleted (an empty retained
     // publish) as soon as the link is up. Safe to call from a message handler:
     // it only queues, the link's own thread does the publishing.
@@ -114,6 +133,8 @@ private:
     std::set<std::string> clear_retained_;      // topics waiting to be wiped
     bool             poke_{false};              // wake the thread (a request or a state change)
     BrokerLinkStatus status_;
+    BrokerConnection conn_;                     // what the link connects with now
+    std::optional<BrokerConnection> pending_conn_;   // asked for, not yet applied by the thread
 
     // Replaced by the thread only, read by publish() under client_mu_.
     mutable std::mutex client_mu_;

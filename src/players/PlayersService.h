@@ -14,6 +14,7 @@
 // returned error codes and write the audit trail.
 
 #include "events/EventBus.h"
+#include "mqtt/BrokerConnection.h"
 #include "players/PlayersDb.h"
 
 #include <nlohmann/json.hpp>
@@ -101,6 +102,14 @@ public:
     // invalid_command_ttl_s, invalid_confirm_timeout_restart_s, ..._reboot_s, ..._reload_s,
     // storage_error.
     std::string updateSettings(const std::map<std::string, std::string>& patch);
+
+    // How the server connects to the MQTT broker. Stored values (set from the
+    // interface) win over `base`, which comes from the configuration file; a
+    // stored value that does not validate is ignored.
+    mqtt::BrokerConnection brokerConnection(const mqtt::BrokerConnection& base);
+    // Stores all four values. "" or invalid_host / invalid_port /
+    // invalid_reconcile_interval_s / storage_error.
+    std::string storeBrokerConnection(const mqtt::BrokerConnection& c);
 
     // A player always sits in a group: `group_id` is required. Errors:
     // invalid_clock_policy, group_required, group_not_found, invalid_name,

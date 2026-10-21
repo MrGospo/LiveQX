@@ -181,6 +181,33 @@ std::string PlayersService::updateSettings(const std::map<std::string, std::stri
     return db_.setSettings(patch) ? "" : "storage_error";
 }
 
+mqtt::BrokerConnection PlayersService::brokerConnection(const mqtt::BrokerConnection& base) {
+    const auto m = db_.settings();
+    mqtt::BrokerConnection c = base;
+    auto get = [&](const char* k) -> const std::string* {
+        auto it = m.find(k);
+        return it == m.end() ? nullptr : &it->second;
+    };
+    if (auto* v = get("broker_host")) c.host = *v;
+    if (auto* v = get("broker_port"); v && !v->empty() && v->size() <= 5 &&
+        std::all_of(v->begin(), v->end(), [](unsigned char ch) { return std::isdigit(ch); }))
+        c.port = std::stoi(*v);
+    if (auto* v = get("broker_verify_hostname")) c.verify_hostname = (*v != "false");
+    if (auto* v = get("broker_reconcile_interval_s"); v && !v->empty() && v->size() <= 6 &&
+        std::all_of(v->begin(), v->end(), [](unsigned char ch) { return std::isdigit(ch); }))
+        c.reconcile_interval_s = std::stoi(*v);
+    return mqtt::validateBrokerConnection(c).empty() ? c : base;
+}
+
+std::string PlayersService::storeBrokerConnection(const mqtt::BrokerConnection& c) {
+    if (auto e = mqtt::validateBrokerConnection(c); !e.empty()) return e;
+    return db_.setSettings({{"broker_host", c.host},
+                            {"broker_port", std::to_string(c.port)},
+                            {"broker_verify_hostname", c.verify_hostname ? "true" : "false"},
+                            {"broker_reconcile_interval_s", std::to_string(c.reconcile_interval_s)}})
+               ? "" : "storage_error";
+}
+
 std::string PlayersService::caCertPem() {
     const PlayersSettings s = settings();
     std::string pem = !s.ca_cert_pem.empty() ? s.ca_cert_pem : slurp(opts_.ca_cert_path);

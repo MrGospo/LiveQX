@@ -262,6 +262,7 @@ set(SOURCES
     src/players/CommandService.cpp
     src/mqtt/BrokerAdmin.cpp
     src/mqtt/BrokerLink.cpp
+    src/players/BrokerSettings.cpp
     src/players/EnrollService.cpp
     src/players/RevocationList.cpp
     src/players/DeviceApi.cpp

@@ -5112,6 +5112,58 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/BrokerStatus' }
 
+    put:
+      tags: [Players]
+      summary: Change how the server connects to the broker
+      description: |
+        Только администратор. Любые из полей `host`, `port`, `verify_hostname`,
+        `reconcile_interval_s`; отсутствующее не меняется. Значения сохраняются в базе
+        (переживают перезапуск и сильнее файла конфигурации), работающая ссылка
+        переподключается сама. Ссылка должна быть включена в конфигурации
+        (`players.broker.enabled`), иначе `409 broker_disabled`.
+
+        Если меняется куда или как строго подключается сервер (адрес, порт, проверка имени),
+        сначала делается пробное подключение под удостоверением сервера (с другим MQTT
+        client id, рабочее соединение не трогается); применяется только если брокер ответил,
+        иначе `502 probe_failed` и ничего не меняется. `check_only: true` только проверяет;
+        `skip_check: true` применяет без проверки (брокер ещё не поднят) и это видно в аудите.
+        Смена одного периода сверки проверки не требует. Отключение `verify_hostname`
+        возвращает `warning: verify_hostname_disabled`. Аудит: `player.broker_update`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                host: { type: string }
+                port: { type: integer, minimum: 1, maximum: 65535 }
+                verify_hostname: { type: boolean }
+                reconcile_interval_s: { type: integer, minimum: 10, maximum: 86400 }
+                check_only: { type: boolean }
+                skip_check: { type: boolean }
+      responses:
+        '200':
+          description: 'Применено (`applied`), без изменений (`unchanged`) или результат проверки (`checked`, `ok`, `detail`).'
+          content:
+            application/json:
+              schema: { type: object }
+        '400':
+          description: '`invalid_host`, `invalid_port`, `invalid_verify_hostname`, `invalid_reconcile_interval_s`, `unknown_field`, `check_only_and_skip_check`, `invalid_body`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`broker_disabled`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502':
+          description: '`probe_failed` — брокер не ответил; `detail` — что сказало соединение. Ничего не изменено.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/players/broker/reconcile:
     post:
       tags: [Players]

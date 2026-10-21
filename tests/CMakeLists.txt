@@ -175,6 +175,8 @@ add_executable(liveqx-tests
     test_command_service.cpp
     ../src/mqtt/BrokerAdmin.cpp
     ../src/mqtt/BrokerLink.cpp
+    ../src/players/BrokerSettings.cpp
+    test_broker_settings.cpp
     test_broker_admin.cpp
     test_broker_link.cpp
     ../src/players/EnrollService.cpp

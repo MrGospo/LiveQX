@@ -108,6 +108,7 @@ struct ControlApi::Impl {
     std::function<void()>                          on_tls_reload;
     std::function<std::string()>                   broker_status;
     std::function<void()>                          broker_sync;
+    std::function<ControlApi::BrokerUpdate(const std::string&)> broker_update;
     std::mutex                                     metrics_token_mu;
 
     Impl(ChannelManager& m, MetricsCollector* mc, LivezOptions lz,
@@ -450,6 +451,7 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     rbac.registerEndpoint("GET /api/players/settings",              rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("GET /api/players/broker",                rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("POST /api/players/broker/reconcile",     rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("PUT /api/players/broker",                rbacRole(RbacRole::Admin));
     // The hierarchy all -> object -> group. Administered by admins; reading the
     // tree and moving screens are open to the roles but filtered / checked by the
     // rights an administrator has given (players/PlayerAccess).
@@ -3924,6 +3926,19 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         auto j = json::parse(impl->broker_status(), nullptr, false);
         writeJson(res, 200, j.is_discarded() ? json{{"enabled", false}, {"state", "disabled"}} : j);
     });
+    // Changing how the server reaches the broker. A new address is tried first and
+    // applied only if the broker answers (see players/BrokerSettings.h).
+    s.Put("/api/players/broker", [impl, auditPlayer](const httplib::Request& req, httplib::Response& res) {
+        if (!impl->broker_update) { writeJson(res, 409, {{"error", "broker_disabled"}}); return; }
+        json body;
+        if (!parseJsonBody(req, res, body)) return;
+        const auto out = impl->broker_update(body.dump());
+        auto audit = json::parse(out.audit, nullptr, false);
+        if (out.status == 200 && audit.is_object() && !audit.value("check_only", false))
+            auditPlayer("player.broker_update", audit, "");
+        auto answer = json::parse(out.body, nullptr, false);
+        writeJson(res, out.status, answer.is_discarded() ? json{{"error", "internal_error"}} : answer);
+    });
     s.Post("/api/players/broker/reconcile", [impl, auditPlayer](const httplib::Request&, httplib::Response& res) {
         if (!impl->broker_sync) { writeJson(res, 409, {{"error", "broker_disabled"}}); return; }
         impl->broker_sync();
@@ -6384,9 +6399,11 @@ void ControlApi::stop() {
     if (impl_->thread.joinable()) impl_->thread.join();
 }
 
-void ControlApi::setBrokerHooks(std::function<std::string()> status, std::function<void()> sync) {
+void ControlApi::setBrokerHooks(std::function<std::string()> status, std::function<void()> sync,
+                                std::function<BrokerUpdate(const std::string& body)> update) {
     impl_->broker_status = std::move(status);
     impl_->broker_sync   = std::move(sync);
+    impl_->broker_update = std::move(update);
 }
 
 void ControlApi::setOnTlsReload(std::function<void()> cb) {
