@@ -7,6 +7,8 @@ export interface SubNavItem {
   to: string;
   labelKey: string;
   minRole?: Role;
+  /** Match the path exactly (for an item whose path is a prefix of its siblings'). */
+  end?: boolean;
 }
 
 const ROLE_RANK: Record<Role, number> = { viewer: 0, operator: 1, admin: 2 };
@@ -24,10 +26,11 @@ export function SubNav({ items }: { items: SubNavItem[] }) {
 
   return (
     <nav className="flex gap-1 bg-surface border-b border-[var(--border-subtle)] -mx-7 -mt-7 px-7 mb-2" aria-label="Section navigation">
-      {visible.map(({ to, labelKey }) => (
+      {visible.map(({ to, labelKey, end }) => (
         <NavLink
           key={to}
           to={to}
+          end={end}
           className={({ isActive }) =>
             [
               'relative px-3 py-2.5 text-sm font-medium whitespace-nowrap transition-colors outline-none',

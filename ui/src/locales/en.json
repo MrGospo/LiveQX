@@ -11,6 +11,7 @@
     "docs": "Knowledge Base",
     "players": "Screens",
     "playersSettings": "Settings",
+    "playersList": "List",
     "playersObjects": "Objects and groups",
     "playersBroker": "Broker",
     "settingsUsers": "Users",
@@ -1479,6 +1480,121 @@
     }
   },
   "players": {
+    "status": {
+      "online": "Online",
+      "offline": "Offline",
+      "pending": "Awaiting enrolment",
+      "revoked": "Revoked"
+    },
+    "commandTypes": {
+      "restart_player": "Restart the player",
+      "reboot_screen": "Reboot the screen",
+      "reload_playlist": "Reload the playlist"
+    },
+    "commandResults": {
+      "executed": "done",
+      "duplicate": "already done",
+      "expired": "the screen got it too late",
+      "unsupported": "the screen does not know this command",
+      "failed": "the screen could not do it",
+      "os_not_rebooted": "the screen answered but the computer did not reboot",
+      "no_confirmation": "the screen did not confirm in time",
+      "released_by_admin": "released by an administrator",
+      "broker_error": "the broker did not accept the command",
+      "broker_not_connected": "the server is not connected to the broker"
+    },
+    "revokeReasons": {
+      "revoked_by_admin": "revoked by an administrator",
+      "deleted_by_admin": "deleted by an administrator"
+    },
+    "list": {
+      "title": "Screens",
+      "all": "All screens",
+      "search": "Name or place",
+      "statusFilter": "Filter by status",
+      "allStatuses": "All",
+      "treeFailed": "Could not load the list of places.",
+      "loadFailed": "Could not load the list of screens.",
+      "noPlace": "no group",
+      "never": "no signal yet",
+      "cut": "The first {{n}} screens are shown. Pick an object or a group on the left to see the rest.",
+      "col": { "name": "Name", "place": "Place", "status": "Status", "version": "Version", "lastSignal": "Last signal" },
+      "empty": {
+        "title": "No screens yet",
+        "text": "The screens you have access to appear here. If you expect a screen and it is missing, ask an administrator for rights on its object or group."
+      },
+      "noMatch": { "title": "Nothing found", "text": "Change the search or the status." }
+    },
+    "detail": {
+      "back": "All screens",
+      "notFound": "Screen not found. It may have been deleted, or you may have no rights on its place.",
+      "loadFailed": "Could not load the screen.",
+      "pendingNote": "The screen is not enrolled yet: it has not used its enrolment package. There is no data about it until then.",
+      "revokedNote": "The screen was revoked {{when}}: its certificates no longer work and no commands are sent to it.",
+      "revokedReason": "Reason: {{reason}}.",
+      "now": "Now",
+      "staleNote": "The screen is offline: below is what it last reported.",
+      "place": "Place",
+      "version": "Player version",
+      "lastSignal": "Last signal",
+      "clockPolicy": "Clock check",
+      "clockValue": { "strict": "strict", "relaxed": "relaxed" },
+      "created": "Created",
+      "activated": "Enrolled",
+      "id": "Identifier",
+      "report": {
+        "health": "Health",
+        "healthValue": { "ok": "fine", "warning": "has warnings", "critical": "faulty" },
+        "watchdog": "Watchdog",
+        "watchdogValue": { "ok": "running", "stale": "stuck", "not_running": "not running" },
+        "source": "Now playing",
+        "media": "Stream state",
+        "buffer": "Buffer",
+        "uptime": "Player running for",
+        "osUptime": "Computer on for",
+        "lastError": "Last error",
+        "renewError": "Certificate renewal error"
+      },
+      "certs": {
+        "title": "Certificates",
+        "none": "No certificates yet.",
+        "col": { "serial": "Serial number", "issued": "Issued", "until": "Valid until", "state": "Status" },
+        "state": { "valid": "valid", "soon": "ends soon", "expired": "expired", "revoked": "revoked" }
+      },
+      "commands": {
+        "title": "Commands",
+        "none": "No commands have been sent to this screen.",
+        "loadFailed": "Could not load commands.",
+        "col": { "type": "Command", "state": "Outcome", "sent": "Sent", "finished": "Finished" },
+        "state": {
+          "pending": "awaiting an answer",
+          "executed": "done",
+          "failed": "failed",
+          "timeout": "no confirmation",
+          "released": "released",
+          "not_sent": "not sent"
+        }
+      },
+      "events": {
+        "title": "Event journal",
+        "none": "No events yet."
+      }
+    },
+    "events": {
+      "online": "The screen came online",
+      "started": "The player started",
+      "offline": "The screen went offline ({{reason}})",
+      "offlineReason": {
+        "heartbeat_timeout": "its signals stopped",
+        "mqtt_offline": "reported by the broker"
+      },
+      "version_changed": "Player version changed: {{from}} → {{to}}",
+      "command_sent": "Command sent: {{type}}",
+      "command_executed": "Command done: {{type}}",
+      "command_failed": "Command failed: {{type}} — {{result}}",
+      "command_timeout": "No confirmation of the command: {{type}}",
+      "command_released": "Command released by an administrator: {{type}}"
+    },
     "objects": {
       "title": "Objects and groups",
       "lead": "An object is a place where screens stand, such as a shop floor or a warehouse. Inside an object, screens are collected into groups. Rights and commands are given by these places.",

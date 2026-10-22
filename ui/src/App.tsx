@@ -22,7 +22,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { path: '/dashboard',             labelKey: 'nav.dashboard',     Icon: LayoutDashboard },
   { path: '/channels',              labelKey: 'nav.channels',       Icon: Tv2 },
-  { path: '/players/settings',      labelKey: 'nav.players',        Icon: MonitorSmartphone, minRole: 'admin' },   // the list of screens joins here for everyone
+  { path: '/players',               labelKey: 'nav.players',        Icon: MonitorSmartphone },
   { path: '/gateways',              labelKey: 'nav.gateways',       Icon: Network,  minRole: 'admin' },
   { path: '/plugins',               labelKey: 'nav.plugins',        Icon: Puzzle,   minRole: 'admin' },
   { path: '/observability/metrics', labelKey: 'nav.observability',  Icon: Activity },

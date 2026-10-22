@@ -24,3 +24,17 @@ export function relativeFromNow(unixSec: number, nowMs: number, lang: string): s
 export function absoluteTime(unixSec: number | null | undefined): string {
   return unixSec ? new Date(unixSec * 1000).toLocaleString() : '—';
 }
+
+// "3 d 4 h" from a number of seconds: the two largest non-zero units, so an
+// uptime reads at a glance and does not run to seconds.
+export function formatDuration(sec: number, t: TFunction): string {
+  if (!Number.isFinite(sec) || sec < 0) return '';
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const parts: string[] = [];
+  if (d) parts.push(t('players.units.days',  { n: d }));
+  if (h) parts.push(t('players.units.hours', { n: h }));
+  if (m && parts.length < 2 && !d) parts.push(t('players.units.minutes', { n: m }));
+  return parts.length ? parts.join(' ') : t('players.units.seconds', { n: Math.floor(sec) });
+}

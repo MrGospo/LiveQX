@@ -208,3 +208,112 @@ export const usePlayerTreeMutations = () => {
     }),
   };
 };
+
+// ─── Screens (GET /api/players, /api/players/{id}, …/commands) ────────────────
+
+export type PlayerLifecycle = 'pending' | 'active' | 'revoked';
+export type PlayerHealth = 'ok' | 'warning' | 'critical';
+
+// What the screen last reported about itself (a cleaned heartbeat; every field is optional).
+export interface PlayerReport {
+  health?:             PlayerHealth;
+  watchdog_state?:     'ok' | 'stale' | 'not_running';
+  uptime_seconds?:     number;
+  os_uptime_seconds?:  number;
+  position_ms?:        number;
+  buffer_progress?:    number;
+  current_source?:     string;
+  media_status?:       string;
+  last_error?:         string;
+  last_renew_error?:   string;
+  last_command_id?:    string;
+  last_command_result?: { id: string; status: string };
+}
+
+export interface PlayerStatus {
+  online:     boolean;
+  version:    string;
+  updated_at: number;
+  state?:     PlayerReport;
+}
+
+export interface Player {
+  id:             string;
+  name:           string;
+  state:          PlayerLifecycle;
+  clock_policy:   ClockPolicy;
+  created_at:     number;
+  group_id?:      number;
+  group_name?:    string;
+  object_id?:     number;
+  object_name?:   string;
+  created_by?:    number;
+  activated_at?:  number;
+  revoked_at?:    number;
+  revoke_reason?: string;
+  status?:        PlayerStatus;
+}
+
+export interface PlayerCertificate {
+  serial:         string;
+  generation:     number;
+  issued_at:      number;
+  not_before:     number;
+  not_after:      number;
+  revoked_at?:    number;
+  revoke_reason?: string;
+}
+
+// `details` is JSON text (or empty) whose shape depends on `kind`.
+export interface PlayerEvent { id: number; ts: number; kind: string; details: string }
+
+export interface PlayerDetails extends Player {
+  certificates: PlayerCertificate[];
+  events:       PlayerEvent[];
+}
+
+export type CommandState = 'pending' | 'executed' | 'failed' | 'timeout' | 'released' | 'not_sent';
+
+export interface PlayerCommand {
+  id:          string;
+  player_id:   string;
+  type:        string;
+  state:       CommandState;
+  result:      string;
+  issued_at:   number;
+  ttl_seconds: number;
+  deadline_at: number;
+  issued_by?:  number;
+  finished_at?: number;
+}
+
+export interface PlayerListFilter { objectId?: number; groupId?: number }
+
+// One request covers a deployment of several hundred screens; the server caps a page at 1000.
+export const PLAYER_LIST_LIMIT = 1000;
+
+export const usePlayers = (f: PlayerListFilter) =>
+  useQuery({
+    queryKey: ['players', 'list', f.objectId ?? null, f.groupId ?? null],
+    queryFn: async () => {
+      const q = new URLSearchParams({ limit: String(PLAYER_LIST_LIMIT) });
+      if (f.groupId  != null) q.set('group_id',  String(f.groupId));
+      if (f.objectId != null) q.set('object_id', String(f.objectId));
+      return (await api.get<{ players: Player[] }>(`/api/players?${q}`)).players;
+    },
+    staleTime: 5_000,
+  });
+
+export const usePlayer = (id: string) =>
+  useQuery({
+    queryKey: ['players', 'one', id],
+    queryFn: () => api.get<PlayerDetails>(`/api/players/${encodeURIComponent(id)}`),
+    staleTime: 5_000,
+  });
+
+export const usePlayerCommands = (id: string) =>
+  useQuery({
+    queryKey: ['players', 'commands', id],
+    queryFn: async () => (await api.get<{ commands: PlayerCommand[] }>(`/api/players/${encodeURIComponent(id)}/commands`)).commands,
+    staleTime: 5_000,
+  });
