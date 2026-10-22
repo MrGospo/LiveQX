@@ -969,6 +969,7 @@ int main(int argc, char* argv[]) {
             std::mutex mu;
             liveqx::mqtt::BrokerLink* link{nullptr};
             void poke() { std::lock_guard<std::mutex> lk(mu); if (link) link->requestSync(); }
+            void rebuild(const std::string& id) { std::lock_guard<std::mutex> lk(mu); if (link) link->requestRebuild(id); }
             void set(liveqx::mqtt::BrokerLink* l) { std::lock_guard<std::mutex> lk(mu); link = l; }
             std::function<void()> on_revoked;                  // asks for a new revocation list; set once, cleared on the way out
             void pokeRevoked() { std::function<void()> f; { std::lock_guard<std::mutex> lk(mu); f = on_revoked; } if (f) f(); }
@@ -1012,6 +1013,13 @@ int main(int argc, char* argv[]) {
             };
             po.on_player_created = [broker_hook](const std::string&) { broker_hook->poke(); };
             po.on_player_gone    = [broker_hook](const std::string&) { broker_hook->poke(); };
+            // Bound again: the old device's connection at the broker ends, and the
+            // server forgets that device's presence. The presence service is made
+            // a little later, hence the check.
+            po.on_player_reset   = [broker_hook, &presence_service](const std::string& id) {
+                if (presence_service) presence_service->forget(id);
+                broker_hook->rebuild(id);
+            };
             po.ntp_hint     = [&time_repo]() -> std::vector<std::string> {
                 auto cur = time_repo.load();
                 if (cur && cur->ntp.enabled) return cur->ntp.servers;

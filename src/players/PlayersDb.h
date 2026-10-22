@@ -126,6 +126,14 @@ struct CertRow {
     std::string                 revoke_reason;
 };
 
+// What re-binding a player leaves behind: its new token and the certificates
+// that were revoked on the way (the caller puts them on the revocation lists).
+struct ReEnrollment {
+    TokenIssue            token;
+    std::vector<CertRow>  revoked;
+    PlayerState           previous{PlayerState::Active};
+};
+
 struct StatusRow {
     std::string  player_id;
     std::int64_t updated_at{0};
@@ -244,6 +252,14 @@ public:
                                                      std::int64_t now = 0);
 
     // ── pairing ──────────────────────────────────────────────────────────
+    // Binds an enrolled (active) or revoked player again, keeping its identity,
+    // place and history. In ONE transaction: every live certificate is revoked,
+    // the player goes back to "pending", its last status and its waiting commands
+    // are dropped and a fresh token is issued. nullopt if the player is unknown
+    // or already pending (that one only needs reissueToken()).
+    std::optional<ReEnrollment> reEnrollPlayer(const std::string& id, const std::string& reason,
+                                               std::int64_t token_ttl_seconds, std::int64_t now = 0);
+
     // A new token for a still-pending player; the old ones stop working.
     std::optional<TokenIssue> reissueToken(const std::string& player_id,
                                            std::int64_t token_ttl_seconds,

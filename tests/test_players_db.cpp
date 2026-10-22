@@ -304,6 +304,102 @@ TEST_F(PlayersDbTest, ATokenCannotBeReissuedForAPlayerThatIsAlreadyPaired) {
     EXPECT_FALSE(db_->reissueToken(id, 3600, kT0 + 100).has_value());
 }
 
+// ── binding an already paired screen again ──────────────────────────────────
+TEST_F(PlayersDbTest, ReEnrollingAnActiveScreenRevokesItsCertificatesAndReturnsItToPending) {
+    const auto id = enrolled("RE01");
+    ASSERT_TRUE(db_->recordRenewal(cert(id, "RE02"), kT0 + 200));
+    const auto before = db_->findPlayer(id);
+    ASSERT_TRUE(before.has_value());
+
+    auto r = db_->reEnrollPlayer(id, "device_replaced", 3600, kT0 + 300);
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->previous, PlayerState::Active);
+    EXPECT_EQ(r->revoked.size(), 2u) << "both live certificates, so the CRL can be rebuilt";
+    for (const auto& c : r->revoked) EXPECT_EQ(c.revoke_reason, "device_replaced");
+    EXPECT_EQ(r->token.token_expires_at, kT0 + 300 + 3600);
+
+    const auto p = db_->findPlayer(id);
+    ASSERT_TRUE(p);
+    EXPECT_EQ(p->state, PlayerState::Pending);
+    EXPECT_EQ(p->name, before->name) << "the identity and the name stay";
+    EXPECT_FALSE(p->activated_at.has_value());
+    EXPECT_FALSE(p->revoked_at.has_value());
+    EXPECT_TRUE(p->revoke_reason.empty());
+    for (const auto& c : db_->certsOf(id)) EXPECT_TRUE(c.revoked_at.has_value());
+    EXPECT_EQ(db_->revokedSerials(1, kT0 + 300).size(), 2u);
+}
+
+TEST_F(PlayersDbTest, ReEnrollingARevokedScreenBringsItBackAndKeepsTheFirstRevocationOfItsCertificates) {
+    const auto id = enrolled("RE03");
+    ASSERT_TRUE(db_->revokePlayer(id, "stolen", kT0 + 100));
+    auto r = db_->reEnrollPlayer(id, "bought_back", 3600, kT0 + 300);
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->previous, PlayerState::Revoked);
+    EXPECT_TRUE(r->revoked.empty()) << "nothing new to revoke";
+    const auto certs = db_->certsOf(id);
+    ASSERT_EQ(certs.size(), 1u);
+    EXPECT_EQ(certs[0].revoke_reason, "stolen") << "the first reason stays on the old certificate";
+    EXPECT_EQ(db_->findPlayer(id)->state, PlayerState::Pending);
+    EXPECT_TRUE(db_->findPlayer(id)->revoke_reason.empty());
+}
+
+TEST_F(PlayersDbTest, ReEnrollingGivesATokenThatEnrolsTheSameIdentityAgain) {
+    const auto id = enrolled("RE04");
+    auto r = db_->reEnrollPlayer(id, "x", 3600, kT0 + 300);
+    ASSERT_TRUE(r.has_value());
+    auto claim = db_->claimToken(id, r->token.token, kT0 + 310);
+    ASSERT_TRUE(claim.ok);
+    ASSERT_TRUE(db_->finishEnrollment(claim.token_id, cert(id, "RE05", 1), kT0 + 311));
+    const auto p = db_->findPlayer(id);
+    EXPECT_EQ(p->state, PlayerState::Active);
+    EXPECT_EQ(p->activated_at, kT0 + 311);
+    EXPECT_EQ(db_->certsOf(id).size(), 2u) << "the old one (revoked) and the new one";
+}
+
+TEST_F(PlayersDbTest, ReEnrollingKillsEarlierTokensStatusAndWaitingCommands) {
+    const auto id = enrolled("RE06");
+    ASSERT_TRUE(db_->applyStatuses({{id, kT0 + 20, true, "1.0.0", "{}"}}));
+    CommandRow c;
+    c.id = PlayersDb::newId(); c.player_id = id; c.type = "reboot_screen";
+    c.issued_at = kT0 + 30; c.ttl_seconds = 300; c.deadline_at = kT0 + 1200;
+    ASSERT_EQ(db_->createCommand(c), CommandCreate::Ok);
+
+    ASSERT_TRUE(db_->reEnrollPlayer(id, "x", 3600, kT0 + 300).has_value());
+
+    EXPECT_FALSE(db_->status(id).has_value()) << "what the old device said is not about the next one";
+    const auto cmd = db_->findCommand(c.id);
+    ASSERT_TRUE(cmd);
+    EXPECT_EQ(cmd->state, "released");
+    EXPECT_EQ(cmd->result, "re_enrolled");
+    // The same command can be given to the new device at once: nothing blocks it.
+    CommandRow again = c;
+    again.id = PlayersDb::newId();
+    EXPECT_EQ(db_->createCommand(again), CommandCreate::Ok);
+}
+
+TEST_F(PlayersDbTest, ReEnrollingWritesOneEventAndAnOldTokenStaysDead) {
+    const auto c0 = create();
+    auto claim = db_->claimToken(c0.player.id, c0.token, kT0 + 10);
+    ASSERT_TRUE(db_->finishEnrollment(claim.token_id, cert(c0.player.id, "RE07"), kT0 + 11));
+    auto r = db_->reEnrollPlayer(c0.player.id, "why", 3600, kT0 + 300);
+    ASSERT_TRUE(r.has_value());
+    EXPECT_FALSE(db_->claimToken(c0.player.id, c0.token, kT0 + 310).ok);
+    const auto ev = db_->events(c0.player.id, 10);
+    ASSERT_FALSE(ev.empty());
+    EXPECT_EQ(ev.front().kind, "re_enrolled");
+    EXPECT_NE(ev.front().details.find("\"previous_state\":\"active\""), std::string::npos);
+    EXPECT_EQ(ev.front().details.find(r->token.token), std::string::npos) << "the token never reaches the journal";
+}
+
+TEST_F(PlayersDbTest, ReEnrollingRefusesAPendingOrUnknownScreenAndChangesNothing) {
+    const auto c = create();
+    EXPECT_FALSE(db_->reEnrollPlayer(c.player.id, "x", 3600, kT0 + 5).has_value()) << "pending: reissueToken is for that";
+    EXPECT_TRUE(db_->claimToken(c.player.id, c.token, kT0 + 6).ok) << "its own token still works";
+    EXPECT_FALSE(db_->reEnrollPlayer("00000000-0000-4000-8000-000000000000", "x", 3600, kT0).has_value());
+    EXPECT_FALSE(db_->reEnrollPlayer(enrolled("RE08"), "x", 0, kT0 + 5).has_value()) << "a bad token lifetime";
+    EXPECT_EQ(db_->findPlayer(c.player.id)->state, PlayerState::Pending);
+}
+
 // ── enrollment ──────────────────────────────────────────────────────────────
 TEST_F(PlayersDbTest, FinishingEnrollmentActivatesTheRecordsTheCertificateAndAnEvent) {
     const auto c = create();

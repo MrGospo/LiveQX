@@ -261,6 +261,54 @@ TEST(BrokerAdmin, ReconcileWipesThePresenceOfEveryPlayerItRemoves) {
     EXPECT_EQ(wiped, 1);
 }
 
+namespace {
+int deleteClientCommandsFor(const FakeMqttClient& fake, const std::string& id) {
+    int n = 0;
+    for (const auto& m : fake.published) {
+        if (m.topic != BrokerAdmin::kControlTopic) continue;
+        const json j = json::parse(m.payload, nullptr, false);
+        if (!j.is_object() || !j.contains("commands")) continue;
+        for (const auto& c : j["commands"])
+            if (c.value("command", "") == "deleteClient" && c.value("username", "") == id) ++n;
+    }
+    return n;
+}
+}  // namespace
+
+TEST(BrokerAdmin, ARebuiltPlayerIsDroppedAndMadeAgainSoItsOpenConnectionEnds) {
+    Stand s;
+    ASSERT_TRUE(s.admin->reconcile({A, B}).ok);
+    s.fake.published.clear();
+
+    auto rep = s.admin->reconcile({A, B}, {A});
+    EXPECT_TRUE(rep.ok) << rep.error;
+    EXPECT_EQ(deleteClientCommandsFor(s.fake, A), 1) << "deleting the client is what ends its connection";
+    EXPECT_EQ(deleteClientCommandsFor(s.fake, B), 0) << "the others are left alone";
+    EXPECT_EQ(rep.issued, 1u) << "A was made again";
+    EXPECT_EQ(rep.removed, 0u) << "a rebuild is not a removal of something nobody owns";
+    EXPECT_TRUE(s.fake.clients.count(A));
+    EXPECT_TRUE(s.fake.roles.count("player-" + A));
+}
+
+TEST(BrokerAdmin, RebuildingAPlayerThatIsNotThereJustIssuesIt) {
+    Stand s;
+    auto rep = s.admin->reconcile({A}, {A});
+    EXPECT_TRUE(rep.ok) << rep.error;
+    EXPECT_EQ(deleteClientCommandsFor(s.fake, A), 0);
+    EXPECT_EQ(rep.issued, 1u);
+    EXPECT_TRUE(s.fake.clients.count(A));
+}
+
+TEST(BrokerAdmin, RebuildingAPlayerNobodyWantsAnymoreDoesNotBringItBack) {
+    Stand s;
+    ASSERT_TRUE(s.admin->reconcile({A}).ok);
+    auto rep = s.admin->reconcile({}, {A});
+    EXPECT_TRUE(rep.ok) << rep.error;
+    EXPECT_FALSE(s.fake.clients.count(A));
+    EXPECT_EQ(rep.removed, 1u);
+    EXPECT_EQ(rep.issued, 0u);
+}
+
 TEST(BrokerAdmin, TheServerMayPublishToPresenceTopicsToWipeThem) {
     bool found = false;
     for (const auto& c : BrokerAdmin::baselineCommands())

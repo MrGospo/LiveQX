@@ -115,6 +115,16 @@ void BrokerLink::requestSync() {
     cv_.notify_all();
 }
 
+void BrokerLink::requestRebuild(const std::string& player_id) {
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        rebuild_[player_id] = ++rebuild_seq_;
+        dirty_ = true;
+        poke_ = true;
+    }
+    cv_.notify_all();
+}
+
 void BrokerLink::clearRetained(const std::string& topic) {
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -265,9 +275,20 @@ void BrokerLink::run() {
             if (due) dirty_ = false;
         }
         if (due) {
-            const ReconcileReport rep = admin_->reconcile(opts_.wanted ? opts_.wanted() : std::set<std::string>{});
+            std::map<std::string, std::uint64_t> asked;
             {
                 std::lock_guard<std::mutex> lk(mu_);
+                asked = rebuild_;
+            }
+            std::set<std::string> rebuild;
+            for (const auto& [id, n] : asked) rebuild.insert(id);
+            const ReconcileReport rep = admin_->reconcile(opts_.wanted ? opts_.wanted() : std::set<std::string>{}, rebuild);
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                // Only what this pass served: a request made while it ran has a newer number and stays.
+                if (rep.ok)
+                    for (const auto& [id, n] : asked)
+                        if (auto it = rebuild_.find(id); it != rebuild_.end() && it->second == n) rebuild_.erase(it);
                 status_.last_reconcile_at = nowSeconds();
                 status_.last_reconcile_ok = rep.ok;
                 status_.last_report       = rep;

@@ -221,12 +221,21 @@ BrokerAdminResult BrokerAdmin::listRoles(std::set<std::string>& out) {
     return r;
 }
 
-ReconcileReport BrokerAdmin::reconcile(const std::set<std::string>& wanted) {
+ReconcileReport BrokerAdmin::reconcile(const std::set<std::string>& wanted,
+                                       const std::set<std::string>& rebuild) {
     ReconcileReport rep;
     std::set<std::string> clients, roles;
     if (auto r = ensureBaseline(); !r.ok) { rep.error = r.error; return rep; }
     if (auto r = listClients(clients); !r.ok) { rep.error = r.error; return rep; }
     if (auto r = listRoles(roles); !r.ok) { rep.error = r.error; return rep; }
+
+    // Dropped first, so the loop below makes them again as if they were missing.
+    for (const auto& id : rebuild) {
+        if (!wanted.count(id) || !(clients.count(id) || roles.count(kPlayerRolePrefix + id))) continue;
+        if (!removePlayer(id).ok) { ++rep.failed; continue; }
+        clients.erase(id);
+        roles.erase(kPlayerRolePrefix + id);
+    }
 
     for (const auto& id : wanted) {
         if (clients.count(id) && roles.count(kPlayerRolePrefix + id)) continue;

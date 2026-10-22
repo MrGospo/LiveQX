@@ -5438,6 +5438,7 @@ paths:
       description: |
         Admin. Только для плеера в состоянии `pending`; прежние токены
         перестают работать. Возвращает новый пакет привязки (токен — один раз).
+        Для уже привязанного или отозванного плеера — `POST …/re-enroll`.
         Audit event: `player.token_reissue`.
       responses:
         '200':
@@ -5452,6 +5453,69 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
           description: '`not_pending`, `not_configured` или `ca_unavailable`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Модуль плееров не подключён.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/players/{id}/re-enroll:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string, format: uuid }
+        description: Идентификатор плеера (UUID v4, нижний регистр).
+    post:
+      tags: [Players]
+      summary: Bind an enrolled or revoked player again
+      description: |
+        Admin. Повторная привязка под тем же идентификатором — для плеера в
+        состоянии `active` (заменили компьютер, истёк сертификат, нужен новый
+        ключ) или `revoked`. В одной транзакции: все живые сертификаты
+        отзываются, плеер возвращается в `pending`, его последнее состояние и
+        ждущие команды сбрасываются, выдаётся новый токен. Название, группа
+        и история остаются. Старое устройство перестаёт работать сразу (список
+        отзыва, запись на брокере пересоздаётся и открытое соединение
+        обрывается); новое привязывается по возвращённому пакету, как при
+        создании.
+
+        Ничего не меняется, если пакет собрать нельзя (`not_configured`,
+        `ca_unavailable`): рабочий экран не отключается впустую. Для плеера
+        в состоянии `pending` — `409 already_pending` (ему нужен
+        `reissue-token`). Тело необязательно: `{"reason": "…"}` (до 200 байт,
+        без управляющих символов; по умолчанию `re_enrolled_by_admin`).
+        Audit event: `player.re_enroll` (причина, прежнее состояние, число
+        отозванных сертификатов; токен в журнал не попадает).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 200 }
+      responses:
+        '200':
+          description: New pairing package (the token is shown once).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PairingPackage' }
+        '400':
+          description: '`invalid_body` или `invalid_reason`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`not_found`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`already_pending`, `not_configured` или `ca_unavailable`.'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

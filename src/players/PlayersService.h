@@ -77,6 +77,10 @@ struct PlayersServiceOptions {
     // then catches up, so these must never fail the call.
     std::function<void(const std::string& player_id)> on_player_created;
     std::function<void(const std::string& player_id)> on_player_gone;
+    // A player was bound again (re-enrolled): its record on the broker must be
+    // rebuilt so that the old device's open connection ends, and what the server
+    // remembers about the old device's presence is dropped. Never fails the call.
+    std::function<void(const std::string& player_id)> on_player_reset;
 };
 
 struct PairingResult {
@@ -84,6 +88,9 @@ struct PairingResult {
     std::string error;               // snake_case code when !ok
     PlayerRow   player;
     nlohmann::json package;          // the A3 package (contains the token!)
+    // Only for reEnroll(): what the call did on the way.
+    std::size_t revoked_certs{0};
+    PlayerState previous_state{PlayerState::Pending};
 };
 
 struct RemovalResult {
@@ -139,6 +146,13 @@ public:
     // A new token (and package) for a pending player. Errors: not_found,
     // not_pending, not_configured, ca_unavailable, storage_error.
     PairingResult reissueToken(const std::string& player_id, std::int64_t now = 0);
+
+    // Binds an enrolled or revoked player again under the same identity: its
+    // certificates are revoked, it goes back to "pending" and a new token (and
+    // package) is issued. Nothing changes unless the module is ready to issue
+    // the package. Errors: not_found, already_pending (use reissueToken),
+    // not_configured, ca_unavailable, storage_error.
+    PairingResult reEnroll(const std::string& player_id, const std::string& reason, std::int64_t now = 0);
 
     RemovalResult revoke(const std::string& player_id, const std::string& reason,
                          std::int64_t now = 0);

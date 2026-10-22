@@ -48,6 +48,7 @@ protected:
     liveqx::events::EventBus bus_;
     std::vector<std::string> ntp_;
     std::vector<CertRow> revoked_by_hook_;
+    std::vector<std::string> reset_by_hook_;
     std::unique_ptr<PlayersService> svc_;
     std::int64_t group_{0};
 
@@ -83,6 +84,7 @@ protected:
         o.on_certs_revoked = [this](const std::vector<CertRow>& c) {
             revoked_by_hook_.insert(revoked_by_hook_.end(), c.begin(), c.end());
         };
+        o.on_player_reset = [this](const std::string& id) { reset_by_hook_.push_back(id); };
         svc_ = std::make_unique<PlayersService>(*db_, std::move(o));
     }
 
@@ -293,7 +295,7 @@ TEST_F(PlayersServiceTest, ReissuingGivesANewPackageForAPendingPlayerOnly) {
     ASSERT_TRUE(claim.ok);
     ASSERT_TRUE(db_->finishEnrollment(claim.token_id, certFor(r.player.id, "AA01"), kT0 + 13));
     EXPECT_EQ(svc_->reissueToken(r.player.id, kT0 + 20).error, "not_pending")
-        << "an active player is re-paired by revoking it, not by a new token";
+        << "an active player is re-bound with reEnroll(), not with a new token";
 }
 
 TEST_F(PlayersServiceTest, RevokingReportsTheCertificatesToTheCrlHook) {
@@ -314,6 +316,66 @@ TEST_F(PlayersServiceTest, RevokingReportsTheCertificatesToTheCrlHook) {
     EXPECT_TRUE(again.found);
     EXPECT_EQ(again.revoked_certs, 0u);
     EXPECT_EQ(revoked_by_hook_.size(), 1u);
+}
+
+TEST_F(PlayersServiceTest, ReEnrollingGivesANewPackageForTheSameIdentityAndTellsTheHooks) {
+    configure();
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
+    auto claim = db_->claimToken(r.player.id, r.package["bootstrap_token"], kT0 + 1);
+    ASSERT_TRUE(db_->finishEnrollment(claim.token_id, certFor(r.player.id, "DD01"), kT0 + 2));
+
+    auto out = svc_->reEnroll(r.player.id, "device_replaced", kT0 + 3);
+    ASSERT_TRUE(out.ok) << out.error;
+    EXPECT_EQ(out.package["player_id"], r.player.id) << "the same identity";
+    EXPECT_NE(out.package["bootstrap_token"], r.package["bootstrap_token"]);
+    EXPECT_EQ(out.package["token_expires_at"].get<std::string>().empty(), false);
+    EXPECT_EQ(out.previous_state, PlayerState::Active);
+    EXPECT_EQ(out.revoked_certs, 1u);
+    ASSERT_EQ(revoked_by_hook_.size(), 1u) << "the CRL has to learn about the old certificate";
+    EXPECT_EQ(revoked_by_hook_[0].serial_hex, "DD01");
+    EXPECT_EQ(reset_by_hook_, std::vector<std::string>{r.player.id}) << "the broker record is rebuilt";
+    EXPECT_EQ(db_->findPlayer(r.player.id)->state, PlayerState::Pending);
+    EXPECT_EQ(out.package.dump().find("PRIVATE KEY"), std::string::npos);
+}
+
+TEST_F(PlayersServiceTest, ReEnrollingBringsARevokedPlayerBackWithoutRevokingTwice) {
+    configure();
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
+    auto claim = db_->claimToken(r.player.id, r.package["bootstrap_token"], kT0 + 1);
+    ASSERT_TRUE(db_->finishEnrollment(claim.token_id, certFor(r.player.id, "DD02"), kT0 + 2));
+    ASSERT_TRUE(svc_->revoke(r.player.id, "stolen", kT0 + 3).found);
+    revoked_by_hook_.clear();
+
+    auto out = svc_->reEnroll(r.player.id, "recovered", kT0 + 4);
+    ASSERT_TRUE(out.ok) << out.error;
+    EXPECT_EQ(out.previous_state, PlayerState::Revoked);
+    EXPECT_EQ(out.revoked_certs, 0u);
+    EXPECT_TRUE(revoked_by_hook_.empty()) << "the old certificate was already on the list";
+    EXPECT_EQ(db_->findPlayer(r.player.id)->state, PlayerState::Pending);
+}
+
+TEST_F(PlayersServiceTest, ReEnrollingChangesNothingWhenThePackageCannotBeMade) {
+    configure();
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
+    auto claim = db_->claimToken(r.player.id, r.package["bootstrap_token"], kT0 + 1);
+    ASSERT_TRUE(db_->finishEnrollment(claim.token_id, certFor(r.player.id, "DD03"), kT0 + 2));
+    ASSERT_EQ(svc_->updateSettings({{"server_url", ""}}), "");
+
+    auto out = svc_->reEnroll(r.player.id, "x", kT0 + 3);
+    EXPECT_FALSE(out.ok);
+    EXPECT_EQ(out.error, "not_configured");
+    EXPECT_EQ(db_->findPlayer(r.player.id)->state, PlayerState::Active) << "the working screen must not be cut off";
+    EXPECT_FALSE(db_->certsOf(r.player.id)[0].revoked_at.has_value());
+    EXPECT_TRUE(revoked_by_hook_.empty());
+    EXPECT_TRUE(reset_by_hook_.empty());
+}
+
+TEST_F(PlayersServiceTest, ReEnrollingAPendingOrUnknownPlayerIsRefused) {
+    configure();
+    auto r = svc_->create("Lobby", 1, std::nullopt, kT0, group_);
+    EXPECT_EQ(svc_->reEnroll(r.player.id, "x", kT0 + 1).error, "already_pending");
+    EXPECT_EQ(svc_->reEnroll("00000000-0000-4000-8000-000000000000", "x", kT0).error, "not_found");
+    EXPECT_TRUE(reset_by_hook_.empty());
 }
 
 TEST_F(PlayersServiceTest, RevokingAnUnknownPlayerIsNotFound) {

@@ -448,6 +448,7 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     rbac.registerEndpoint("DELETE /api/players/{id}",               rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("POST /api/players/{id}/revoke-cert",     rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("POST /api/players/{id}/reissue-token",   rbacRole(RbacRole::Admin));
+    rbac.registerEndpoint("POST /api/players/{id}/re-enroll",       rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("GET /api/players/settings",              rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("GET /api/players/broker",                rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("POST /api/players/broker/reconcile",     rbacRole(RbacRole::Admin));
@@ -3222,7 +3223,8 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     };
     auto playersStatusFor = [](const std::string& code) {
         if (code == "not_found") return 404;
-        if (code == "not_configured" || code == "ca_unavailable" || code == "not_pending") return 409;
+        if (code == "not_configured" || code == "ca_unavailable" || code == "not_pending" ||
+            code == "already_pending") return 409;
         if (code == "storage_error") return 500;
         return 400;
     };
@@ -4153,6 +4155,28 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         auto r = pls->reissueToken(id);
         if (!r.ok) { writeJson(res, playersStatusFor(r.error), {{"error", r.error}}); return; }
         auditPlayer("player.token_reissue", json{{"name", r.player.name}}, id);
+        writeJson(res, 200, r.package);
+    });
+
+    // Binds an enrolled or revoked screen again under the same identity (the
+    // old device stops working at once; the new one enrols with the package).
+    s.Post(R"(/api/players/([^/]+)/re-enroll)",
+           [pls, players_unavailable, playersStatusFor, auditPlayer, playerReason]
+           (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        json body = json::object();
+        if (!req.body.empty() && !parseJsonBody(req, res, body)) return;
+        if (!body.is_object()) { writeJson(res, 400, {{"error", "invalid_body"}}); return; }
+        auto reason = playerReason(body.value("reason", json(nullptr)), "re_enrolled_by_admin");
+        if (!reason) { writeJson(res, 400, {{"error", "invalid_reason"}}); return; }
+        const std::string id = req.matches[1];
+        auto r = pls->reEnroll(id, *reason);
+        if (!r.ok) { writeJson(res, playersStatusFor(r.error), {{"error", r.error}}); return; }
+        // Neither the token nor the package reaches the audit row.
+        auditPlayer("player.re_enroll",
+                    json{{"name", r.player.name}, {"reason", *reason},
+                         {"previous_state", liveqx::players::toString(r.previous_state)},
+                         {"revoked_certs", r.revoked_certs}}, id);
         writeJson(res, 200, r.package);
     });
 

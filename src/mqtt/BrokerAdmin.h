@@ -97,7 +97,11 @@ public:
     // Brings the broker in line with `wanted` (player ids that must exist):
     // issues the missing, removes player clients/roles nobody owns. Anything
     // that is not a player id (the server itself, the shared roles) is never touched.
-    ReconcileReport reconcile(const std::set<std::string>& wanted);
+    // `rebuild` names players whose record must be dropped and made again even
+    // though it exists (a player was bound again: deleting its client ends the
+    // old device's open connection, which a revoked certificate alone does not).
+    ReconcileReport reconcile(const std::set<std::string>& wanted,
+                              const std::set<std::string>& rebuild = {});
 
     // A player id as the model names it (lowercase UUID).
     static bool looksLikePlayerId(const std::string& s);

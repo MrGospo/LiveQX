@@ -163,6 +163,11 @@ std::optional<std::pair<std::string, bool>> PresenceService::parsePresenceMessag
     return std::nullopt;
 }
 
+void PresenceService::forget(const std::string& player_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    entries_.erase(player_id);
+}
+
 void PresenceService::onMqttPresence(const std::string& player_id, bool online) {
     const std::int64_t now = nowSeconds();
     if (!online) {

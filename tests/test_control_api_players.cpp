@@ -56,6 +56,7 @@ struct PlayersApiFixture {
     std::unique_ptr<liveqx::audit::AuditDb> audit_db;
     std::unique_ptr<liveqx::audit::AuditLogger> audit_logger;
     std::vector<CertRow>        crl_hook;
+    std::vector<std::string>    reset_hook;
     std::int64_t                object_id{0};
     std::int64_t                group_id{0};
     ChannelManager              manager;
@@ -82,6 +83,7 @@ struct PlayersApiFixture {
         o.on_certs_revoked = [this](const std::vector<CertRow>& c) {
             crl_hook.insert(crl_hook.end(), c.begin(), c.end());
         };
+        o.on_player_reset = [this](const std::string& id) { reset_hook.push_back(id); };
         svc = std::make_unique<PlayersService>(*db, std::move(o));
 
         mk = std::make_unique<liveqx::auth::MasterKey>((tmp / "master.key").string());
@@ -831,3 +833,124 @@ TEST(ControlApiPlayers, ChangesToTheHierarchyAreAudited) {
     EXPECT_NE(mv[0].details_json.find("Floor"), std::string::npos) << "the destination is named in the trail";
 }
 
+// ─── Binding an enrolled screen again ────────────────────────────────────────
+namespace {
+// A screen that has finished enrolling, as it stands after the first binding.
+std::string enrolledScreen(PlayersApiFixture& f, const std::string& serial, json* first_package = nullptr) {
+    auto pkg = f.create("Lobby");
+    const std::string id = pkg["player_id"];
+    auto claim = f.db->claimToken(id, pkg["bootstrap_token"]);
+    EXPECT_TRUE(claim.ok);
+    EXPECT_TRUE(f.db->finishEnrollment(claim.token_id, certFor(id, serial)));
+    if (first_package) *first_package = pkg;
+    return id;
+}
+}  // namespace
+
+TEST(ControlApiPlayers, ReEnrollingAnActiveScreenCutsTheOldDeviceOffAndGivesANewPackage) {
+    PlayersApiFixture f(kBasePort + 30);
+    f.configure();
+    json first;
+    const std::string id = enrolledScreen(f, "AB10", &first);
+
+    auto cli = f.client();
+    auto r = cli.Post(("/api/players/" + id + "/re-enroll").c_str(),
+                      R"({"reason":"display replaced"})", "application/json");
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    auto pkg = json::parse(r->body);
+    EXPECT_EQ(pkg["player_id"], id) << "the same identity";
+    EXPECT_NE(pkg["bootstrap_token"], first["bootstrap_token"]);
+    EXPECT_TRUE(pkg.contains("ca_cert_pem"));
+
+    ASSERT_EQ(f.crl_hook.size(), 1u) << "the CRL has to learn about the old certificate";
+    EXPECT_EQ(f.crl_hook[0].serial_hex, "AB10");
+    EXPECT_EQ(f.reset_hook, std::vector<std::string>{id}) << "the broker record is rebuilt";
+
+    auto d = json::parse(cli.Get(("/api/players/" + id).c_str())->body);
+    EXPECT_EQ(d["state"], "pending");
+    EXPECT_EQ(d["name"], "Lobby");
+    EXPECT_EQ(d["group_id"], f.group_id) << "the place stays";
+    ASSERT_EQ(d["certificates"].size(), 1u);
+    EXPECT_TRUE(d["certificates"][0].contains("revoked_at"));
+    EXPECT_EQ(d["events"][0]["kind"], "re_enrolled");
+
+    EXPECT_TRUE(f.db->claimToken(id, pkg["bootstrap_token"]).ok) << "the new token enrols";
+}
+
+TEST(ControlApiPlayers, ReEnrollingARevokedScreenBringsItBack) {
+    PlayersApiFixture f(kBasePort + 31);
+    f.configure();
+    const std::string id = enrolledScreen(f, "AB11");
+    auto cli = f.client();
+    ASSERT_EQ(cli.Post(("/api/players/" + id + "/revoke-cert").c_str(), "", "application/json")->status, 200);
+
+    auto r = cli.Post(("/api/players/" + id + "/re-enroll").c_str(), "", "application/json");
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    EXPECT_EQ(json::parse(cli.Get(("/api/players/" + id).c_str())->body)["state"], "pending");
+}
+
+TEST(ControlApiPlayers, ReEnrollingRefusesWhatCannotBeBoundAndChangesNothing) {
+    PlayersApiFixture f(kBasePort + 32);
+    f.configure();
+    auto cli = f.client();
+
+    auto pending = f.create("Fresh");
+    auto r = cli.Post(("/api/players/" + pending["player_id"].get<std::string>() + "/re-enroll").c_str(), "", "application/json");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 409);
+    EXPECT_EQ(json::parse(r->body)["error"], "already_pending");
+
+    r = cli.Post("/api/players/00000000-0000-4000-8000-000000000000/re-enroll", "", "application/json");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 404);
+
+    const std::string id = enrolledScreen(f, "AB12");
+    r = cli.Post(("/api/players/" + id + "/re-enroll").c_str(), json{{"reason", std::string(1000, 'x')}}.dump(), "application/json");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 400);
+    EXPECT_EQ(json::parse(r->body)["error"], "invalid_reason");
+    EXPECT_EQ(json::parse(cli.Get(("/api/players/" + id).c_str())->body)["state"], "active");
+    EXPECT_TRUE(f.crl_hook.empty());
+    EXPECT_TRUE(f.reset_hook.empty());
+}
+
+TEST(ControlApiPlayers, ReEnrollingDoesNotCutAWorkingScreenOffWhenTheModuleIsNotSetUp) {
+    PlayersApiFixture f(kBasePort + 33);
+    f.configure();
+    const std::string id = enrolledScreen(f, "AB13");
+    auto cli = f.client();
+    ASSERT_EQ(cli.Put("/api/players/settings", R"({"server_url":""})", "application/json")->status, 200);
+
+    auto r = cli.Post(("/api/players/" + id + "/re-enroll").c_str(), "", "application/json");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 409);
+    EXPECT_EQ(json::parse(r->body)["error"], "not_configured");
+    EXPECT_EQ(json::parse(cli.Get(("/api/players/" + id).c_str())->body)["state"], "active");
+    EXPECT_TRUE(f.crl_hook.empty());
+}
+
+TEST(ControlApiPlayers, ReEnrollingIsAuditedWithoutTheTokenAndWithTheOldState) {
+    PlayersApiFixture f(kBasePort + 34);
+    f.configure();
+    const std::string id = enrolledScreen(f, "AB14");
+    auto cli = f.client();
+    auto r = cli.Post(("/api/players/" + id + "/re-enroll").c_str(), R"({"reason":"swap"})", "application/json");
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200);
+    const std::string token = json::parse(r->body)["bootstrap_token"];
+    f.audit_logger->flushForTesting();
+
+    liveqx::audit::AuditFilter af;
+    af.action = "player.re_enroll";
+    af.limit  = 8;
+    const auto rows = f.audit_db->list(af);
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_EQ(rows[0].category, liveqx::audit::Category::Player);
+    EXPECT_EQ(rows[0].target_type, "player");
+    EXPECT_EQ(rows[0].target_id, id);
+    EXPECT_NE(rows[0].details_json.find("\"previous_state\":\"active\""), std::string::npos);
+    EXPECT_NE(rows[0].details_json.find("swap"), std::string::npos);
+    EXPECT_EQ(rows[0].details_json.find(token), std::string::npos) << "the token never reaches the trail";
+}

@@ -69,6 +69,11 @@ public:
     // leave. Unknown players are ignored.
     void onMqttPresence(const std::string& player_id, bool online);
 
+    // Drops what is remembered about a player's liveness (it was bound again, so
+    // the old device's "online" is no longer true of anything). The next sign of
+    // life starts it afresh. Nothing is written or announced.
+    void forget(const std::string& player_id);
+
     // liveqx/v1/players/<id>/presence + "online"/"offline" -> (id, online).
     // nullopt for any other topic or payload.
     static std::optional<std::pair<std::string, bool>> parsePresenceMessage(const std::string& topic,

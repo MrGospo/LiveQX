@@ -508,6 +508,44 @@ TEST_F(MosquittoBrokerTest, ARevokedPlayerIsCutOffAtOnceAndWhateverItDoesNextRea
     EXPECT_FALSE(at_player.has(cmd.topic, "after")) << "no commands for a revoked player";
 }
 
+TEST_F(MosquittoBrokerTest, RebuildingAPlayersRecordEndsItsOpenConnectionAndLeavesAWorkingRecordForTheNextDevice) {
+    // A screen bound again keeps its place on the broker, so a revoked certificate alone would
+    // leave the old device's open connection alive (the broker checks the list at the handshake).
+    // Dropping and making the record again is what ends it.
+    AdminRig rig(broker_->serverOptions());
+    ASSERT_TRUE(rig.up());
+    ASSERT_TRUE(rig.admin.ensureBaseline().ok);
+    auto player = broker_->enrollPlayer(/*provision=*/false);
+    ASSERT_TRUE(rig.admin.provisionPlayer(player.id).ok);
+
+    Inbox at_player;
+    std::atomic<int> drops{0};
+    mqtt::MosquittoClient dev(broker_->playerOptions(player));
+    dev.setMessageHandler([&](const mqtt::Message& m) { at_player.add(m); });
+    dev.setStateHandler([&](bool up, const std::string&) { if (!up) ++drops; });
+    dev.subscribe(commandsOf(player), 1);
+    ASSERT_TRUE(dev.start());
+    ASSERT_TRUE(waitFor([&] { return dev.connected(); })) << broker_->log();
+    mqtt::Message cmd;
+    cmd.topic = commandsOf(player);
+    cmd.payload = "before";
+    ASSERT_TRUE(waitFor([&] { rig.client.publish(cmd); return at_player.has(cmd.topic, "before"); }));
+
+    const auto rep = rig.admin.reconcile({player.id}, {player.id});
+    ASSERT_TRUE(rep.ok) << rep.error;
+    EXPECT_EQ(rep.issued, 1u);
+
+    EXPECT_TRUE(waitFor([&] { return drops.load() >= 1; })) << "the old connection is dropped, not left to idle";
+
+    // The record is there again: a device that connects now (the new one, with a valid
+    // certificate) gets commands as any other.
+    cmd.payload = "after";
+    EXPECT_TRUE(waitFor([&] {
+        rig.client.publish(cmd);
+        return at_player.has(cmd.topic, "after");
+    }, 15000)) << "the rebuilt record gives the next device its rights\n" << broker_->log();
+}
+
 // ── the revocation list, against a real broker ──────────────────────────────
 namespace {
 

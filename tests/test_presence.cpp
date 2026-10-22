@@ -123,6 +123,23 @@ TEST_F(PresenceTest, TheFirstHeartbeatMakesAPlayerOnlineOnce) {
     EXPECT_TRUE(svc_->isOnline(id));
 }
 
+TEST_F(PresenceTest, ForgettingAPlayerLeavesNoStaleOnlineToTimeOutLater) {
+    const auto id = newPlayer();
+    beat(id);
+    ASSERT_TRUE(svc_->isOnline(id));
+    events();                                    // the "online" announcement
+
+    svc_->forget(id);                            // it was bound again: the old device is gone
+    EXPECT_FALSE(svc_->isOnline(id));
+    now_ += 400;
+    svc_->tick();
+    EXPECT_EQ(count(events(), EventType::PlayerOffline), 0) << "nothing remembered, so nothing to time out";
+    EXPECT_EQ(dbEvents(id, "offline"), 0);
+
+    beat(id);                                    // the next sign of life starts afresh
+    EXPECT_TRUE(svc_->isOnline(id));
+}
+
 TEST_F(PresenceTest, SilenceMakesAPlayerOfflineExactlyOnce) {
     const auto id = newPlayer();
     beat(id);

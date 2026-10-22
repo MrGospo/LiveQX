@@ -29,6 +29,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <map>
 #include <set>
 #include <string>
 #include <thread>
@@ -89,6 +90,11 @@ public:
     // Something changed in the player set: reconcile soon. Never blocks.
     void requestSync();
 
+    // As requestSync(), and the player's record at the broker is dropped and made
+    // again (ends the open connection of a device that was replaced). Kept until
+    // a reconciliation succeeds, so a broker that is down does not lose the request.
+    void requestRebuild(const std::string& player_id);
+
     BrokerLinkStatus status() const;
 
     // How it connects now.
@@ -131,6 +137,8 @@ private:
     std::condition_variable cv_;
     bool             dirty_{true};              // a reconcile is due
     std::set<std::string> clear_retained_;      // topics waiting to be wiped
+    std::map<std::string, std::uint64_t> rebuild_;   // players whose broker record is to be remade -> request number
+    std::uint64_t rebuild_seq_{0};
     bool             poke_{false};              // wake the thread (a request or a state change)
     BrokerLinkStatus status_;
     BrokerConnection conn_;                     // what the link connects with now

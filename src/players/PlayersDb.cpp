@@ -4,6 +4,7 @@
 
 #include "utils/Log.h"
 
+#include <nlohmann/json.hpp>
 #include <sodium.h>
 #include <sqlite3.h>
 
@@ -642,6 +643,81 @@ std::optional<std::vector<CertRow>> PlayersDb::revokePlayer(const std::string& i
 }
 
 // ─── pairing ────────────────────────────────────────────────────────────────
+std::optional<ReEnrollment> PlayersDb::reEnrollPlayer(const std::string& id, const std::string& reason,
+                                                      std::int64_t token_ttl_seconds, std::int64_t now) {
+    if (token_ttl_seconds < 1 || token_ttl_seconds > kMaxTokenTtlSeconds) return std::nullopt;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return std::nullopt;
+    const std::int64_t t = nowOr(now);
+    Tx tx(db_);
+    if (!tx.ok()) return std::nullopt;
+
+    ReEnrollment out;
+    {
+        Stmt s(db_, "SELECT state FROM players WHERE id=?");
+        s.text(1, id);
+        if (s.step() != SQLITE_ROW) return std::nullopt;
+        out.previous = parsePlayerState(s.str(0)).value_or(PlayerState::Revoked);
+        if (out.previous == PlayerState::Pending) return std::nullopt;
+    }
+    {   // Certificates still alive: they stop working now. Already revoked ones keep their first reason.
+        Stmt s(db_, (std::string("SELECT ") + kCertCols +
+                     " FROM player_certs WHERE player_id=? AND revoked_at IS NULL "
+                     "ORDER BY issued_at, serial_hex").c_str());
+        s.text(1, id);
+        while (s.step() == SQLITE_ROW) {
+            CertRow c = readCert(s);
+            c.revoked_at = t;
+            c.revoke_reason = reason;
+            out.revoked.push_back(std::move(c));
+        }
+    }
+    {
+        Stmt s(db_, "UPDATE player_certs SET revoked_at=?, revoke_reason=? WHERE player_id=? AND revoked_at IS NULL");
+        s.i64(1, t).text(2, reason).text(3, id);
+        if (!s.exec()) return std::nullopt;
+    }
+    {
+        Stmt s(db_, "UPDATE players SET state='pending', activated_at=NULL, revoked_at=NULL, revoke_reason='' WHERE id=?");
+        s.text(1, id);
+        if (!s.exec() || s.changes() != 1) return std::nullopt;
+    }
+    {   // What the old device last said is not a fact about the screen that will be bound next.
+        Stmt s(db_, "DELETE FROM player_status WHERE player_id=?");
+        s.text(1, id);
+        if (!s.exec()) return std::nullopt;
+    }
+    {   // A command waiting for the old device would block the same command to the new one.
+        Stmt s(db_, "UPDATE player_commands SET state='released', result='re_enrolled', finished_at=? "
+                    "WHERE player_id=? AND state='pending'");
+        s.i64(1, t).text(2, id);
+        if (!s.exec()) return std::nullopt;
+    }
+    out.token.token = newTokenHex();
+    out.token.token_expires_at = t + token_ttl_seconds;
+    unsigned char hash[crypto_hash_sha256_BYTES];
+    hashToken(out.token.token, hash);
+    {
+        Stmt s(db_, "DELETE FROM enroll_tokens WHERE player_id=?");
+        s.text(1, id);
+        if (!s.exec()) return std::nullopt;
+    }
+    {
+        Stmt s(db_, "INSERT INTO enroll_tokens(player_id,token_hash,created_at,expires_at) VALUES(?,?,?,?)");
+        s.text(1, id).blob(2, hash, sizeof hash).i64(3, t).i64(4, out.token.token_expires_at);
+        if (!s.exec()) return std::nullopt;
+    }
+    {
+        Stmt s(db_, "INSERT INTO player_events(player_id,ts,kind,details) VALUES(?,?,'re_enrolled',?)");
+        s.text(1, id).i64(2, t).text(3, nlohmann::json{{"reason", reason},
+                                                       {"previous_state", toString(out.previous)},
+                                                       {"revoked_certs", out.revoked.size()}}.dump());
+        if (!s.exec()) return std::nullopt;
+    }
+    if (!tx.commit()) return std::nullopt;
+    return out;
+}
+
 std::optional<TokenIssue> PlayersDb::reissueToken(const std::string& player_id,
                                                   std::int64_t token_ttl_seconds,
                                                   std::int64_t now) {

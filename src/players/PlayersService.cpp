@@ -325,6 +325,38 @@ PairingResult PlayersService::reissueToken(const std::string& player_id, std::in
     return r;
 }
 
+PairingResult PlayersService::reEnroll(const std::string& player_id, const std::string& reason,
+                                       std::int64_t now) {
+    PairingResult r;
+    auto p = db_.findPlayer(player_id);
+    if (!p) { r.error = "not_found"; return r; }
+    if (p->state == PlayerState::Pending) { r.error = "already_pending"; return r; }
+    // Checked BEFORE anything changes: a screen must not be cut off when the
+    // package that re-binds it cannot be made.
+    const PlayersSettings s = settings();
+    std::string ca;
+    if (auto e = checkReady(s, ca); !e.empty()) { r.error = e; return r; }
+
+    if (now == 0) now = nowSeconds();
+    auto done = db_.reEnrollPlayer(player_id, reason, static_cast<std::int64_t>(s.token_ttl_days) * 86400, now);
+    if (!done) { r.error = "storage_error"; return r; }
+    // The locks first (in the server and at the broker), then the rebuild of the record.
+    if (!done->revoked.empty() && opts_.on_certs_revoked) opts_.on_certs_revoked(done->revoked);
+    if (opts_.on_player_reset) opts_.on_player_reset(player_id);
+
+    p = db_.findPlayer(player_id);
+    if (!p) { r.error = "not_found"; return r; }
+    if (auto e = buildPackage(*p, done->token.token, done->token.token_expires_at, r.package); !e.empty()) {
+        r.error = e;                                    // settings changed under us; the screen is "pending", a new token can be issued
+        return r;
+    }
+    r.ok = true;
+    r.player = *p;
+    r.revoked_certs = done->revoked.size();
+    r.previous_state = done->previous;
+    return r;
+}
+
 RemovalResult PlayersService::revoke(const std::string& player_id, const std::string& reason,
                                      std::int64_t now) {
     RemovalResult out;
