@@ -10,6 +10,7 @@ import {
 import { ApiClientError } from '@/api/client';
 import { Block } from '@/components/Block';
 import { SubNav } from '@/components/SubNav';
+import { useNow } from '@/hooks/useNow';
 import { PLAYERS_NAV } from './nav';
 import { absoluteTime, formatDuration, relativeFromNow } from './format';
 import { PlayerActions } from './PlayerActions';
@@ -112,6 +113,7 @@ export default function PlayerDetailPage() {
   const { id = '' } = useParams();
   const player = usePlayer(id);
   const commands = usePlayerCommands(id);
+  const nowMs = useNow();
 
   if (player.isLoading) {
     return <div className="p-7"><div className="h-96 bg-surface2 rounded-xl animate-pulse" /></div>;
@@ -139,7 +141,6 @@ export default function PlayerDetailPage() {
 
   const p = player.data;
   const status = screenStatus(p);
-  const nowMs = Date.now();
   const nowSec = Math.floor(nowMs / 1000);
   const place = p.group_id == null ? null : [p.object_name, p.group_name].filter(Boolean).join(' / ');
 

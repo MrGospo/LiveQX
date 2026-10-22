@@ -57,6 +57,7 @@ export function EventBusProvider({ children }: { children: React.ReactNode }) {
     if (!token) return;
 
     const ac = new AbortController();
+    let hadOpen = false;
 
     runSseLoop({
       url:      new URL('/api/events/stream', window.location.origin).toString(),
@@ -83,6 +84,9 @@ export function EventBusProvider({ children }: { children: React.ReactNode }) {
       onOpen: () => {
         setConnected(true); setSseConnected(true);
         setOverflowed(false); setSseOverflowed(false);
+        // Events missed while the stream was down are not replayed: look again at everything.
+        if (hadOpen) qc.invalidateQueries();
+        hadOpen = true;
       },
       onDisconnect: () => {
         setConnected(false); setSseConnected(false);
@@ -155,6 +159,10 @@ export function EventBusProvider({ children }: { children: React.ReactNode }) {
           case 'player_version_changed':
           case 'player_command':
             qc.invalidateQueries({ queryKey: ['players'] });
+            break;
+          // The broker link or the revocation file changed (administrators only).
+          case 'players_broker_status':
+            qc.invalidateQueries({ queryKey: ['players-admin', 'broker'] });
             break;
           // fix33 D1 — gateway lifecycle: invalidate gateway list and the
           // affected gateway's status. Payload carries `id` (not channel_id).

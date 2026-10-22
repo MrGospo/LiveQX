@@ -2,30 +2,30 @@
  * The list of screens and the card of one screen. The server is replaced at the
  * hooks; what is checked is what a person reads and which place the page asks for.
  */
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ApiClientError } from '@/api/client';
-import type { Player, PlayerObject, PlayerDetails, PlayerCommand, PlayerListFilter } from '@/api/queries/players';
+import type { Player, PlayerObject, PlayerDetails, PlayerCommand, PlayerListQuery, PlayerPage } from '@/api/queries/players';
 
 vi.mock('@/stores/auth', () => ({
   useAuthStore: vi.fn((selector: (s: object) => unknown) => selector({ role: 'viewer', user: { id: 2, username: 'ann', role: 'viewer' } })),
 }));
 
 type Q<T> = { data?: T; isLoading: boolean; isError: boolean; error?: unknown };
-const listState: Q<Player[]> = { isLoading: false, isError: false };
+const listState: Q<PlayerPage> = { isLoading: false, isError: false };
 const treeState: Q<PlayerObject[]> = { isLoading: false, isError: false };
 const oneState: Q<PlayerDetails> = { isLoading: false, isError: false };
 const cmdState: Q<PlayerCommand[]> = { isLoading: false, isError: false };
-const listCalls: PlayerListFilter[] = [];
+const listCalls: PlayerListQuery[] = [];
 const lastCall = () => listCalls[listCalls.length - 1];
 
 vi.mock('@/api/queries/players', async (orig) => {
   const real = await orig<typeof import('@/api/queries/players')>();
   return {
     ...real,
-    usePlayers: (f: PlayerListFilter) => { listCalls.push(f); return listState; },
+    usePlayers: (f: PlayerListQuery) => { listCalls.push(f); return listState; },
     usePlayerTree: () => treeState,
     usePlayer: () => oneState,
     usePlayerCommands: () => cmdState,
@@ -52,6 +52,11 @@ const tree = (): PlayerObject[] => [
   ] },
 ];
 
+// What the server answers for a list: the page, how many match, and the count by status.
+const setPage = (players: Player[], counts: PlayerPage['counts'], total = players.length) => {
+  listState.data = { players, total, counts };
+};
+
 const renderList = (url = '/players') =>
   render(<MemoryRouter initialEntries={[url]}><PlayersPage /></MemoryRouter>);
 
@@ -64,12 +69,12 @@ const renderDetail = () =>
 
 beforeEach(() => {
   listCalls.length = 0;
-  listState.data = [
+  setPage([
     mk('p1', 'Till 1'),
     mk('p2', 'Till 2', { status: { online: false, version: '1.4.1', updated_at: nowSec() - 7200 } }),
     mk('p3', 'Window left', { group_id: 12, group_name: 'Window', state: 'pending', status: undefined }),
     mk('p4', 'Old one', { state: 'revoked', status: undefined }),
-  ];
+  ], { online: 1, offline: 1, pending: 1, revoked: 1 });
   listState.isLoading = false; listState.isError = false;
   treeState.data = tree(); treeState.isLoading = false; treeState.isError = false;
   oneState.data = undefined; oneState.isLoading = false; oneState.isError = false; oneState.error = undefined;
@@ -90,69 +95,94 @@ describe('PlayersPage', () => {
     expect(within(screen.getByRole('link', { name: 'Old one' }).closest('tr')!).getByText('Revoked')).toBeInTheDocument();
   });
 
-  it('counts the screens by status on the filter buttons', () => {
+  it('shows the order the server gave and does not sort again', () => {
+    setPage([mk('a', 'Zeta'), mk('b', 'Alpha')], { online: 2, offline: 0, pending: 0, revoked: 0 });
     renderList();
-    expect(screen.getByRole('button', { name: 'All · 4' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Online · 1' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Offline · 1' })).toBeInTheDocument();
+    const names = screen.getAllByRole('link').filter(l => l.getAttribute('href')?.startsWith('/players/')).map(l => l.textContent);
+    expect(names).toEqual(['Zeta', 'Alpha']);
   });
 
-  it('narrows the list by status', async () => {
+  it('takes the numbers on the filter buttons from the server, for the whole park and not for the page', () => {
+    setPage([mk('p1', 'Till 1')], { online: 120, offline: 30, pending: 5, revoked: 2 }, 157);
+    renderList();
+    expect(screen.getByRole('button', { name: 'All · 157' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Online · 120' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Offline · 30' })).toBeInTheDocument();
+  });
+
+  it('asks the server for the status, which narrows the list there and nowhere else', async () => {
     const user = userEvent.setup();
     renderList();
     await user.click(screen.getByRole('button', { name: 'Offline · 1' }));
-    expect(screen.getByRole('link', { name: 'Till 2' })).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Till 1' })).not.toBeInTheDocument();
+    expect(lastCall()).toMatchObject({ status: 'offline', page: 1 });
+    expect(screen.getByRole('link', { name: 'Till 1' })).toBeInTheDocument() ;
   });
 
-  it('narrows the list by the search text, in name or place', async () => {
-    const user = userEvent.setup();
-    renderList();
-    await user.type(screen.getByRole('searchbox'), 'window');
-    expect(screen.getByRole('link', { name: 'Window left' })).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Till 1' })).not.toBeInTheDocument();
+  it('sends the search text to the server a moment after typing stops, not on every key', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderList();
+      await user.type(screen.getByRole('searchbox'), 'window');
+      expect(lastCall().q).toBeUndefined();
+      await act(async () => { vi.advanceTimersByTime(400); });
+      expect(lastCall()).toMatchObject({ q: 'window', page: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it('says so when the filter leaves nothing', async () => {
-    const user = userEvent.setup();
-    renderList();
-    await user.type(screen.getByRole('searchbox'), 'zzz');
+  it('says so when the filter leaves nothing', () => {
+    setPage([], { online: 3, offline: 0, pending: 0, revoked: 0 }, 0);
+    renderList('/players?q=zzz');
     expect(screen.getByText('Nothing found')).toBeInTheDocument();
   });
 
   it('asks the server for the place picked in the tree, and remembers it in the address', async () => {
     const user = userEvent.setup();
     renderList();
-    expect(lastCall()).toEqual({ objectId: undefined, groupId: undefined });
+    expect(lastCall()).toMatchObject({ objectId: undefined, groupId: undefined });
     await user.click(screen.getByRole('button', { name: /Window/ }));
-    expect(lastCall()).toEqual({ objectId: undefined, groupId: 12 });
+    expect(lastCall()).toMatchObject({ objectId: undefined, groupId: 12 });
     await user.click(screen.getByRole('button', { name: /^Shop/ }));
-    expect(lastCall()).toEqual({ objectId: 1, groupId: undefined });
+    expect(lastCall()).toMatchObject({ objectId: 1, groupId: undefined });
   });
 
-  it('reads the place and status from the address', () => {
-    renderList('/players?group=11&status=offline');
-    expect(lastCall()).toEqual({ objectId: undefined, groupId: 11 });
+  it('reads the place, the status, the search and the page from the address', () => {
+    renderList('/players?group=11&status=offline&q=till&page=3');
+    expect(lastCall()).toEqual({ objectId: undefined, groupId: 11, status: 'offline', q: 'till', page: 3 });
     expect(screen.getByRole('button', { name: 'Offline · 1' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('searchbox')).toHaveValue('till');
   });
 
   it('ignores a damaged address instead of breaking', () => {
-    renderList('/players?group=abc&status=bogus');
-    expect(lastCall()).toEqual({ objectId: undefined, groupId: undefined });
+    renderList('/players?group=abc&status=bogus&page=-4');
+    expect(lastCall()).toEqual({ objectId: undefined, groupId: undefined, status: undefined, q: undefined, page: 1 });
     expect(screen.getByRole('button', { name: 'All · 4' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('tells a person with no screens what to do', () => {
-    listState.data = [];
+    setPage([], { online: 0, offline: 0, pending: 0, revoked: 0 }, 0);
     renderList();
     expect(screen.getByText('No screens yet')).toBeInTheDocument();
     expect(screen.getByText(/ask an administrator/)).toBeInTheDocument();
   });
 
-  it('warns when the list is cut at the server limit', () => {
-    listState.data = Array.from({ length: 1000 }, (_, i) => mk(`id${i}`, `Screen ${i}`));
+  it('pages a large park: the range, the next page, and back to the first page when a filter changes', async () => {
+    const user = userEvent.setup();
+    setPage(Array.from({ length: 50 }, (_, i) => mk(`id${i}`, `Screen ${i}`)), { online: 120, offline: 0, pending: 0, revoked: 0 }, 120);
     renderList();
-    expect(screen.getByRole('status')).toHaveTextContent('first 1000 screens');
+    expect(screen.getByText('1–50 of 120')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    expect(lastCall()).toMatchObject({ page: 2 });
+    await user.click(screen.getByRole('button', { name: 'Offline · 0' }));
+    expect(lastCall()).toMatchObject({ status: 'offline', page: 1 });
+  });
+
+  it('shows no pager when everything fits on one page', () => {
+    renderList();
+    expect(screen.queryByRole('navigation', { name: 'List pages' })).not.toBeInTheDocument();
   });
 
   it('shows a plain failure when the list cannot be loaded', () => {

@@ -4,12 +4,13 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { MonitorSmartphone, Building2, Layers, Search, Plus } from 'lucide-react';
 import { clsx } from 'clsx';
 import {
-  usePlayers, usePlayerTree, PLAYER_LIST_LIMIT,
+  usePlayers, usePlayerTree, PLAYER_PAGE_SIZE,
   type Player, type PlayerObject,
 } from '@/api/queries/players';
 import { Block } from '@/components/Block';
 import { EmptyState } from '@/components/EmptyState';
 import { SubNav } from '@/components/SubNav';
+import { useNow } from '@/hooks/useNow';
 import { useAuthStore } from '@/stores/auth';
 import { PLAYERS_NAV } from './nav';
 import { inputCls } from './fields';
@@ -83,35 +84,44 @@ export default function PlayersPage() {
   const statusParam = params.get('status');
   const statusFilter = (STATUSES as string[]).includes(statusParam ?? '') ? (statusParam as ScreenStatus) : null;
   const query = params.get('q') ?? '';
+  const pageParam = params.get('page');
+  const page = pageParam && /^\d+$/.test(pageParam) && Number(pageParam) > 0 ? Number(pageParam) : 1;
 
-  // Typing in the search box replaces the address in place, so it does not pile up history.
+  // Any change of what is shown starts again from the first page. Typing in the search
+  // box replaces the address in place, so it does not pile up history.
   const patch = (changes: Record<string, string | null>, replace = false) => {
     const next = new URLSearchParams(params);
     for (const [k, v] of Object.entries(changes)) { if (v) next.set(k, v); else next.delete(k); }
+    if (Object.keys(changes).some(k => k !== 'page')) next.delete('page');
     setParams(next, { replace });
   };
   const select = (s: Selection) =>
     patch({ object: s.objectId != null ? String(s.objectId) : null, group: s.groupId != null ? String(s.groupId) : null });
 
+  // The box shows what is typed at once; the address (and so the request) follows a moment later.
+  const [typed, setTyped] = React.useState(query);
+  React.useEffect(() => { setTyped(query); }, [query]);
+  React.useEffect(() => {
+    if (typed === query) return;
+    const id = setTimeout(() => patch({ q: typed || null }, true), 300);
+    return () => clearTimeout(id);
+  }, [typed]);                                         // eslint-disable-line react-hooks/exhaustive-deps
+
   const tree = usePlayerTree();
-  const list = usePlayers(selection);
+  const list = usePlayers({ ...selection, status: statusFilter ?? undefined, q: query.trim() || undefined, page });
 
-  const all = React.useMemo(() => list.data ?? [], [list.data]);
-  const counts = React.useMemo(() => {
-    const c: Record<ScreenStatus, number> = { online: 0, offline: 0, pending: 0, revoked: 0 };
-    for (const p of all) c[screenStatus(p)]++;
-    return c;
-  }, [all]);
+  const rows = list.data?.players ?? [];
+  const total = list.data?.total ?? 0;
+  const counts = list.data?.counts ?? { online: 0, offline: 0, pending: 0, revoked: 0 };
+  const everything = counts.online + counts.offline + counts.pending + counts.revoked;
+  const filtered = !!statusFilter || !!query.trim();
 
-  const shown = React.useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return all
-      .filter(p => !statusFilter || screenStatus(p) === statusFilter)
-      .filter(p => !q || p.name.toLowerCase().includes(q) || placeText(p).toLowerCase().includes(q))
-      .sort((a, b) => a.name.localeCompare(b.name, i18n.language));
-  }, [all, statusFilter, query, i18n.language]);
+  // A page past the end (the list shrank meanwhile): go back to the first one.
+  React.useEffect(() => {
+    if (list.data && rows.length === 0 && total > 0 && page > 1) patch({ page: null }, true);
+  }, [list.data, rows.length, total, page]);           // eslint-disable-line react-hooks/exhaustive-deps
 
-  const nowMs = Date.now();
+  const nowMs = useNow();
   const pill = (on: boolean) => clsx('px-2.5 py-1 text-xs rounded-full border',
     on ? 'border-[var(--accent)] text-[var(--accent)]'
        : 'border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-[var(--text-primary)]');
@@ -144,14 +154,14 @@ export default function PlayersPage() {
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
-              <input type="search" value={query} aria-label={t('players.list.search')}
+              <input type="search" value={typed} aria-label={t('players.list.search')}
                      placeholder={t('players.list.search')}
-                     onChange={e => patch({ q: e.target.value }, true)}
+                     onChange={e => setTyped(e.target.value)}
                      className={clsx(inputCls, 'pl-8 w-64')} />
             </div>
             <div role="group" aria-label={t('players.list.statusFilter')} className="flex flex-wrap gap-1">
               <button type="button" aria-pressed={!statusFilter} onClick={() => patch({ status: null })} className={pill(!statusFilter)}>
-                {t('players.list.allStatuses')} · {all.length}
+                {t('players.list.allStatuses')} · {everything}
               </button>
               {STATUSES.map(s => (
                 <button key={s} type="button" aria-pressed={statusFilter === s} onClick={() => patch({ status: s })} className={pill(statusFilter === s)}>
@@ -165,12 +175,12 @@ export default function PlayersPage() {
             <div className="h-64 bg-surface2 rounded-xl animate-pulse" />
           ) : list.isError ? (
             <p role="alert" className="text-sm text-[var(--danger)]">{t('players.list.loadFailed')}</p>
-          ) : all.length === 0 ? (
+          ) : !filtered && everything === 0 ? (
             <Block>
               <EmptyState Icon={MonitorSmartphone}
                           title={t('players.list.empty.title')} description={t('players.list.empty.text')} />
             </Block>
-          ) : shown.length === 0 ? (
+          ) : total === 0 ? (
             <Block>
               <EmptyState Icon={Search} title={t('players.list.noMatch.title')} description={t('players.list.noMatch.text')} />
             </Block>
@@ -187,7 +197,7 @@ export default function PlayersPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {shown.map(p => (
+                  {rows.map(p => (
                     <tr key={p.id} onClick={() => navigate(`/players/${p.id}`)}
                         className="border-b border-[var(--border-subtle)] last:border-b-0 hover:bg-surface2 cursor-pointer">
                       <td className="px-4 py-2.5">
@@ -210,10 +220,20 @@ export default function PlayersPage() {
             </Block>
           )}
 
-          {all.length >= PLAYER_LIST_LIMIT && (
-            <p role="status" className="text-xs text-[var(--warning)] m-0">
-              {t('players.list.cut', { n: PLAYER_LIST_LIMIT })}
-            </p>
+          {total > PLAYER_PAGE_SIZE && (
+            <nav aria-label={t('players.list.pages')} className="flex items-center gap-3 text-sm text-[var(--text-muted)]">
+              <span>{t('players.list.range', { from: (page - 1) * PLAYER_PAGE_SIZE + 1, to: Math.min(page * PLAYER_PAGE_SIZE, total), total })}</span>
+              <div className="ml-auto flex gap-2">
+                <button type="button" disabled={page <= 1} onClick={() => patch({ page: page > 2 ? String(page - 1) : null })}
+                        className="px-3 py-1.5 rounded-md border border-[var(--border-subtle)] disabled:opacity-40 hover:text-[var(--text-primary)]">
+                  {t('players.list.prev')}
+                </button>
+                <button type="button" disabled={page * PLAYER_PAGE_SIZE >= total} onClick={() => patch({ page: String(page + 1) })}
+                        className="px-3 py-1.5 rounded-md border border-[var(--border-subtle)] disabled:opacity-40 hover:text-[var(--text-primary)]">
+                  {t('players.list.next')}
+                </button>
+              </div>
+            </nav>
           )}
         </div>
       </div>

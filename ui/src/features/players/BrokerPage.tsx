@@ -11,6 +11,7 @@ import {
 import { ApiClientError } from '@/api/client';
 import { Block } from '@/components/Block';
 import { SubNav } from '@/components/SubNav';
+import { useNow } from '@/hooks/useNow';
 import { useToast } from '@/hooks/useToast';
 import { PLAYERS_NAV } from './nav';
 import { TextField, NumberField, Toggle, SectionTitle } from './fields';
@@ -66,6 +67,7 @@ export default function BrokerPage() {
   const { t, i18n } = useTranslation();
   const toast = useToast();
   const { data: st, isLoading, isError } = useBrokerStatus();
+  const nowMs = useNow();
   const reconcile = useBrokerReconcile();
   const update = useBrokerUpdate();
 
@@ -177,7 +179,6 @@ export default function BrokerPage() {
     );
   }
 
-  const nowMs = Date.now();
   const active = st.enabled && st.state !== 'disabled';
   const r = st.readiness;
   const crl = st.crl;

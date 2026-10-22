@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { api } from '../client';
 
 // Screens (players) — module settings and the MQTT broker link.
@@ -124,9 +124,7 @@ export const useBrokerStatus = () =>
   useQuery({
     queryKey: ['players-admin', 'broker'],
     queryFn: () => api.get<BrokerStatus>('/api/players/broker'),
-    staleTime: 2_000,
-    refetchInterval: 5_000,                 // the state changes without any event to tell us
-    refetchIntervalInBackground: false,
+    staleTime: 10_000,                      // the server announces every change (players_broker_status)
   });
 
 export const useBrokerReconcile = () => {
@@ -157,6 +155,8 @@ export interface PlayerGroup {
   name:       string;
   created_at: number;
   players:    number;
+  // What THIS person may do in the group; the server still decides every action.
+  can?:       { move: boolean; command_group: boolean };
 }
 
 export interface PlayerObject {
@@ -164,6 +164,7 @@ export interface PlayerObject {
   name:       string;
   created_at: number;
   groups:     PlayerGroup[];
+  can?:       { command_object: boolean };
 }
 
 // A shared root so one invalidation refreshes the tree after any change; the
@@ -252,6 +253,8 @@ export interface Player {
   revoked_at?:    number;
   revoke_reason?: string;
   status?:        PlayerStatus;
+  // What THIS person may do with the screen (the card only).
+  can?:           { move: boolean; command: boolean };
 }
 
 export interface PlayerCertificate {
@@ -287,21 +290,41 @@ export interface PlayerCommand {
   finished_at?: number;
 }
 
-export interface PlayerListFilter { objectId?: number; groupId?: number }
+export type ScreenStatusFilter = 'online' | 'offline' | 'pending' | 'revoked';
 
-// One request covers a deployment of several hundred screens; the server caps a page at 1000.
-export const PLAYER_LIST_LIMIT = 1000;
+export interface PlayerListQuery {
+  objectId?: number;
+  groupId?:  number;
+  status?:   ScreenStatusFilter;
+  q?:        string;
+  page:      number;               // 1-based
+}
 
-export const usePlayers = (f: PlayerListFilter) =>
+export const PLAYER_PAGE_SIZE = 50;
+
+export interface PlayerPage {
+  players: Player[];
+  total:   number;                                    // matching every filter, before the page is cut
+  counts:  Record<ScreenStatusFilter, number>;        // by status, for the place and the search (not the status filter)
+}
+
+// Filtering, search, counting and paging are the server's work, so a page of a
+// large park is complete and the counts are true for all of it.
+export const usePlayers = (f: PlayerListQuery) =>
   useQuery({
-    queryKey: ['players', 'list', f.objectId ?? null, f.groupId ?? null],
-    queryFn: async () => {
-      const q = new URLSearchParams({ limit: String(PLAYER_LIST_LIMIT) });
+    queryKey: ['players', 'list', f.objectId ?? null, f.groupId ?? null, f.status ?? null, f.q ?? '', f.page],
+    queryFn: () => {
+      const q = new URLSearchParams({
+        limit: String(PLAYER_PAGE_SIZE), offset: String((f.page - 1) * PLAYER_PAGE_SIZE),
+      });
       if (f.groupId  != null) q.set('group_id',  String(f.groupId));
       if (f.objectId != null) q.set('object_id', String(f.objectId));
-      return (await api.get<{ players: Player[] }>(`/api/players?${q}`)).players;
+      if (f.status) q.set('status', f.status);
+      if (f.q) q.set('q', f.q);
+      return api.get<PlayerPage>(`/api/players?${q}`);
     },
     staleTime: 5_000,
+    placeholderData: keepPreviousData,          // the table stays while the next page loads
   });
 
 export const usePlayer = (id: string) =>

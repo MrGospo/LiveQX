@@ -31,10 +31,11 @@ vi.mock('@/api/queries/players', async (orig) => {
 import { AddPlayerDialog } from '@/features/players/AddPlayerDialog';
 import { PlayerActions } from '@/features/players/PlayerActions';
 
+const can = (move: boolean) => ({ move, command_group: false });
 const objects = (): PlayerObject[] => [
   { id: 1, name: 'Shop', created_at: 1, groups: [
-    { id: 11, object_id: 1, name: 'Tills', created_at: 1, players: 2 },
-    { id: 12, object_id: 1, name: 'Window', created_at: 1, players: 0 },
+    { id: 11, object_id: 1, name: 'Tills', created_at: 1, players: 2, can: can(true) },
+    { id: 12, object_id: 1, name: 'Window', created_at: 1, players: 0, can: can(true) },
   ] },
   { id: 2, name: 'Warehouse', created_at: 1, groups: [] },
 ];
@@ -48,7 +49,7 @@ const pkg = (): PairingPackage => ({
 const player = (over: Partial<Player> = {}): Player => ({
   id: 'p1', name: 'Till 1', state: 'active', clock_policy: 'strict', created_at: 1,
   group_id: 11, group_name: 'Tills', object_id: 1, object_name: 'Shop',
-  status: { online: true, version: '1.4.2', updated_at: 1 }, ...over,
+  status: { online: true, version: '1.4.2', updated_at: 1 }, can: { move: true, command: true }, ...over,
 });
 
 beforeEach(() => {
@@ -272,6 +273,61 @@ describe('PlayerActions', () => {
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Move' }));
     expect(actions.move.mutateAsync).toHaveBeenCalledWith({ id: 'p1', groupId: 12 });
     expect(toast).toHaveBeenCalledWith('Screen moved', 'success');
+  });
+
+  it('does not offer the move to an operator the server did not allow, whatever the role', () => {
+    role = 'operator';
+    renderActions(player({ can: { move: false, command: true } }));
+    expect(buttons()).toEqual([]);
+  });
+
+  it('offers an operator only the groups of the same object where the move mark is held', async () => {
+    const user = userEvent.setup();
+    role = 'operator';
+    treeState.data = [
+      { id: 1, name: 'Shop', created_at: 1, groups: [
+        { id: 11, object_id: 1, name: 'Tills', created_at: 1, players: 2, can: can(true) },
+        { id: 12, object_id: 1, name: 'Window', created_at: 1, players: 0, can: can(true) },
+        { id: 13, object_id: 1, name: 'Back room', created_at: 1, players: 0, can: can(false) },
+      ] },
+      { id: 2, name: 'Warehouse', created_at: 1, groups: [
+        { id: 21, object_id: 2, name: 'Dock', created_at: 1, players: 0, can: can(true) },
+      ] },
+    ];
+    renderActions(player());
+    await user.click(screen.getByRole('button', { name: 'Move' }));
+    const options = within(screen.getByLabelText('To group')).getAllByRole('option').map(o => o.textContent);
+    expect(options).toEqual(['Pick a group…', 'Window']);
+  });
+
+  it('offers an administrator every other group, in every object', async () => {
+    const user = userEvent.setup();
+    treeState.data = [
+      { id: 1, name: 'Shop', created_at: 1, groups: [
+        { id: 11, object_id: 1, name: 'Tills', created_at: 1, players: 2, can: can(false) },
+        { id: 12, object_id: 1, name: 'Window', created_at: 1, players: 0, can: can(false) },
+      ] },
+      { id: 2, name: 'Warehouse', created_at: 1, groups: [
+        { id: 21, object_id: 2, name: 'Dock', created_at: 1, players: 0, can: can(false) },
+      ] },
+    ];
+    renderActions(player());
+    await user.click(screen.getByRole('button', { name: 'Move' }));
+    const options = within(screen.getByLabelText('To group')).getAllByRole('option').map(o => o.textContent);
+    expect(options).toEqual(['Pick a group…', 'Window', 'Dock']);
+  });
+
+  it('says so when there is nowhere an operator may move the screen to', async () => {
+    const user = userEvent.setup();
+    role = 'operator';
+    treeState.data = [{ id: 1, name: 'Shop', created_at: 1, groups: [
+      { id: 11, object_id: 1, name: 'Tills', created_at: 1, players: 2, can: can(true) },
+      { id: 12, object_id: 1, name: 'Window', created_at: 1, players: 0, can: can(false) },
+    ] }];
+    renderActions(player());
+    await user.click(screen.getByRole('button', { name: 'Move' }));
+    expect(screen.getByRole('status')).toHaveTextContent('no group you may move this screen to');
+    expect(within(screen.getByRole('dialog')).getByRole('button', { name: 'Move' })).toBeDisabled();
   });
 
   it('explains a refused move in words and stays open', async () => {

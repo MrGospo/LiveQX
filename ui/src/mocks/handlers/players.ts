@@ -68,7 +68,11 @@ export const playersHandlers = [
   http.get('/api/player-objects', async () => {
     await delay(120);
     return HttpResponse.json({
-      objects: objects.map(o => ({ ...o, groups: groups.filter(g => g.object_id === o.id) })),
+      objects: objects.map(o => ({
+        ...o,
+        can: { command_object: true },
+        groups: groups.filter(g => g.object_id === o.id).map(g => ({ ...g, can: { move: true, command_group: true } })),
+      })),
     });
   }),
   http.post('/api/player-objects', async ({ request }) => {
@@ -252,8 +256,18 @@ export const playersListHandlers = [
     await delay(150);
     const u = new URL(request.url);
     const g = u.searchParams.get('group_id'); const o = u.searchParams.get('object_id');
-    const list = screenDb.filter(s => (!g || String(s.group_id) === g) && (!o || String(s.object_id) === o));
-    return HttpResponse.json({ players: list });
+    const status = u.searchParams.get('status'); const q = (u.searchParams.get('q') ?? '').toLowerCase();
+    const limit = Number(u.searchParams.get('limit') ?? 200); const offset = Number(u.searchParams.get('offset') ?? 0);
+    const display = (s: ReturnType<typeof screens>[number]) =>
+      s.state !== 'active' ? s.state : (s.status?.online ? 'online' : 'offline');
+    const inPlace = screenDb
+      .filter(s => (!g || String(s.group_id) === g) && (!o || String(s.object_id) === o))
+      .filter(s => !q || `${s.name} ${s.group_name ?? ''} ${s.object_name ?? ''}`.toLowerCase().includes(q));
+    const counts = { online: 0, offline: 0, pending: 0, revoked: 0 };
+    for (const s of inPlace) counts[display(s) as keyof typeof counts]++;
+    const matching = inPlace.filter(s => !status || display(s) === status)
+      .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    return HttpResponse.json({ players: matching.slice(offset, offset + limit), total: matching.length, counts });
   }),
   http.get('/api/players/:id/commands', async ({ params }) => {
     await delay(100);
@@ -270,6 +284,7 @@ export const playersListHandlers = [
     const now = nowS();
     return HttpResponse.json({
       ...s,
+      can: { move: true, command: true },
       certificates: s.state === 'pending' ? [] : [
         { serial: '5f3a9c01b7', generation: 1, issued_at: now - 29 * 86400, not_before: now - 29 * 86400, not_after: now + 336 * 86400 },
         ...(s.state === 'revoked' ? [{ serial: '1a2b3c4d5e', generation: 1, issued_at: now - 40 * 86400, not_before: now - 40 * 86400, not_after: now + 20 * 86400, revoked_at: now - 86400, revoke_reason: 'revoked_by_admin' }] : []),

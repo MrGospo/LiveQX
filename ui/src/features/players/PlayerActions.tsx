@@ -95,8 +95,16 @@ export function PlayerActions({ player }: { player: Player }) {
 
   if (!canMove) return null;
 
-  const groups = (tree.data ?? []).filter(o => o.groups.some(g => g.id !== player.group_id));
-  const showMove = canMove && status !== 'revoked';
+  // Where this person may move the screen to: an administrator anywhere, anyone else only inside
+  // the screen's own object and only into groups where they hold the move mark (the server
+  // checks the same rule again on every move).
+  const groups = (tree.data ?? [])
+    .map(o => ({
+      ...o,
+      groups: o.groups.filter(g => g.id !== player.group_id && (isAdmin || (o.id === player.object_id && g.can?.move === true))),
+    }))
+    .filter(o => o.groups.length > 0);
+  const showMove = canMove && status !== 'revoked' && (isAdmin || player.can?.move === true);
   const showToken = isAdmin && status === 'pending';
   const showReEnroll = isAdmin && (status === 'online' || status === 'offline' || status === 'revoked');
   const showRevoke = isAdmin && status !== 'revoked';
@@ -130,11 +138,12 @@ export function PlayerActions({ player }: { player: Player }) {
               <option value="">{t('players.add.pickGroup')}</option>
               {groups.map(o => (
                 <optgroup key={o.id} label={o.name}>
-                  {o.groups.filter(g => g.id !== player.group_id).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                  {o.groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
                 </optgroup>
               ))}
             </select>
           </Field>
+          {groups.length === 0 && <p role="status" className="text-sm text-[var(--text-muted)] m-0">{t('players.actions.noTargets')}</p>}
           {errorLine}
         </Shell>
       )}
