@@ -53,6 +53,7 @@ extern "C" {
 #include "players/EnrollService.h"
 #include "players/PlayerAccess.h"
 #include "utils/ClientIp.h"
+#include "utils/TextFold.h"
 #include "players/PlayersService.h"
 #include "audit/AuditDb.h"
 #include "audit/AuditLogger.h"
@@ -3405,13 +3406,20 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             for (const auto& g : groups) {
                 if (g.object_id != o.id || !access->canSeeGroup(g.id, g.object_id)) continue;
                 auto c = counts.find(g.id);
+                liveqx::players::Place place;
+                place.group_id = g.id;
+                place.object_id = g.object_id;
+                // What THIS person may do here, so the interface offers only that.
                 gs.push_back({{"id", g.id}, {"object_id", g.object_id}, {"name", g.name},
-                              {"created_at", g.created_at}, {"players", c == counts.end() ? 0 : c->second}});
+                              {"created_at", g.created_at}, {"players", c == counts.end() ? 0 : c->second},
+                              {"can", {{"move", access->canMoveFrom(place)},
+                                       {"command_group", access->canCommandGroup(place)}}}});
             }
             // An object is shown when it is granted, or holds a granted group
             // (then only as the container of that group).
             if (!access->canSeeObject(o.id) && !access->seesObjectContaining(o.id)) continue;
-            objs.push_back({{"id", o.id}, {"name", o.name}, {"created_at", o.created_at}, {"groups", std::move(gs)}});
+            objs.push_back({{"id", o.id}, {"name", o.name}, {"created_at", o.created_at}, {"groups", std::move(gs)},
+                            {"can", {{"command_object", access->canCommandObject(o.id)}}}});
         }
         writeJson(res, 200, json{{"objects", std::move(objs)}});
     });
@@ -4088,32 +4096,70 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         auto limit  = num("limit", 200, 1, 1000);
         auto offset = num("offset", 0, 0, 1'000'000);
         if (!limit || !offset) { writeJson(res, 400, {{"error", "invalid_paging"}}); return; }
-        // An administrator pages in the database. For everyone else the rights
-        // are applied to the whole matching set first and the page is cut from
-        // what is visible, so a page never has holes or leaks a count.
-        const bool restricted = !access->isAdmin();
-        f.limit  = restricted ? 0 : *limit;
-        f.offset = restricted ? 0 : *offset;
+        // What the person is shown in one word (the same words as the interface): not
+        // the stored state plus the "online" flag. Filtered, counted and sorted here, so a
+        // page of a large park is complete and the counts are true for the whole set.
+        std::string display_filter;
+        if (req.has_param("status")) {
+            display_filter = req.get_param_value("status");
+            if (display_filter != "online" && display_filter != "offline" &&
+                display_filter != "pending" && display_filter != "revoked") {
+                writeJson(res, 400, {{"error", "invalid_status"}});
+                return;
+            }
+        }
+        const std::string query = req.has_param("q") ? req.get_param_value("q") : std::string();
+        if (query.size() > 200) { writeJson(res, 400, {{"error", "invalid_query"}}); return; }
+        const std::string needle = liveqx::text::foldForSearch(query);
 
         std::map<std::string, liveqx::players::StatusRow> statuses;
         for (auto& st : pls->db().allStatuses()) statuses.emplace(st.player_id, st);
         const auto hier = loadHierarchy(pls->db());
-        auto rows = pls->db().listPlayers(f);
-        if (restricted) {
-            std::vector<liveqx::players::PlayerRow> visible;
-            for (auto& p : rows)
-                if (access->canView(placeOf(p, hier))) visible.push_back(std::move(p));
-            const std::size_t from = std::min<std::size_t>(static_cast<std::size_t>(*offset), visible.size());
-            const std::size_t to   = std::min<std::size_t>(from + static_cast<std::size_t>(*limit), visible.size());
-            rows.assign(std::make_move_iterator(visible.begin() + from), std::make_move_iterator(visible.begin() + to));
+        auto rows = pls->db().listPlayers(f);          // no limit: the rights and the filters come first
+
+        struct Item {
+            liveqx::players::PlayerRow                   player;
+            std::optional<liveqx::players::StatusRow>    status;
+            const char*                                  display;
+            std::string                                  sort_key;
+        };
+        std::vector<Item> items;
+        items.reserve(rows.size());
+        std::map<std::string, std::int64_t> counts{{"online", 0}, {"offline", 0}, {"pending", 0}, {"revoked", 0}};
+        const bool restricted = !access->isAdmin();
+        for (auto& p : rows) {
+            if (restricted && !access->canView(placeOf(p, hier))) continue;
+            Item it;
+            if (auto sit = statuses.find(p.id); sit != statuses.end()) it.status = sit->second;
+            it.display = p.state == liveqx::players::PlayerState::Revoked ? "revoked"
+                       : p.state == liveqx::players::PlayerState::Pending ? "pending"
+                       : (it.status && it.status->online) ? "online" : "offline";
+            it.sort_key = liveqx::text::foldForSearch(p.name);
+            if (!needle.empty()) {
+                std::string hay = it.sort_key;
+                if (p.group_id) {
+                    if (auto g = hier.groups.find(*p.group_id); g != hier.groups.end()) {
+                        hay += '\n' + liveqx::text::foldForSearch(g->second.name);
+                        if (auto o = hier.objects.find(g->second.object_id); o != hier.objects.end())
+                            hay += '\n' + liveqx::text::foldForSearch(o->second.name);
+                    }
+                }
+                if (hay.find(needle) == std::string::npos) continue;
+            }
+            ++counts[it.display];
+            if (!display_filter.empty() && display_filter != it.display) continue;
+            it.player = std::move(p);
+            items.push_back(std::move(it));
         }
+        std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+            return a.sort_key != b.sort_key ? a.sort_key < b.sort_key : a.player.id < b.player.id;
+        });
+        const std::size_t total = items.size();
+        const std::size_t from  = std::min<std::size_t>(static_cast<std::size_t>(*offset), total);
+        const std::size_t to    = std::min<std::size_t>(from + static_cast<std::size_t>(*limit), total);
         json arr = json::array();
-        for (const auto& p : rows) {
-            std::optional<liveqx::players::StatusRow> st;
-            if (auto it = statuses.find(p.id); it != statuses.end()) st = it->second;
-            arr.push_back(playerJson(p, st, hier));
-        }
-        writeJson(res, 200, json{{"players", std::move(arr)}});
+        for (std::size_t i = from; i < to; ++i) arr.push_back(playerJson(items[i].player, items[i].status, hier));
+        writeJson(res, 200, json{{"players", std::move(arr)}, {"total", total}, {"counts", counts}});
     });
 
     s.Get(R"(/api/players/([^/]+))",
@@ -4128,6 +4174,8 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         // A player outside the caller's rights is "not found": its existence is not revealed.
         if (!p || !access->canView(placeOf(*p, hier))) { writeJson(res, 404, {{"error", "not_found"}}); return; }
         json j = playerJson(*p, pls->db().status(id), hier);
+        j["can"] = {{"move", access->canMoveFrom(placeOf(*p, hier))},
+                    {"command", access->canCommandPlayer(placeOf(*p, hier))}};
         json certs = json::array();
         for (const auto& c : pls->db().certsOf(id)) {
             json cj = {{"serial", c.serial_hex}, {"generation", c.generation},

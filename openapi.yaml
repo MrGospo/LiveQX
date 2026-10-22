@@ -4229,6 +4229,18 @@ paths:
           schema: { type: integer, format: int64 }
           description: Плееры всех групп этого объекта.
         - in: query
+          name: status
+          schema: { type: string, enum: [online, offline, pending, revoked] }
+          description: |
+            Состояние словами, как его видит человек: `online`/`offline` — только у
+            привязанных (`active`), `pending`, `revoked` — как есть. Сужает список, но не счётчики.
+        - in: query
+          name: q
+          schema: { type: string, maxLength: 200 }
+          description: |
+            Поиск по названию экрана, группы и объекта, без учёта регистра для латиницы и
+            кириллицы (остальные алфавиты — точно). Сужает и список, и счётчики.
+        - in: query
           name: limit
           schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
         - in: query
@@ -4236,18 +4248,31 @@ paths:
           schema: { type: integer, minimum: 0, default: 0 }
       responses:
         '200':
-          description: ok
+          description: |
+            Страница списка. Порядок: по названию без учёта регистра (латиница, затем
+            кириллица), затем по идентификатору. Права и фильтры применяются ко всему
+            набору до среза, поэтому `total` и `counts` верны для всего парка.
           content:
             application/json:
               schema:
                 type: object
-                required: [players]
+                required: [players, total, counts]
                 properties:
                   players:
                     type: array
                     items: { $ref: '#/components/schemas/Player' }
+                  total: { type: integer, description: 'Сколько экранов подходит под все фильтры (до среза).' }
+                  counts:
+                    type: object
+                    description: 'По состояниям, с учётом места и поиска, но без фильтра `status`.'
+                    required: [online, offline, pending, revoked]
+                    properties:
+                      online: { type: integer }
+                      offline: { type: integer }
+                      pending: { type: integer }
+                      revoked: { type: integer }
         '400':
-          description: '`invalid_state` или `invalid_paging`.'
+          description: '`invalid_state`, `invalid_status`, `invalid_query` или `invalid_paging`.'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -4474,7 +4499,9 @@ paths:
         Viewer+. Иерархия: все → объект → группа; у группы — число плееров.
         Администратор видит всё. Остальные — только выданный объект и группы:
         право на объект показывает его целиком, право на группу — эту группу и
-        имя её объекта как вместилища; остальное скрыто.
+        имя её объекта как вместилища; остальное скрыто. В `can` у группы и объекта —
+        что ЭТОМУ человеку здесь можно (для кнопок интерфейса; решение по каждому
+        действию сервер всё равно принимает сам).
       responses:
         '200':
           description: ok
@@ -5583,6 +5610,12 @@ components:
         name: { type: string }
         created_at: { type: integer, format: int64 }
         players: { type: integer, description: "Сколько плееров в группе (в дереве)." }
+        can:
+          type: object
+          description: Что можно текущему пользователю в этой группе (только в дереве).
+          properties:
+            move: { type: boolean, description: 'Можно переносить отсюда экраны (отметка переноса у оператора, всё у администратора).' }
+            command_group: { type: boolean, description: 'Можно слать команду всей группе.' }
 
     PlayerObjectBrief:
       type: object
@@ -5598,6 +5631,10 @@ components:
         - type: object
           required: [groups]
           properties:
+            can:
+              type: object
+              properties:
+                command_object: { type: boolean, description: 'Можно слать команду всему объекту.' }
             groups:
               type: array
               items: { $ref: '#/components/schemas/PlayerGroup' }
@@ -5856,6 +5893,12 @@ components:
             events:
               type: array
               items: { $ref: '#/components/schemas/PlayerEvent' }
+            can:
+              type: object
+              description: Что можно текущему пользователю с этим экраном (для кнопок интерфейса).
+              properties:
+                move: { type: boolean }
+                command: { type: boolean }
 
     RevokeResult:
       type: object

@@ -140,4 +140,6 @@ TEST(EventBus, EventTypeNameAndParse) {
     EXPECT_EQ(sce::parseEventType("clip_change").value(),
               sce::EventType::ClipChange);
     EXPECT_FALSE(sce::parseEventType("nope").has_value());
+    EXPECT_STREQ(sce::eventTypeName(sce::EventType::PlayersBrokerStatus), "players_broker_status");
+    EXPECT_EQ(sce::parseEventType("players_broker_status").value(), sce::EventType::PlayersBrokerStatus);
 }

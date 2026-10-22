@@ -954,3 +954,106 @@ TEST(ControlApiPlayers, ReEnrollingIsAuditedWithoutTheTokenAndWithTheOldState) {
     EXPECT_NE(rows[0].details_json.find("swap"), std::string::npos);
     EXPECT_EQ(rows[0].details_json.find(token), std::string::npos) << "the token never reaches the trail";
 }
+
+// ─── The list: filtering, search, counts and pages are the server's work ─────
+namespace {
+// Screens for the tests below: three online, two offline, one pending, one revoked.
+struct ParkFixture {
+    PlayersApiFixture f;
+    std::vector<std::string> ids;
+    explicit ParkFixture(int port) : f(port) {
+        f.configure();
+        const char* names[] = {"Касса 1", "касса 2", "Витрина", "Till 4", "alpha", "Zeta", "Old"};
+        for (const char* n : names) {
+            auto pkg = f.create(n);
+            ids.push_back(pkg["player_id"]);
+        }
+        // 0..4 enrolled, 5 stays pending, 6 revoked afterwards.
+        for (int i = 0; i < 5; ++i) {
+            const auto token = f.db->reissueToken(ids[i], 3600);
+            auto claim = f.db->claimToken(ids[i], token->token);
+            f.db->finishEnrollment(claim.token_id, certFor(ids[i], "PK0" + std::to_string(i)));
+        }
+        auto claim = f.db->claimToken(ids[6], f.db->reissueToken(ids[6], 3600)->token);
+        f.db->finishEnrollment(claim.token_id, certFor(ids[6], "PK06"));
+        f.db->revokePlayer(ids[6], "x");
+        const std::int64_t now = std::time(nullptr);
+        for (int i = 0; i < 5; ++i)
+            f.db->applyStatuses({{ids[i], now, i < 3, "1.0.0", "{}"}});   // 0,1,2 online; 3,4 offline
+    }
+    json list(const std::string& query = "") {
+        auto cli = f.client();
+        auto r = cli.Get(("/api/players" + (query.empty() ? "" : "?" + query)).c_str());
+        EXPECT_TRUE(r);
+        EXPECT_EQ(r ? r->status : 0, 200) << (r ? r->body : "");
+        return r ? json::parse(r->body) : json{};
+    }
+    static std::vector<std::string> names(const json& body) {
+        std::vector<std::string> out;
+        for (const auto& p : body["players"]) out.push_back(p["name"]);
+        return out;
+    }
+};
+}  // namespace
+
+TEST(ControlApiPlayers, TheListCountsEachStatusAndSortsByNameWhateverTheCase) {
+    ParkFixture p(kBasePort + 35);
+    const auto body = p.list();
+    EXPECT_EQ(body["total"], 7);
+    EXPECT_EQ(body["counts"]["online"], 3);
+    EXPECT_EQ(body["counts"]["offline"], 2);
+    EXPECT_EQ(body["counts"]["pending"], 1);
+    EXPECT_EQ(body["counts"]["revoked"], 1);
+    EXPECT_EQ(ParkFixture::names(body),
+              (std::vector<std::string>{"alpha", "Old", "Till 4", "Zeta", "Витрина", "Касса 1", "касса 2"}))
+        << "alphabetical inside each alphabet (capitals do not come first), Latin before Cyrillic";
+}
+
+TEST(ControlApiPlayers, TheStatusFilterNarrowsTheListButNotTheCounts) {
+    ParkFixture p(kBasePort + 36);
+    auto body = p.list("status=offline");
+    EXPECT_EQ(ParkFixture::names(body), (std::vector<std::string>{"alpha", "Till 4"}));
+    EXPECT_EQ(body["total"], 2);
+    EXPECT_EQ(body["counts"]["online"], 3) << "the buttons keep showing every status";
+    EXPECT_EQ(ParkFixture::names(p.list("status=pending")), (std::vector<std::string>{"Zeta"}));
+    EXPECT_EQ(ParkFixture::names(p.list("status=revoked")), (std::vector<std::string>{"Old"}));
+}
+
+TEST(ControlApiPlayers, SearchFindsByNameOrPlaceIgnoringCaseInLatinAndCyrillic) {
+    ParkFixture p(kBasePort + 37);
+    EXPECT_EQ(ParkFixture::names(p.list("q=КАССА")),
+              (std::vector<std::string>{"Касса 1", "касса 2"})) << "capitals find lower case and the other way round";
+    EXPECT_EQ(ParkFixture::names(p.list("q=TILL")), (std::vector<std::string>{"Till 4"}));
+    EXPECT_EQ(p.list("q=Hall")["total"], 7) << "the group's name counts: every screen stands in Hall";
+    EXPECT_EQ(p.list("q=Main")["total"], 7) << "so does the object's";
+    EXPECT_EQ(p.list("q=nothing-like-this")["total"], 0);
+    auto body = p.list("q=касса&status=offline");
+    EXPECT_EQ(body["total"], 0);
+    EXPECT_EQ(body["counts"]["online"], 2) << "the counts follow the search, not the status";
+}
+
+TEST(ControlApiPlayers, PagesAreCutFromTheWholeSortedSetAndSaySoHowManyThereAre) {
+    ParkFixture p(kBasePort + 38);
+    auto first = p.list("limit=3&offset=0");
+    EXPECT_EQ(first["total"], 7);
+    EXPECT_EQ(first["players"].size(), 3u);
+    auto last = p.list("limit=3&offset=6");
+    EXPECT_EQ(last["players"].size(), 1u);
+    EXPECT_EQ(last["total"], 7);
+    EXPECT_EQ(ParkFixture::names(p.list("limit=3&offset=3")),
+              (std::vector<std::string>{"Zeta", "Витрина", "Касса 1"})) << "no overlap and no gap between pages";
+    EXPECT_TRUE(p.list("limit=3&offset=50")["players"].empty());
+}
+
+TEST(ControlApiPlayers, BadFilterValuesAreClientErrors) {
+    ParkFixture p(kBasePort + 39);
+    auto cli = p.f.client();
+    auto bad = cli.Get("/api/players?status=zombie");
+    ASSERT_TRUE(bad);
+    EXPECT_EQ(bad->status, 400);
+    EXPECT_EQ(json::parse(bad->body)["error"], "invalid_status");
+    auto longq = cli.Get(("/api/players?q=" + std::string(300, 'a')).c_str());
+    ASSERT_TRUE(longq);
+    EXPECT_EQ(longq->status, 400);
+    EXPECT_EQ(json::parse(longq->body)["error"], "invalid_query");
+}

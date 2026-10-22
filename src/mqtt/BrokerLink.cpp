@@ -140,9 +140,14 @@ BrokerLinkStatus BrokerLink::status() const {
 }
 
 void BrokerLink::setStatus(const std::string& state, const std::string& detail) {
-    std::lock_guard<std::mutex> lk(mu_);
-    status_.state  = state;
-    status_.detail = detail;
+    bool changed;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        changed = status_.state != state || status_.detail != detail;
+        status_.state  = state;
+        status_.detail = detail;
+    }
+    if (changed && opts_.on_change) opts_.on_change();
 }
 
 void BrokerLink::wait(int seconds) {
@@ -297,6 +302,7 @@ void BrokerLink::run() {
                     status_.detail = rep.error;
                 }
             }
+            if (opts_.on_change) opts_.on_change();               // the time and the result of the pass are on the page
             if (rep.issued || rep.removed || !rep.ok)
                 LOG_INFO("Broker: reconciled — {} issued, {} removed, {} failed{}{}", rep.issued, rep.removed,
                          rep.failed, rep.error.empty() ? "" : ": ", rep.error);

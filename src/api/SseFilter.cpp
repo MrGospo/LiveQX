@@ -64,6 +64,8 @@ bool sseEventVisibleTo(const liveqx::auth::RequestContext& ctx,
     switch (e.type) {
         case EventType::AuditEvent:
             return auditEventVisible(ctx, e);
+        case EventType::PlayersBrokerStatus:           // the state of the broker is an administrator's page
+            return ctx.role == Role::Admin;
         case EventType::PluginStatusChange:
         case EventType::StressRunStarted:
         case EventType::StressRunFinished:

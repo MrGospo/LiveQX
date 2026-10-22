@@ -53,6 +53,9 @@ public:
     bool canCommandObject(std::int64_t object_id) const;
     bool canCommandAll() const { return isAdmin(); }
     bool canMove(const Place& from, const Place& to) const;
+    // May a screen of this place be moved at all (the interface shows the button on this)?
+    // canMove() still decides each concrete move: the target needs the mark as well.
+    bool canMoveFrom(const Place& from) const;
     bool canViewAudit(const Place& p) const;
 
     // For the tree: a group is shown when it is covered; an object is "seen"

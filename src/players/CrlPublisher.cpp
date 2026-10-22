@@ -35,8 +35,11 @@ CrlStatus CrlPublisher::publishNow() {
     st.error.clear();
     st.reload_error.clear();
     auto finish = [&]() {
-        std::lock_guard<std::mutex> lk(mu_);
-        status_ = st;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            status_ = st;
+        }
+        if (opts_.on_change) opts_.on_change();
         return st;
     };
 

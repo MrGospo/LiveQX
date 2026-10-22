@@ -46,6 +46,12 @@ TEST(SseFilter, AdminSeesEverything) {
     EXPECT_TRUE(sseEventVisibleTo(ctx, evtFor(EventType::HealthChange, 99)));
 }
 
+TEST(SseFilter, TheBrokerStatusIsForAdministratorsOnly) {
+    EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Admin), evtFor(EventType::PlayersBrokerStatus)));
+    EXPECT_FALSE(sseEventVisibleTo(ctxFor(Role::Operator), evtFor(EventType::PlayersBrokerStatus)));
+    EXPECT_FALSE(sseEventVisibleTo(ctxFor(Role::Viewer), evtFor(EventType::PlayersBrokerStatus)));
+}
+
 TEST(SseFilter, OperatorBlockedFromAuditEvent) {
     auto ctx = ctxFor(Role::Operator);
     EXPECT_FALSE(sseEventVisibleTo(ctx, evtFor(EventType::AuditEvent)));

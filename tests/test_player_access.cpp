@@ -148,6 +148,31 @@ TEST(PlayerAccess, AViewerLooksButNeverCommandsWhateverItCarries) {
     EXPECT_TRUE(a.canViewAudit(P11)) << "looking at the trail is not a command";
 }
 
+TEST(PlayerAccess, TheMoveButtonIsOfferedOnlyWhereTheMarkIsHeldAndNeverToAViewer) {
+    PlayerAccess mover(Role::Operator, {group(G11, false, /*mv=*/true)});
+    EXPECT_TRUE(mover.canMoveFrom(P11));
+    EXPECT_FALSE(mover.canMoveFrom(P12)) << "no mark on that group";
+    EXPECT_FALSE(mover.canMoveFrom(P21));
+    PlayerAccess byObject(Role::Operator, {object(O1, false, false, /*mv=*/true)});
+    EXPECT_TRUE(byObject.canMoveFrom(P11));
+    EXPECT_TRUE(byObject.canMoveFrom(P12)) << "an object mark covers its groups";
+    EXPECT_FALSE(byObject.canMoveFrom(P21));
+    PlayerAccess viewer(Role::Viewer, {object(O1, true, true, true, true)});
+    EXPECT_FALSE(viewer.canMoveFrom(P11));
+    PlayerAccess admin(Role::Admin, {});
+    EXPECT_TRUE(admin.canMoveFrom(P11));
+    EXPECT_TRUE(admin.canMoveFrom(Place{}));
+    EXPECT_FALSE(mover.canMoveFrom(Place{})) << "a screen with no known place is for administrators";
+}
+
+TEST(PlayerAccess, WhatTheButtonPromisesIsWhatTheMoveDecides) {
+    // canMove() is canMoveFrom() on both ends inside one object: the two cannot drift apart.
+    PlayerAccess a(Role::Operator, {group(G11, false, true), group(G12, false, true)});
+    EXPECT_EQ(a.canMove(P11, P12), a.canMoveFrom(P11) && a.canMoveFrom(P12));
+    PlayerAccess half(Role::Operator, {group(G11, false, true)});
+    EXPECT_EQ(half.canMove(P11, P12), half.canMoveFrom(P11) && half.canMoveFrom(P12));
+}
+
 TEST(PlayerAccess, MovingNeedsTheMarkOnBothGroups) {
     PlayerAccess both(Role::Operator, {group(G11, false, /*mv=*/true), group(G12, false, /*mv=*/true)});
     EXPECT_TRUE(both.canMove(P11, P12));

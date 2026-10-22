@@ -983,6 +983,11 @@ int main(int argc, char* argv[]) {
             }
         };
         auto broker_hook = std::make_shared<BrokerHook>();
+        // The broker page is told when the link or the revocation file changes, so it
+        // does not have to ask every few seconds.
+        const auto announce_broker_change = [&event_bus]() {
+            event_bus.publish(liveqx::events::EventType::PlayersBrokerStatus, -1, nlohmann::json::object());
+        };
         std::unique_ptr<liveqx::mqtt::BrokerLink> broker_link;
         std::unique_ptr<liveqx::players::CrlPublisher> crl_publisher;   // the revocation list for the broker
         std::unique_ptr<liveqx::players::CommandService> command_service;
@@ -1183,6 +1188,7 @@ int main(int argc, char* argv[]) {
                 if (ccfg.value("mode", std::string("off")) == "local") {
                     liveqx::players::CrlPublisherOptions co;
                     co.path = ccfg.value("path", paths.brokerCrlFile().string());
+                    co.on_change = announce_broker_change;
                     co.next_update_days   = std::clamp(ccfg.value("next_update_days", 30), 2, 365);
                     co.refresh_interval_s = std::clamp<std::int64_t>(ccfg.value("refresh_hours", 24), 1, 24 * 7) * 3600;
                     const auto ca_dir = paths.deviceCaDir();
@@ -1217,6 +1223,7 @@ int main(int argc, char* argv[]) {
                 bcfg = cfg["players"]["broker"];
             if (bcfg.value("enabled", false)) {
                 liveqx::mqtt::BrokerLinkOptions bo;
+                bo.on_change = announce_broker_change;
                 // The file gives the defaults; what an administrator set from the interface wins.
                 liveqx::mqtt::BrokerConnection base;
                 base.host                 = bcfg.value("host", std::string("127.0.0.1"));

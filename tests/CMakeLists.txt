@@ -98,6 +98,7 @@ add_executable(liveqx-tests
     test_players_db.cpp
     test_players_service.cpp
     test_client_ip.cpp
+    test_text_fold.cpp
     test_revocation_list.cpp
     test_device_api.cpp
     test_renew_service.cpp

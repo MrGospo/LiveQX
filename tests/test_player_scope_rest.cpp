@@ -289,6 +289,73 @@ TEST(PlayerScopeRest, TheTreeShowsTheGrantedObjectAndGroupsAndNothingElse) {
     EXPECT_TRUE(tree(none).empty());
 }
 
+TEST(PlayerScopeRest, TheTreeAndTheCardTellWhatThePersonMayDo) {
+    ScopeFixture f(kBasePort + 28);
+    auto admin = f.person("root", sa::Role::Admin);
+    auto mover = f.person("mover", sa::Role::Operator);
+    auto plain = f.person("plain", sa::Role::Operator);
+    auto view  = f.person("view", sa::Role::Viewer);
+    ASSERT_EQ(f.putGrants(admin, mover.id, json::array({ScopeFixture::grant("group", f.G11, true, false, true)}))->status, 200);
+    ASSERT_EQ(f.putGrants(admin, plain.id, json::array({ScopeFixture::grant("group", f.G11)}))->status, 200);
+    ASSERT_EQ(f.putGrants(admin, view.id, json::array({ScopeFixture::grant("object", f.O1)}))->status, 200);
+    auto cli = f.client();
+
+    auto firstGroup = [&](const ScopeFixture::Person& who) {
+        auto r = cli.Get("/api/player-objects", bearer(who.token));
+        EXPECT_TRUE(r);
+        const json body = json::parse(r->body);
+        return body["objects"][0];
+    };
+    auto g = firstGroup(mover)["groups"][0];
+    EXPECT_EQ(g["can"]["move"], true);
+    EXPECT_EQ(g["can"]["command_group"], true);
+    EXPECT_EQ(firstGroup(mover)["can"]["command_object"], false) << "a group mark does not command the whole object";
+    EXPECT_EQ(firstGroup(plain)["groups"][0]["can"]["move"], false);
+    EXPECT_EQ(firstGroup(plain)["groups"][0]["can"]["command_group"], false);
+    EXPECT_EQ(firstGroup(view)["groups"][0]["can"]["move"], false) << "a viewer never moves";
+    for (const auto& gr : firstGroup(admin)["groups"]) EXPECT_EQ(gr["can"]["move"], true);
+    EXPECT_EQ(firstGroup(admin)["can"]["command_object"], true);
+
+    auto card = [&](const ScopeFixture::Person& who) {
+        auto r = cli.Get(("/api/players/" + f.P11).c_str(), bearer(who.token));
+        EXPECT_TRUE(r);
+        EXPECT_EQ(r ? r->status : 0, 200);
+        return json::parse(r->body)["can"];
+    };
+    EXPECT_EQ(card(mover)["move"], true);
+    EXPECT_EQ(card(mover)["command"], true);
+    EXPECT_EQ(card(plain)["move"], false);
+    EXPECT_EQ(card(plain)["command"], true) << "an operator with access commands one screen";
+    EXPECT_EQ(card(view)["move"], false);
+    EXPECT_EQ(card(view)["command"], false) << "a viewer only looks";
+    EXPECT_EQ(card(admin)["move"], true);
+}
+
+TEST(PlayerScopeRest, WhatTheCardSaysIsWhatTheServerDoes) {
+    // The flag is not decoration: the button the interface shows works, the one it hides is refused.
+    ScopeFixture f(kBasePort + 29);
+    auto admin = f.person("root", sa::Role::Admin);
+    auto mover = f.person("mover", sa::Role::Operator);
+    auto plain = f.person("plain", sa::Role::Operator);
+    const auto both = json::array({ScopeFixture::grant("group", f.G11, false, false, true),
+                                   ScopeFixture::grant("group", f.G12, false, false, true)});
+    ASSERT_EQ(f.putGrants(admin, mover.id, both)->status, 200);
+    ASSERT_EQ(f.putGrants(admin, plain.id, json::array({ScopeFixture::grant("group", f.G11),
+                                                        ScopeFixture::grant("group", f.G12)}))->status, 200);
+    auto cli = f.client();
+    auto may = [&](const ScopeFixture::Person& who) {
+        return json::parse(cli.Get(("/api/players/" + f.P11).c_str(), bearer(who.token))->body)["can"]["move"].get<bool>();
+    };
+    auto move = [&](const ScopeFixture::Person& who) {
+        return cli.Put(("/api/players/" + f.P11 + "/group").c_str(), bearer(who.token),
+                       json{{"group_id", f.G12}}.dump(), "application/json")->status;
+    };
+    EXPECT_FALSE(may(plain));
+    EXPECT_EQ(move(plain), 403);
+    EXPECT_TRUE(may(mover));
+    EXPECT_EQ(move(mover), 200);
+}
+
 TEST(PlayerScopeRest, OnlyAnAdministratorManagesRights) {
     ScopeFixture f(kBasePort + 5);
     auto admin = f.person("root", sa::Role::Admin);

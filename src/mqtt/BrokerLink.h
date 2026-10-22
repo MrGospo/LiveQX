@@ -63,6 +63,9 @@ struct BrokerLinkOptions {
     // messages go. Called on the client's thread: keep it short.
     std::vector<std::string> subscriptions;
     std::function<void(const Message&)> on_message;
+    // Called (without any lock held) when what status() reports has changed: the
+    // state or its reason, or the result of a reconciliation. Keep it short.
+    std::function<void()> on_change;
 };
 
 struct BrokerLinkStatus {

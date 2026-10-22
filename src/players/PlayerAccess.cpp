@@ -54,16 +54,19 @@ bool PlayerAccess::canCommandObject(std::int64_t object_id) const {
     return o && o->can_command_object;
 }
 
+bool PlayerAccess::canMoveFrom(const Place& p) const {
+    if (isAdmin()) return true;
+    if (!operatorOrAbove() || !p.known()) return false;
+    if (auto* g = groupGrant(*p.group_id); g && g->can_move) return true;
+    if (auto* o = objectGrant(*p.object_id); o && o->can_move) return true;
+    return false;
+}
+
 bool PlayerAccess::canMove(const Place& from, const Place& to) const {
     if (isAdmin()) return true;
-    if (!operatorOrAbove() || !from.known() || !to.known()) return false;
+    if (!from.known() || !to.known()) return false;
     if (*from.object_id != *to.object_id) return false;          // between objects: an administrator
-    auto holds = [&](const Place& p) {
-        if (auto* g = groupGrant(*p.group_id); g && g->can_move) return true;
-        if (auto* o = objectGrant(*p.object_id); o && o->can_move) return true;
-        return false;
-    };
-    return holds(from) && holds(to);
+    return canMoveFrom(from) && canMoveFrom(to);
 }
 
 bool PlayerAccess::canViewAudit(const Place& p) const {

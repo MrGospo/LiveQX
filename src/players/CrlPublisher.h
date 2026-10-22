@@ -47,6 +47,8 @@ struct CrlPublisherOptions {
     // Empty = there is nobody to tell (the file is written all the same).
     std::function<std::string()> reload;
     std::function<std::int64_t()> now;           // unix seconds; null = real clock
+    // Called (no lock held) after each attempt, so a page that shows the status can refresh. Keep it short.
+    std::function<void()> on_change;
 };
 
 struct CrlStatus {

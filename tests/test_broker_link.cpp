@@ -303,6 +303,47 @@ TEST(BrokerLink, AskingFromTheMessageHandlerDoesNotDeadlockOrBlock) {
     EXPECT_LT(std::chrono::steady_clock::now() - t0, 2s);
 }
 
+TEST(BrokerLink, ThePageIsToldWhenTheStateChangesAndNotWhileNothingDoes) {
+    Rig rig;
+    rig.identity_ready = false;
+    std::atomic<int> told{0};
+    auto o = rig.options();
+    o.on_change = [&] { ++told; };
+    BrokerLink link(std::move(o));
+    link.start();
+    ASSERT_TRUE(waitFor([&] { return !link.status().detail.empty(); }));
+    const int waiting = told.load();
+    EXPECT_GE(waiting, 1) << "waiting, with its reason, is a change from the start";
+
+    // The same reason again and again (the link retries every second) is not news.
+    std::this_thread::sleep_for(2500ms);
+    EXPECT_EQ(told.load(), waiting);
+
+    { std::lock_guard<std::mutex> lk(rig.mu); rig.identity_ready = true; }
+    link.requestSync();
+    ASSERT_TRUE(waitFor([&] { return link.status().last_reconcile_ok; }));
+    EXPECT_GT(told.load(), waiting) << "connecting, connected and the reconciliation each reach the page";
+    link.stop();
+}
+
+TEST(BrokerLink, TheResultOfAReconciliationReachesThePageToo) {
+    Rig rig;
+    rig.setWanted({A});
+    std::atomic<int> told{0};
+    auto o = rig.options();
+    o.on_change = [&] { ++told; };
+    BrokerLink link(std::move(o));
+    link.start();
+    ASSERT_TRUE(waitFor([&] { return link.status().last_reconcile_ok; }));
+    ASSERT_TRUE(waitFor([&] { return link.status().state == "connected"; }));
+    std::this_thread::sleep_for(300ms);
+    const int before = told.load();
+    rig.setWanted({A, B});
+    link.requestSync();
+    ASSERT_TRUE(waitFor([&] { return told.load() > before; })) << "a pass that changed nothing about the state still moves its time";
+    link.stop();
+}
+
 TEST(BrokerLink, TheStatusIsShownAsTheInterfaceNeedsIt) {
     liveqx::mqtt::BrokerLinkStatus st;
     st.state = "waiting";

@@ -266,6 +266,23 @@ TEST_F(CrlPublisherTest, WithoutAListForItsGenerationEveryCertificateOfThatGener
         << "no list for the issuer: not accepted";
 }
 
+TEST_F(CrlPublisherTest, EveryAttemptIsAnnouncedWhetherItWorkedOrNot) {
+    enroll(1, "a");
+    int told = 0;
+    auto o = options(dir_ / "crl.pem");
+    o.on_change = [&] { ++told; };
+    CrlPublisher pub(*db_, std::move(o));
+    ASSERT_TRUE(pub.publishNow().last_ok);
+    EXPECT_EQ(told, 1);
+    // A directory where the file should be: the attempt fails, and that is news as well.
+    auto bad = options(dir_);
+    int told_bad = 0;
+    bad.on_change = [&] { ++told_bad; };
+    CrlPublisher pub_bad(*db_, std::move(bad));
+    EXPECT_FALSE(pub_bad.publishNow().last_ok);
+    EXPECT_EQ(told_bad, 1);
+}
+
 TEST_F(CrlPublisherTest, EachPublicationCarriesANewListNumberAndTheUsualTimeToLive) {
     enroll(1, "a");
     CrlPublisher pub(*db_, options(dir_ / "crl.pem"));
