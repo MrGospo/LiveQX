@@ -297,3 +297,36 @@ export const playersListHandlers = [
     });
   }),
 ];
+
+// ─── A person's rights on screens ──────────────────────────────────────────────
+// Kept in memory per user; the revision changes with every save, and a save made
+// with an old revision is refused the way the real server refuses it.
+type MockGrant = { scope: 'object' | 'group'; id: number; can_command_group: boolean; can_command_object: boolean; can_move: boolean; can_view_audit: boolean };
+const grantsOf = new Map<number, { grants: MockGrant[]; revision: number }>();
+const grantsFor = (uid: number) => {
+  if (!grantsOf.has(uid)) grantsOf.set(uid, { grants: [{ scope: 'group', id: 1, can_command_group: true, can_command_object: false, can_move: true, can_view_audit: false }], revision: 1 });
+  return grantsOf.get(uid)!;
+};
+const named = (g: MockGrant) => {
+  const grp = g.scope === 'group' ? groups.find(x => x.id === g.id) : undefined;
+  const obj = objects.find(x => x.id === (g.scope === 'object' ? g.id : grp?.object_id));
+  const exists = g.scope === 'object' ? !!obj : !!grp;
+  return exists ? { ...g, name: g.scope === 'object' ? obj!.name : grp!.name } : { ...g, missing: true };
+};
+
+export const playerGrantsHandlers = [
+  http.get('/api/auth/users/:id/player-grants', async ({ params }) => {
+    await delay(150);
+    const e = grantsFor(Number(params.id));
+    return HttpResponse.json({ grants: e.grants.map(named), revision: `r${e.revision}` });
+  }),
+  http.put('/api/auth/users/:id/player-grants', async ({ params, request }) => {
+    await delay(200);
+    const uid = Number(params.id);
+    const e = grantsFor(uid);
+    const b = await request.json() as { grants: MockGrant[]; revision?: string };
+    if (b.revision !== undefined && b.revision !== `r${e.revision}`) return HttpResponse.json({ error: 'grants_changed' }, { status: 409 });
+    e.grants = b.grants; e.revision += 1;
+    return HttpResponse.json({ grants: e.grants.map(named), revision: `r${e.revision}` });
+  }),
+];

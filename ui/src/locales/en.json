@@ -717,6 +717,42 @@
     "role": "Role",
     "tabOverview": "Overview",
     "tabGrants": "Channel grants",
+    "tabPlayers": "Screens",
+    "playerGrants": {
+      "lead": "Rights on screens are given here: which objects and groups a person sees and what else they may do there. They work as soon as they are saved, no re-login needed. Without any rights a person sees no screens.",
+      "viewerNote": "A viewer only looks: commands and moving screens are not available to them, only reading the journal can be given.",
+      "conflict": "Somebody else has changed this person's rights meanwhile. The current list is shown and your edits are not saved: make them again.",
+      "nothingGiven": "Nothing is given yet: the person sees no screens.",
+      "noPlaces": "There are no objects or groups yet. Create them first under Screens → Objects and groups.",
+      "loadFailed": "Could not load the rights. The screens module may not be connected.",
+      "dropped_one": "{{count}} right pointed at a deleted place; it will be removed when you save.",
+      "dropped_other": "{{count}} rights pointed at deleted places; they will be removed when you save.",
+      "inertStored": "Commands or moving are stored for this viewer: they do nothing. Saving removes them, so they cannot come alive if the person is made an operator later.",
+      "viaObject": "access through the object",
+      "reset": "Discard edits",
+      "saved": "Rights saved",
+      "col": {
+        "place": "Place",
+        "access": "Access",
+        "can_command_group": "Command a group",
+        "can_command_object": "Command an object",
+        "can_move": "Move",
+        "can_view_audit": "Audit"
+      },
+      "hint": {
+        "access": "See the screens of this place. An operator with access may control a single screen. A right on an object covers all its groups, future ones too.",
+        "can_command_group": "Send a command to every screen of the group at once (on an object: any of its groups).",
+        "can_command_object": "Send a command to every screen of the object at once. Implies commanding the object's groups.",
+        "can_move": "Move screens between groups. The mark is needed on both groups, and only an administrator moves between objects.",
+        "can_view_audit": "Read the journal of actions about this place."
+      },
+      "errors": {
+        "unknown_scope": "The object or group has been deleted. The list is refreshed, try again.",
+        "flag_not_allowed_for_role": "A viewer cannot be given commands or moving.",
+        "too_many_grants": "Too many rights entries.",
+        "unknown": "Could not save the rights."
+      }
+    },
     "edit": "Edit",
     "searchPlaceholder": "Search username / email",
     "roleAny": "Role: any",

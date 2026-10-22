@@ -8,6 +8,7 @@ import { Block } from '@/components/Block';
 import { RoleBadge, SourceBadge } from '@/components/HealthBadge';
 import { fmtDate, fmtTime } from '@/lib/format';
 import { useToast } from '@/hooks/useToast';
+import { PlayerGrantsTab } from './PlayerGrantsTab';
 
 // ─── Grants Tab ───────────────────────────────────────────────────────────────
 function GrantsTab({ userId }: { userId: number }) {
@@ -138,7 +139,7 @@ export default function UserDetailPage() {
   const { t } = useTranslation();
   const uid = Number(id);
   const { data: user, isLoading } = useUser(uid);
-  const [tab, setTab] = React.useState<'overview'|'grants'>('overview');
+  const [tab, setTab] = React.useState<'overview'|'grants'|'players'>('overview');
 
   if (isLoading) return <div className="p-7"><div className="h-48 bg-surface2 rounded-xl animate-pulse" /></div>;
   if (!user) return <div className="p-7 text-[var(--text-muted)]">{t('users.notFound')}</div>;
@@ -160,7 +161,7 @@ export default function UserDetailPage() {
           <SourceBadge source={user.source} />
         </div>
         <div className="flex gap-0 -mb-px">
-          {([['overview', t('users.tabOverview')], ...(showGrantsTab ? [['grants', t('users.tabGrants')]] : [])] as [string, string][]).map(([id, label]) => (
+          {([['overview', t('users.tabOverview')], ...(showGrantsTab ? [['grants', t('users.tabGrants')], ['players', t('users.tabPlayers')]] : [])] as [string, string][]).map(([id, label]) => (
             <button key={id} onClick={() => setTab(id as typeof tab)}
               className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${tab === id ? 'text-[var(--accent)] border-[var(--accent)]' : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text-primary)]'}`}>
               {label}
@@ -169,9 +170,10 @@ export default function UserDetailPage() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-7 max-w-2xl">
+      <div className={`flex-1 overflow-y-auto p-7 ${tab === 'players' ? 'max-w-5xl' : 'max-w-2xl'}`}>
         {tab === 'overview' && <OverviewTab user={user} uid={uid} />}
         {tab === 'grants' && showGrantsTab && <GrantsTab userId={uid} />}
+        {tab === 'players' && showGrantsTab && <PlayerGrantsTab userId={uid} role={user.role as 'viewer' | 'operator'} />}
       </div>
     </div>
   );

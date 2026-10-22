@@ -395,3 +395,44 @@ export const usePlayerActions = () => {
     }),
   };
 };
+
+// ─── A person's rights on screens (GET/PUT /api/auth/users/{uid}/player-grants) ──
+
+export interface UserPlayerGrant {
+  scope:              'object' | 'group';
+  id:                 number;
+  can_command_group:  boolean;
+  can_command_object: boolean;
+  can_move:           boolean;
+  can_view_audit:     boolean;
+  name?:              string;
+  object_id?:         number;
+  object_name?:       string;
+  missing?:           boolean;          // its group or object has been deleted since
+}
+
+// `revision` is the fingerprint of the list as read; a save sends it back, and the server
+// refuses (409 grants_changed) when somebody else has changed the rights in between.
+export interface UserPlayerGrants { grants: UserPlayerGrant[]; revision: string }
+
+export type UserPlayerGrantInput = Pick<UserPlayerGrant,
+  'scope' | 'id' | 'can_command_group' | 'can_command_object' | 'can_move' | 'can_view_audit'>;
+
+const grantsKey = (uid: number) => ['players-admin', 'grants', uid] as const;
+
+export const useUserPlayerGrants = (uid: number) =>
+  useQuery({
+    queryKey: grantsKey(uid),
+    queryFn: () => api.get<UserPlayerGrants>(`/api/auth/users/${uid}/player-grants`),
+    staleTime: 0,                       // always what the server holds now: this is what is about to be replaced
+    gcTime: 0,
+  });
+
+export const useSaveUserPlayerGrants = (uid: number) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { grants: UserPlayerGrantInput[]; revision?: string }) =>
+      api.put<UserPlayerGrants>(`/api/auth/users/${uid}/player-grants`, v),
+    onSuccess: (saved) => { qc.setQueryData(grantsKey(uid), saved); },
+  });
+};
