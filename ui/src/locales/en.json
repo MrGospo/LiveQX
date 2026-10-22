@@ -11,6 +11,7 @@
     "docs": "Knowledge Base",
     "players": "Screens",
     "playersSettings": "Settings",
+    "playersObjects": "Objects and groups",
     "playersBroker": "Broker",
     "settingsUsers": "Users",
     "settingsLdap": "LDAP",
@@ -1478,6 +1479,59 @@
     }
   },
   "players": {
+    "objects": {
+      "title": "Objects and groups",
+      "lead": "An object is a place where screens stand, such as a shop floor or a warehouse. Inside an object, screens are collected into groups. Rights and commands are given by these places.",
+      "addObject": "Add object",
+      "addGroup": "Add group",
+      "noGroups": "This object has no groups yet. A screen cannot be enrolled without a group.",
+      "playersCount_one": "{{count}} screen",
+      "playersCount_other": "{{count}} screens",
+      "renameObject": "Rename object \"{{name}}\"",
+      "renameGroup": "Rename group \"{{name}}\"",
+      "deleteObject": "Delete object \"{{name}}\"",
+      "deleteGroup": "Delete group \"{{name}}\"",
+      "deleteObjectBlocked": "Object \"{{name}}\" cannot be deleted while it has groups. Delete the groups first.",
+      "deleteGroupBlocked": "Group \"{{name}}\" cannot be deleted while it has screens. Move the screens to another group first.",
+      "loadFailed": "Could not load objects and groups.",
+      "empty": {
+        "title": "No objects yet",
+        "text": "Create the first object, then add a group to it — after that screens can be enrolled."
+      },
+      "dialog": {
+        "createObject": "New object",
+        "renameObject": "Rename object",
+        "createGroup": "New group in object \"{{object}}\"",
+        "renameGroup": "Rename group (object \"{{object}}\")",
+        "objectName": "Object name",
+        "groupName": "Group name",
+        "create": "Create"
+      },
+      "confirm": {
+        "deleteObjectTitle": "Delete the object?",
+        "deleteObject": "Object \"{{name}}\" will be deleted. Users' rights on it go too.",
+        "deleteGroupTitle": "Delete the group?",
+        "deleteGroup": "Group \"{{name}}\" in object \"{{object}}\" will be deleted. Users' rights on it go too."
+      },
+      "done": {
+        "objectCreated": "Object created",
+        "groupCreated": "Group created",
+        "renamed": "Name changed",
+        "deleted": "Deleted"
+      },
+      "nameErrors": {
+        "empty": "Enter a name",
+        "tooLong": "The name is too long: at most 120 bytes",
+        "badChars": "The name must not contain control characters"
+      },
+      "serverErrors": {
+        "name_taken": "This name is already used at this level",
+        "invalid_name": "The name is not acceptable: empty, too long or with control characters",
+        "not_empty": "Cannot delete: there is still something inside. Refresh the page and check",
+        "not_found": "Not found: it may have been deleted already. Refresh the page",
+        "storage_error": "The server could not save the change. Try again later"
+      }
+    },
     "units": {
       "seconds": "{{n}} s",
       "minutes": "{{n}} min",

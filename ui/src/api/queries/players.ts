@@ -148,3 +148,63 @@ export const useBrokerUpdate = () => {
     },
   });
 };
+
+// ─── Objects and groups (/api/player-objects, /api/player-groups) ─────────────
+
+export interface PlayerGroup {
+  id:         number;
+  object_id:  number;
+  name:       string;
+  created_at: number;
+  players:    number;
+}
+
+export interface PlayerObject {
+  id:         number;
+  name:       string;
+  created_at: number;
+  groups:     PlayerGroup[];
+}
+
+// A shared root so one invalidation refreshes the tree after any change; the
+// screens' own events also land here (a screen moving between groups changes counts).
+export const PLAYER_TREE_KEY = ['players', 'tree'] as const;
+
+export const usePlayerTree = () =>
+  useQuery({
+    queryKey: PLAYER_TREE_KEY,
+    queryFn: async () => (await api.get<{ objects: PlayerObject[] }>('/api/player-objects')).objects,
+    staleTime: 5_000,
+  });
+
+export const usePlayerTreeMutations = () => {
+  const qc = useQueryClient();
+  const refresh = () => qc.invalidateQueries({ queryKey: PLAYER_TREE_KEY });
+  return {
+    createObject: useMutation({
+      mutationFn: (name: string) => api.post<{ id: number; name: string }>('/api/player-objects', { name }),
+      onSuccess: refresh,
+    }),
+    renameObject: useMutation({
+      mutationFn: (v: { id: number; name: string }) => api.put(`/api/player-objects/${v.id}`, { name: v.name }),
+      onSuccess: refresh,
+    }),
+    deleteObject: useMutation({
+      mutationFn: (id: number) => api.delete(`/api/player-objects/${id}`),
+      onSuccess: refresh,
+    }),
+    createGroup: useMutation({
+      mutationFn: (v: { objectId: number; name: string }) =>
+        api.post<{ id: number; name: string }>(`/api/player-objects/${v.objectId}/groups`, { name: v.name }),
+      onSuccess: refresh,
+    }),
+    renameGroup: useMutation({
+      mutationFn: (v: { id: number; name: string }) => api.put(`/api/player-groups/${v.id}`, { name: v.name }),
+      onSuccess: refresh,
+    }),
+    deleteGroup: useMutation({
+      mutationFn: (id: number) => api.delete(`/api/player-groups/${id}`),
+      onSuccess: refresh,
+    }),
+  };
+};

@@ -48,7 +48,78 @@ const brokerStatus = () => ({
   },
 });
 
+// The tree of objects and groups, kept in memory like the rest. Deleting a group
+// with screens or an object with groups is refused the way the real server does.
+type MockGroup = { id: number; object_id: number; name: string; created_at: number; players: number };
+type MockObject = { id: number; name: string; created_at: number };
+let nextId = 10;
+let objects: MockObject[] = [
+  { id: 1, name: 'Торговый зал', created_at: nowSec() - 86400 },
+  { id: 2, name: 'Склад', created_at: nowSec() - 3600 },
+];
+let groups: MockGroup[] = [
+  { id: 1, object_id: 1, name: 'Касса', created_at: nowSec() - 86000, players: 3 },
+  { id: 2, object_id: 1, name: 'Витрина', created_at: nowSec() - 80000, players: 0 },
+];
+const nameOf = async (request: Request) => String(((await request.json()) as { name?: unknown }).name ?? '').trim();
+const bad = (code: string, status: number) => HttpResponse.json({ error: code }, { status });
+
 export const playersHandlers = [
+  http.get('/api/player-objects', async () => {
+    await delay(120);
+    return HttpResponse.json({
+      objects: objects.map(o => ({ ...o, groups: groups.filter(g => g.object_id === o.id) })),
+    });
+  }),
+  http.post('/api/player-objects', async ({ request }) => {
+    const name = await nameOf(request);
+    if (!name) return bad('invalid_name', 400);
+    if (objects.some(o => o.name === name)) return bad('name_taken', 409);
+    const o = { id: nextId++, name, created_at: nowSec() };
+    objects = [...objects, o];
+    return HttpResponse.json(o, { status: 201 });
+  }),
+  http.put('/api/player-objects/:id', async ({ request, params }) => {
+    const id = Number(params.id); const name = await nameOf(request);
+    if (!name) return bad('invalid_name', 400);
+    if (!objects.some(o => o.id === id)) return bad('not_found', 404);
+    if (objects.some(o => o.name === name && o.id !== id)) return bad('name_taken', 409);
+    objects = objects.map(o => (o.id === id ? { ...o, name } : o));
+    return HttpResponse.json({ id, name });
+  }),
+  http.delete('/api/player-objects/:id', async ({ params }) => {
+    const id = Number(params.id);
+    if (!objects.some(o => o.id === id)) return bad('not_found', 404);
+    if (groups.some(g => g.object_id === id)) return bad('not_empty', 409);
+    objects = objects.filter(o => o.id !== id);
+    return HttpResponse.json({ id });
+  }),
+  http.post('/api/player-objects/:id/groups', async ({ request, params }) => {
+    const objectId = Number(params.id); const name = await nameOf(request);
+    if (!name) return bad('invalid_name', 400);
+    if (!objects.some(o => o.id === objectId)) return bad('not_found', 404);
+    if (groups.some(g => g.object_id === objectId && g.name === name)) return bad('name_taken', 409);
+    const g = { id: nextId++, object_id: objectId, name, created_at: nowSec(), players: 0 };
+    groups = [...groups, g];
+    return HttpResponse.json(g, { status: 201 });
+  }),
+  http.put('/api/player-groups/:id', async ({ request, params }) => {
+    const id = Number(params.id); const name = await nameOf(request);
+    const cur = groups.find(g => g.id === id);
+    if (!name) return bad('invalid_name', 400);
+    if (!cur) return bad('not_found', 404);
+    if (groups.some(g => g.object_id === cur.object_id && g.name === name && g.id !== id)) return bad('name_taken', 409);
+    groups = groups.map(g => (g.id === id ? { ...g, name } : g));
+    return HttpResponse.json({ id, name });
+  }),
+  http.delete('/api/player-groups/:id', async ({ params }) => {
+    const id = Number(params.id); const cur = groups.find(g => g.id === id);
+    if (!cur) return bad('not_found', 404);
+    if (cur.players > 0) return bad('not_empty', 409);
+    groups = groups.filter(g => g.id !== id);
+    return HttpResponse.json({ id });
+  }),
+
   http.get('/api/players/settings', async () => { await delay(120); return HttpResponse.json(settings); }),
 
   http.put('/api/players/settings', async ({ request }) => {

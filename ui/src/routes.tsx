@@ -16,6 +16,7 @@ const CreateChannelPage        = React.lazy(() => import('@/features/channels/Cr
 const ChannelPreviewPage       = React.lazy(() => import('@/features/channels/ChannelPreviewPage'));
 
 
+const ObjectsPage               = React.lazy(() => import('@/features/players/ObjectsPage'));
 const PlayersSettingsPage      = React.lazy(() => import('@/features/players/PlayersSettingsPage'));
 const BrokerPage               = React.lazy(() => import('@/features/players/BrokerPage'));
 
@@ -106,6 +107,7 @@ export function AppRoutes() {
 
           {/* Screens (players) */}
           <Route path="/players"           element={<Navigate to="/players/settings" replace />} />
+          <Route path="/players/objects"   element={<RequireRole minRole="admin"><ObjectsPage /></RequireRole>} />
           <Route path="/players/settings"  element={<RequireRole minRole="admin"><PlayersSettingsPage /></RequireRole>} />
           <Route path="/players/broker"    element={<RequireRole minRole="admin"><BrokerPage /></RequireRole>} />
 
