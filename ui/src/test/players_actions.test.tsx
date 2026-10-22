@@ -20,7 +20,7 @@ vi.mock('@/stores/ui', () => ({
 }));
 
 const act = () => ({ mutateAsync: vi.fn(), reset: vi.fn(), isPending: false });
-const actions = { create: act(), reissueToken: act(), move: act(), revoke: act(), remove: act() };
+const actions = { create: act(), reissueToken: act(), reEnroll: act(), move: act(), revoke: act(), remove: act() };
 const treeState: { data?: PlayerObject[]; isLoading: boolean; isError: boolean } = { isLoading: false, isError: false };
 
 vi.mock('@/api/queries/players', async (orig) => {
@@ -208,7 +208,7 @@ describe('PlayerActions', () => {
 
   it('shows an administrator everything that fits the screen', () => {
     renderActions(player());
-    expect(buttons()).toEqual(['Move', 'Revoke', 'Delete']);
+    expect(buttons()).toEqual(['Move', 'Bind again', 'Revoke', 'Delete']);
   });
 
   it('offers a new token only to a screen that is not enrolled yet', () => {
@@ -216,9 +216,49 @@ describe('PlayerActions', () => {
     expect(buttons()).toEqual(['Move', 'New token', 'Revoke', 'Delete']);
   });
 
-  it('leaves only Delete on a revoked screen', () => {
+  it('leaves a revoked screen only the way back and Delete', () => {
     renderActions(player({ state: 'revoked', status: undefined }));
-    expect(buttons()).toEqual(['Delete']);
+    expect(buttons()).toEqual(['Bind again', 'Delete']);
+  });
+
+  it('binds an enrolled screen again, with the reason, and shows the new package', async () => {
+    const user = userEvent.setup();
+    actions.reEnroll.mutateAsync.mockResolvedValue(pkg());
+    renderActions(player());
+    await user.click(screen.getByRole('button', { name: 'Bind again' }));
+    expect(screen.getByText(/The old device stops working at once/)).toBeInTheDocument();
+    expect(screen.getByText(/the identifier is the same/)).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Reason (optional)'), '  display replaced ');
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Revoke and bind again' }));
+    expect(actions.reEnroll.mutateAsync).toHaveBeenCalledWith({ id: 'p1', reason: 'display replaced' });
+    expect((screen.getByLabelText('Pairing package') as HTMLTextAreaElement).value).toContain('SECRET-TOKEN-123');
+    await user.click(screen.getByLabelText('I have saved the package'));
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+    expect(actions.reEnroll.reset).toHaveBeenCalled();
+  });
+
+  it('tells a revoked screen apart: nothing new is revoked, the old certificates stay revoked', async () => {
+    const user = userEvent.setup();
+    renderActions(player({ state: 'revoked', status: undefined }));
+    await user.click(screen.getByRole('button', { name: 'Bind again' }));
+    expect(screen.getByText(/The earlier certificates stay revoked/)).toBeInTheDocument();
+    expect(screen.queryByText(/The old device stops working at once/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the dialog open with a plain message when the server refuses to bind again', async () => {
+    const user = userEvent.setup();
+    actions.reEnroll.mutateAsync.mockRejectedValue(new ApiClientError(409, 'not_configured'));
+    renderActions(player());
+    await user.click(screen.getByRole('button', { name: 'Bind again' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Revoke and bind again' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('not set up');
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('does not offer binding again to an operator', () => {
+    role = 'operator';
+    renderActions(player({ state: 'revoked', status: undefined }));
+    expect(buttons()).toEqual([]);
   });
 
   it('moves the screen to another group, offering all but the current one', async () => {

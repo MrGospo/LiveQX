@@ -351,6 +351,12 @@ export const usePlayerActions = () => {
       mutationFn: (id: string) => api.post<PairingPackage>(`/api/players/${enc(id)}/reissue-token`),
       onSuccess: refresh, gcTime: 0,
     }),
+    // Binds an enrolled or revoked screen again under the same identity.
+    reEnroll: useMutation({
+      mutationFn: (v: { id: string; reason?: string }) =>
+        api.post<PairingPackage>(`/api/players/${enc(v.id)}/re-enroll`, v.reason ? { reason: v.reason } : {}),
+      onSuccess: refresh, gcTime: 0,
+    }),
     move: useMutation({
       mutationFn: (v: { id: string; groupId: number }) => api.put(`/api/players/${enc(v.id)}/group`, { group_id: v.groupId }),
       onSuccess: refresh,

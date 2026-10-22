@@ -210,6 +210,16 @@ export const playersListHandlers = [
     if (s.state !== 'pending') return bad('not_pending', 409);
     return HttpResponse.json(pairing(s.id, s.name, s.clock_policy));
   }),
+  http.post('/api/players/:id/re-enroll', async ({ params }) => {
+    await delay(250);
+    const s = screenDb.find(x => x.id === params.id);
+    if (!s) return bad('not_found', 404);
+    if (s.state === 'pending') return bad('already_pending', 409);
+    screenDb = screenDb.map(x => (x.id === s.id
+      ? { ...x, state: 'pending' as const, revoked_at: undefined, revoke_reason: undefined, activated_at: undefined, status: undefined }
+      : x));
+    return HttpResponse.json(pairing(s.id, s.name, s.clock_policy));
+  }),
   http.post('/api/players/:id/revoke-cert', async ({ params, request }) => {
     await delay(200);
     const b = await request.json().catch(() => ({})) as { reason?: string };

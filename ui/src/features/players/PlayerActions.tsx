@@ -1,7 +1,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { ArrowRightLeft, KeyRound, ShieldOff, Trash2, X } from 'lucide-react';
+import { ArrowRightLeft, KeyRound, RefreshCw, ShieldOff, Trash2, X } from 'lucide-react';
 import {
   usePlayerActions, usePlayerTree,
   type PairingPackage, type Player,
@@ -26,7 +26,7 @@ function reasonProblem(raw: string): boolean {
   return /[\u0000-\u001f\u007f]/.test(raw);
 }
 
-type Mode = 'move' | 'token' | 'revoke' | 'delete';
+type Mode = 'move' | 'token' | 'reenroll' | 'revoke' | 'delete';
 
 function Shell({ title, pending, onClose, onSubmit, submitLabel, danger, submitDisabled, children }: {
   title: string; pending: boolean; onClose: () => void; onSubmit: () => void; submitLabel: string;
@@ -79,7 +79,7 @@ export function PlayerActions({ player }: { player: Player }) {
   const canMove = isAdmin || role === 'operator';
   const status = screenStatus(player);
   const tree = usePlayerTree();
-  const { move, reissueToken, revoke, remove } = usePlayerActions();
+  const { move, reissueToken, reEnroll, revoke, remove } = usePlayerActions();
 
   const [mode, setMode] = React.useState<Mode | null>(null);
   const [target, setTarget] = React.useState('');
@@ -98,6 +98,7 @@ export function PlayerActions({ player }: { player: Player }) {
   const groups = (tree.data ?? []).filter(o => o.groups.some(g => g.id !== player.group_id));
   const showMove = canMove && status !== 'revoked';
   const showToken = isAdmin && status === 'pending';
+  const showReEnroll = isAdmin && (status === 'online' || status === 'offline' || status === 'revoked');
   const showRevoke = isAdmin && status !== 'revoked';
 
   const errorLine = errorCode && (
@@ -111,6 +112,7 @@ export function PlayerActions({ player }: { player: Player }) {
       <div className="flex flex-wrap gap-2">
         {showMove && <ActionButton onClick={() => open('move')} icon={<ArrowRightLeft size={14} />} label={t('players.actions.move')} />}
         {showToken && <ActionButton onClick={() => open('token')} icon={<KeyRound size={14} />} label={t('players.actions.token')} />}
+        {showReEnroll && <ActionButton onClick={() => open('reenroll')} icon={<RefreshCw size={14} />} label={t('players.actions.reenroll')} />}
         {showRevoke && <ActionButton danger onClick={() => open('revoke')} icon={<ShieldOff size={14} />} label={t('players.actions.revoke')} />}
         {isAdmin && <ActionButton danger onClick={() => open('delete')} icon={<Trash2 size={14} />} label={t('players.actions.delete')} />}
       </div>
@@ -146,6 +148,25 @@ export function PlayerActions({ player }: { player: Player }) {
                  catch (e) { fail(e); }
                }}>
           <p className="text-sm text-[var(--text-primary)] m-0">{t('players.actions.tokenText')}</p>
+          {errorLine}
+        </Shell>
+      )}
+
+      {mode === 'reenroll' && (
+        <Shell danger title={t('players.actions.reenrollTitle', { name: player.name })} pending={reEnroll.isPending} onClose={close}
+               submitLabel={t('players.actions.reenrollSubmit')} submitDisabled={reasonProblem(reason)}
+               onSubmit={async () => {
+                 setErrorCode(null);
+                 try { setGiven(await reEnroll.mutateAsync({ id: player.id, reason: reason.trim() || undefined })); setMode(null); }
+                 catch (e) { fail(e); }
+               }}>
+          <p className="text-sm text-[var(--text-primary)] m-0">
+            {status === 'revoked' ? t('players.actions.reenrollTextRevoked') : t('players.actions.reenrollText')}
+          </p>
+          <p className="text-sm text-[var(--text-muted)] m-0">{t('players.actions.reenrollKeeps')}</p>
+          <TextField id="preenroll-reason" label={t('players.actions.reason')} hint={t('players.actions.reasonHint')}
+                     value={reason} onChange={setReason}
+                     error={reasonProblem(reason) ? t('players.actions.reasonBad') : null} disabled={reEnroll.isPending} />
           {errorLine}
         </Shell>
       )}
@@ -186,7 +207,7 @@ export function PlayerActions({ player }: { player: Player }) {
 
       {given && (
         <PairingPackageDialog pkg={given} playerName={player.name}
-                              onClose={() => { reissueToken.reset(); setGiven(null); }} />
+                              onClose={() => { reissueToken.reset(); reEnroll.reset(); setGiven(null); }} />
       )}
     </>
   );
