@@ -1,7 +1,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { MonitorSmartphone, Building2, Layers, Search } from 'lucide-react';
+import { MonitorSmartphone, Building2, Layers, Search, Plus } from 'lucide-react';
 import { clsx } from 'clsx';
 import {
   usePlayers, usePlayerTree, PLAYER_LIST_LIMIT,
@@ -10,9 +10,11 @@ import {
 import { Block } from '@/components/Block';
 import { EmptyState } from '@/components/EmptyState';
 import { SubNav } from '@/components/SubNav';
+import { useAuthStore } from '@/stores/auth';
 import { PLAYERS_NAV } from './nav';
 import { inputCls } from './fields';
 import { relativeFromNow, absoluteTime } from './format';
+import { AddPlayerDialog } from './AddPlayerDialog';
 import { StatusBadge, screenStatus, type ScreenStatus } from './status';
 
 // The list of screens. On the left the tree "all → object → group" picks the
@@ -73,6 +75,8 @@ export default function PlayersPage() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
+  const isAdmin = useAuthStore(s => s.role) === 'admin';
+  const [adding, setAdding] = React.useState(false);
 
   const num = (k: string) => { const v = params.get(k); return v && /^\d+$/.test(v) ? Number(v) : undefined; };
   const selection: Selection = { objectId: num('object'), groupId: num('group') };
@@ -119,6 +123,12 @@ export default function PlayersPage() {
       <div className="flex items-center gap-3">
         <MonitorSmartphone size={20} className="text-[var(--accent)]" />
         <h1 className="text-xl font-semibold text-[var(--text-primary)] m-0">{t('players.list.title')}</h1>
+        {isAdmin && (
+          <button type="button" onClick={() => setAdding(true)}
+                  className="ml-auto inline-flex items-center gap-1.5 px-3 py-2 text-sm text-white rounded-md bg-[var(--accent)] hover:bg-[var(--accent-hover)]">
+            <Plus size={14} /> {t('players.add.button')}
+          </button>
+        )}
       </div>
 
       <div className="grid gap-5 md:grid-cols-[16rem_1fr] items-start">
@@ -207,6 +217,8 @@ export default function PlayersPage() {
           )}
         </div>
       </div>
+
+      {adding && <AddPlayerDialog objects={tree.data ?? []} initialGroupId={selection.groupId} onClose={() => setAdding(false)} />}
     </div>
   );
 }

@@ -29,6 +29,7 @@ vi.mock('@/api/queries/players', async (orig) => {
     usePlayerTree: () => treeState,
     usePlayer: () => oneState,
     usePlayerCommands: () => cmdState,
+    usePlayerActions: () => { const a = { mutateAsync: vi.fn(), reset: vi.fn(), isPending: false }; return { create: a, reissueToken: a, move: a, revoke: a, remove: a }; },
   };
 });
 

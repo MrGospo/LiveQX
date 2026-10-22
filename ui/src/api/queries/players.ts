@@ -317,3 +317,52 @@ export const usePlayerCommands = (id: string) =>
     queryFn: async () => (await api.get<{ commands: PlayerCommand[] }>(`/api/players/${encodeURIComponent(id)}/commands`)).commands,
     staleTime: 5_000,
   });
+
+// ─── Actions on screens ───────────────────────────────────────────────────────
+
+// The pairing package: everything a new screen needs, the one-time token included.
+// The server shows it once, so it is never put in a query cache or in storage.
+export interface PairingPackage {
+  schema:          number;
+  player_id:       string;
+  server_url:      string;
+  ca_cert_pem:     string;
+  device_api_url:  string;
+  mqtt_broker_url: string;
+  bootstrap_token: string;
+  token_expires_at: string;
+  clock_policy:    ClockPolicy;
+  ntp_hint?:       unknown;
+}
+
+export interface NewPlayerInput { name: string; group_id: number; clock_policy?: ClockPolicy }
+
+export const usePlayerActions = () => {
+  const qc = useQueryClient();
+  const refresh = () => qc.invalidateQueries({ queryKey: ['players'] });
+  const enc = encodeURIComponent;
+  return {
+    // gcTime 0: a package must not linger in the cache once the dialog that shows it is gone.
+    create: useMutation({
+      mutationFn: (v: NewPlayerInput) => api.post<PairingPackage>('/api/players', v),
+      onSuccess: refresh, gcTime: 0,
+    }),
+    reissueToken: useMutation({
+      mutationFn: (id: string) => api.post<PairingPackage>(`/api/players/${enc(id)}/reissue-token`),
+      onSuccess: refresh, gcTime: 0,
+    }),
+    move: useMutation({
+      mutationFn: (v: { id: string; groupId: number }) => api.put(`/api/players/${enc(v.id)}/group`, { group_id: v.groupId }),
+      onSuccess: refresh,
+    }),
+    revoke: useMutation({
+      mutationFn: (v: { id: string; reason?: string }) =>
+        api.post<{ revoked_certs: number }>(`/api/players/${enc(v.id)}/revoke-cert`, v.reason ? { reason: v.reason } : {}),
+      onSuccess: refresh,
+    }),
+    remove: useMutation({
+      mutationFn: (id: string) => api.delete<{ revoked_certs: number }>(`/api/players/${enc(id)}`),
+      onSuccess: refresh,
+    }),
+  };
+};

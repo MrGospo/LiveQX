@@ -14,24 +14,13 @@ import { useEscClose } from '@/hooks/useEscClose';
 import { useToast } from '@/hooks/useToast';
 import { PLAYERS_NAV } from './nav';
 import { TextField } from './fields';
+import { nameProblem, trimName } from './names';
 
 // Objects (sites) and the groups inside them. A screen belongs to one group, a
 // group to one object; rights and commands are given by these places. Only an
 // administrator edits the tree. A place with something inside cannot be deleted:
 // the buttons say so up front, and the server refuses the same way if the page
 // was out of date.
-
-const MAX_NAME_BYTES = 120;                    // the server's limit is in bytes, not letters
-
-// Mirrors the server's cleanName: trimmed, not empty, no control characters, 120 bytes.
-function nameProblem(raw: string): 'empty' | 'tooLong' | 'badChars' | null {
-  const s = raw.replace(/^ +| +$/g, '');
-  if (!s) return 'empty';
-  if (new TextEncoder().encode(s).length > MAX_NAME_BYTES) return 'tooLong';
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f]/.test(s)) return 'badChars';
-  return null;
-}
 
 type Dialog =
   | { kind: 'createObject' }
@@ -65,7 +54,7 @@ function NameDialog({ title, label, initial, submitLabel, pending, serverError, 
     e.preventDefault();
     setTouched(true);
     if (problem) return;
-    onSubmit(value.replace(/^ +| +$/g, ''));
+    onSubmit(trimName(value));
   };
 
   return (

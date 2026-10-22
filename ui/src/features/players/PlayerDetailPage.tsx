@@ -12,11 +12,12 @@ import { Block } from '@/components/Block';
 import { SubNav } from '@/components/SubNav';
 import { PLAYERS_NAV } from './nav';
 import { absoluteTime, formatDuration, relativeFromNow } from './format';
+import { PlayerActions } from './PlayerActions';
 import { StatusBadge, screenStatus, describeEvent, commandTypeLabel } from './status';
 
 // One screen: where it stands now, its certificates, the commands sent to it and
-// its journal. This part only shows; what can be done to a screen (move, new
-// token, revoke, commands) is added on top of it.
+// its journal; the buttons above them (move, new token, revoke, delete) are
+// PlayerActions, shown to those who may use them.
 
 const CERT_SOON_DAYS = 60;           // the player renews itself 60–90 days before the end
 
@@ -151,6 +152,8 @@ export default function PlayerDetailPage() {
         <h1 className="text-xl font-semibold text-[var(--text-primary)] m-0">{p.name}</h1>
         <StatusBadge status={status} />
       </div>
+
+      <PlayerActions player={p} />
 
       {status === 'pending' && (
         <div role="status" className="flex gap-3 rounded-xl border border-[var(--warning)] bg-[var(--warning)]/10 p-4">

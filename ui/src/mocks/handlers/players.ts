@@ -180,12 +180,69 @@ const screens = () => [
   screen('3b1f0c9e-0000-4000-8000-000000000005', 'Старый экран', 2, 'revoked', false, 0),
 ];
 
+// The screens live in memory so that adding, moving and revoking show in the next read.
+let screenDb = screens();
+const pairing = (id: string, name: string, clockPolicy = 'strict') => ({
+  schema: 1, player_id: id, server_url: settings.server_url || 'https://liveqx.example.lan',
+  ca_cert_pem: '-----BEGIN CERTIFICATE-----\nMIIB…(sample)…\n-----END CERTIFICATE-----\n',
+  device_api_url: settings.device_api_url || 'https://liveqx.example.lan:8444',
+  mqtt_broker_url: settings.mqtt_broker_url || 'mqtts://liveqx.example.lan:8883',
+  bootstrap_token: `sample-token-for-${name}`,
+  token_expires_at: new Date(Date.now() + 7 * 86400_000).toISOString(),
+  clock_policy: clockPolicy,
+});
+
 export const playersListHandlers = [
+  http.post('/api/players', async ({ request }) => {
+    await delay(300);
+    const b = await request.json() as { name?: string; group_id?: number; clock_policy?: string };
+    if (!b.name || !b.name.trim()) return bad('invalid_name', 400);
+    if (!groups.some(g => g.id === b.group_id)) return bad('group_not_found', 404);
+    const id = crypto.randomUUID();
+    const row = screen(id, b.name.trim(), b.group_id ?? null, 'pending', false, 0);
+    screenDb = [...screenDb, { ...row, clock_policy: b.clock_policy ?? 'strict' }];
+    return HttpResponse.json(pairing(id, row.name, b.clock_policy), { status: 201 });
+  }),
+  http.post('/api/players/:id/reissue-token', async ({ params }) => {
+    await delay(200);
+    const s = screenDb.find(x => x.id === params.id);
+    if (!s) return bad('not_found', 404);
+    if (s.state !== 'pending') return bad('not_pending', 409);
+    return HttpResponse.json(pairing(s.id, s.name, s.clock_policy));
+  }),
+  http.post('/api/players/:id/revoke-cert', async ({ params, request }) => {
+    await delay(200);
+    const b = await request.json().catch(() => ({})) as { reason?: string };
+    const s = screenDb.find(x => x.id === params.id);
+    if (!s) return bad('not_found', 404);
+    screenDb = screenDb.map(x => (x.id === s.id
+      ? { ...x, state: 'revoked' as const, revoked_at: nowS(), revoke_reason: b.reason ?? 'revoked_by_admin', status: undefined }
+      : x));
+    return HttpResponse.json({ revoked_certs: 1 });
+  }),
+  http.delete('/api/players/:id', async ({ params }) => {
+    await delay(200);
+    if (!screenDb.some(x => x.id === params.id)) return bad('not_found', 404);
+    screenDb = screenDb.filter(x => x.id !== params.id);
+    return HttpResponse.json({ revoked_certs: 1 });
+  }),
+  http.put('/api/players/:id/group', async ({ params, request }) => {
+    await delay(200);
+    const b = await request.json() as { group_id?: number };
+    const g = groups.find(x => x.id === b.group_id);
+    if (!g) return bad('group_not_found', 404);
+    const s = screenDb.find(x => x.id === params.id);
+    if (!s) return bad('not_found', 404);
+    const o = objects.find(x => x.id === g.object_id);
+    const moved = { ...s, group_id: g.id, group_name: g.name, object_id: g.object_id, object_name: o?.name };
+    screenDb = screenDb.map(x => (x.id === s.id ? moved : x));
+    return HttpResponse.json(moved);
+  }),
   http.get('/api/players', async ({ request }) => {
     await delay(150);
     const u = new URL(request.url);
     const g = u.searchParams.get('group_id'); const o = u.searchParams.get('object_id');
-    const list = screens().filter(s => (!g || String(s.group_id) === g) && (!o || String(s.object_id) === o));
+    const list = screenDb.filter(s => (!g || String(s.group_id) === g) && (!o || String(s.object_id) === o));
     return HttpResponse.json({ players: list });
   }),
   http.get('/api/players/:id/commands', async ({ params }) => {
@@ -198,7 +255,7 @@ export const playersListHandlers = [
   }),
   http.get('/api/players/:id', async ({ params }) => {
     await delay(150);
-    const s = screens().find(x => x.id === params.id);
+    const s = screenDb.find(x => x.id === params.id);
     if (!s) return HttpResponse.json({ error: 'not_found' }, { status: 404 });
     const now = nowS();
     return HttpResponse.json({
