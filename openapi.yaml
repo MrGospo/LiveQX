@@ -4423,6 +4423,8 @@ paths:
         Admin. Что администратор выдал этому пользователю. Запись, чья группа или
         объект уже удалены, помечается `missing` (при удалении такие права
         снимаются сами).
+        `revision` — отпечаток текущего списка: тот же набор прав даёт тот же отпечаток
+        в любом порядке. Его возвращают в `PUT`, чтобы не затереть чужую правку.
       responses:
         '200':
           description: ok
@@ -4430,11 +4432,12 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [grants]
+                required: [grants, revision]
                 properties:
                   grants:
                     type: array
                     items: { $ref: '#/components/schemas/PlayerGrant' }
+                  revision: { type: string, description: 'Отпечаток списка (для PUT).' }
         '404':
           description: '`user_not_found`.'
           content:
@@ -4452,7 +4455,10 @@ paths:
         (`unknown_scope`); `can_command_object` только для `object`
         (`invalid_flag`); у Viewer не бывает `can_command_*` и `can_move`
         (`flag_not_allowed_for_role`); повтор одной области — `duplicate_grant`;
-        не более 500 записей. Право на объект действует на все его группы,
+        не более 500 записей. Необязательное `revision` из `GET`: если права с тех
+        пор изменил кто-то другой, замены не будет (`409 grants_changed`) — редактор
+        читает список заново. Без `revision` список заменяется без этой проверки.
+        Право на объект действует на все его группы,
         в том числе будущие. Команды на группу/объект и «всем» — этапы команд;
         «всем» только администратору.
         Audit event: `player.grants_update` (категория player).
@@ -4470,23 +4476,29 @@ paths:
                   items: { $ref: '#/components/schemas/PlayerGrantInput' }
       responses:
         '200':
-          description: The new list.
+          description: The new list and its revision.
           content:
             application/json:
               schema:
                 type: object
-                required: [grants]
+                required: [grants, revision]
                 properties:
                   grants:
                     type: array
                     items: { $ref: '#/components/schemas/PlayerGrant' }
+                  revision: { type: string }
         '400':
-          description: '`invalid_body`, `invalid_scope`, `invalid_id`, `invalid_flag`, `unknown_scope`, `flag_not_allowed_for_role`, `duplicate_grant`, `too_many_grants`.'
+          description: '`invalid_body`, `invalid_scope`, `invalid_id`, `invalid_flag`, `unknown_scope`, `flag_not_allowed_for_role`, `duplicate_grant`, `too_many_grants`, `invalid_revision`.'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '404':
           description: '`user_not_found`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`grants_changed` — права изменил кто-то другой, прочитайте список заново.'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

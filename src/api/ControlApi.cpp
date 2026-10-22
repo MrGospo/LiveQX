@@ -10,6 +10,7 @@
 #include <httplib.h>
 #include <iomanip>
 #include <mutex>
+#include <sodium.h>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <string_view>
@@ -3875,18 +3876,41 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         return j;
     };
 
+    // A short fingerprint of a person's list of rights, the same for the same rights in any
+    // order. The editor sends back the one it read; a different one means somebody else has
+    // changed the rights meanwhile, and the replacement is refused instead of overwriting theirs.
+    auto grantsRevision = [](std::vector<liveqx::auth::PlayerScopeGrant> grants) {
+        std::sort(grants.begin(), grants.end(), [](const auto& a, const auto& b) {
+            return std::make_pair(static_cast<int>(a.scope), a.scope_id) < std::make_pair(static_cast<int>(b.scope), b.scope_id);
+        });
+        std::string canon;
+        for (const auto& g : grants)
+            canon += std::to_string(static_cast<int>(g.scope)) + ":" + std::to_string(g.scope_id) + ":" +
+                     (g.can_command_group ? "1" : "0") + (g.can_command_object ? "1" : "0") +
+                     (g.can_move ? "1" : "0") + (g.can_view_audit ? "1" : "0") + ";";
+        unsigned char h[crypto_hash_sha256_BYTES];
+        crypto_hash_sha256(h, reinterpret_cast<const unsigned char*>(canon.data()), canon.size());
+        static const char* hex = "0123456789abcdef";
+        std::string out;
+        for (int i = 0; i < 8; ++i) { out.push_back(hex[h[i] >> 4]); out.push_back(hex[h[i] & 15]); }
+        return out;
+    };
+    // Reading the list, comparing and replacing it must not interleave with another replacement.
+    auto grants_mu = std::make_shared<std::mutex>();
+
     s.Get(R"(/api/auth/users/(\d+)/player-grants)",
-          [au, pls, grants_auth_unavailable, grantJson](const httplib::Request& req, httplib::Response& res) {
+          [au, pls, grants_auth_unavailable, grantJson, grantsRevision](const httplib::Request& req, httplib::Response& res) {
         if (!au) { grants_auth_unavailable(res); return; }
         const std::int64_t uid = std::stoll(req.matches[1]);
         if (!au->adminGetUser(uid)) { writeJson(res, 404, {{"error", "user_not_found"}}); return; }
         json arr = json::array();
-        for (const auto& g : au->playerGrantsOf(uid)) arr.push_back(grantJson(g, pls ? &pls->db() : nullptr));
-        writeJson(res, 200, json{{"grants", std::move(arr)}});
+        const auto current = au->playerGrantsOf(uid);
+        for (const auto& g : current) arr.push_back(grantJson(g, pls ? &pls->db() : nullptr));
+        writeJson(res, 200, json{{"grants", std::move(arr)}, {"revision", grantsRevision(current)}});
     });
 
     s.Put(R"(/api/auth/users/(\d+)/player-grants)",
-          [au, pls, grants_auth_unavailable, grantJson, mountActorOf](const httplib::Request& req, httplib::Response& res) {
+          [au, pls, grants_auth_unavailable, grantJson, mountActorOf, grantsRevision, grants_mu](const httplib::Request& req, httplib::Response& res) {
         using liveqx::auth::PlayerScopeGrant;
         if (!au) { grants_auth_unavailable(res); return; }
         if (!pls) { writeJson(res, 503, {{"error", "players_not_configured"}}); return; }
@@ -3949,7 +3973,19 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             grants.push_back(g);
         }
         const auto [actor_id, actor_name] = mountActorOf(req);
-        if (!au->setPlayerGrants(uid, grants, actor_id)) { writeJson(res, 500, {{"error", "storage_error"}}); return; }
+        {
+            std::lock_guard<std::mutex> one(*grants_mu);
+            // The editor says which list it started from; if the rights are not those any more,
+            // nothing is replaced (the answer says so, and the editor reads them again).
+            if (body.contains("revision")) {
+                if (!body["revision"].is_string()) { writeJson(res, 400, {{"error", "invalid_revision"}}); return; }
+                if (body["revision"].get<std::string>() != grantsRevision(au->playerGrantsOf(uid))) {
+                    writeJson(res, 409, {{"error", "grants_changed"}});
+                    return;
+                }
+            }
+            if (!au->setPlayerGrants(uid, grants, actor_id)) { writeJson(res, 500, {{"error", "storage_error"}}); return; }
+        }
         setAuditContextOverride("player.grants_update",
                                 json{{"user", target->username}, {"count", grants.size()}, {"grants", named}},
                                 "user", std::to_string(uid));
@@ -3958,7 +3994,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         setAuditCategoryOverride(liveqx::audit::Category::Player);
         json arr = json::array();
         for (const auto& g : grants) arr.push_back(grantJson(g, &pls->db()));
-        writeJson(res, 200, json{{"grants", std::move(arr)}});
+        writeJson(res, 200, json{{"grants", std::move(arr)}, {"revision", grantsRevision(grants)}});
     });
 
     // The MQTT broker link: where it stands and a way to nudge it. Registered

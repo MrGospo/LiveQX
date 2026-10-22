@@ -369,6 +369,78 @@ TEST(PlayerScopeRest, OnlyAnAdministratorManagesRights) {
     EXPECT_EQ(cli.Get(("/api/auth/users/" + std::to_string(op.id) + "/player-grants").c_str(), bearer(admin.token))->status, 200);
 }
 
+TEST(PlayerScopeRest, ARightsEditorThatStartedFromAnOldListDoesNotOverwriteSomeoneElsesChange) {
+    ScopeFixture f(kBasePort + 30);
+    auto admin = f.person("root", sa::Role::Admin);
+    auto op    = f.person("op", sa::Role::Operator);
+    auto cli = f.client();
+    auto read = [&] {
+        return json::parse(cli.Get(("/api/auth/users/" + std::to_string(op.id) + "/player-grants").c_str(), bearer(admin.token))->body);
+    };
+    auto put = [&](const json& grants, const json& revision) {
+        json body = {{"grants", grants}};
+        if (!revision.is_null()) body["revision"] = revision;
+        return cli.Put(("/api/auth/users/" + std::to_string(op.id) + "/player-grants").c_str(),
+                       bearer(admin.token), body.dump(), "application/json");
+    };
+
+    const std::string empty_revision = read()["revision"].get<std::string>();
+    ASSERT_FALSE(empty_revision.empty());
+
+    // Two editors read the same (empty) list. The first saves; the second, still holding the old
+    // revision, is refused and the first one's rights are untouched.
+    auto first = put(json::array({ScopeFixture::grant("group", f.G11)}), empty_revision);
+    ASSERT_EQ(first->status, 200) << first->body;
+    const std::string after_first = json::parse(first->body)["revision"].get<std::string>();
+    EXPECT_NE(after_first, empty_revision);
+    EXPECT_EQ(after_first, read()["revision"].get<std::string>()) << "the save answers with the revision a read gives";
+
+    auto stale = put(json::array({ScopeFixture::grant("group", f.G12)}), empty_revision);
+    ASSERT_EQ(stale->status, 409) << stale->body;
+    EXPECT_EQ(json::parse(stale->body)["error"], "grants_changed");
+    auto now = read();
+    ASSERT_EQ(now["grants"].size(), 1u);
+    EXPECT_EQ(now["grants"][0]["id"], f.G11) << "nothing of the refused save was written";
+
+    // With the fresh revision the same save goes through.
+    EXPECT_EQ(put(json::array({ScopeFixture::grant("group", f.G12)}), after_first)->status, 200);
+}
+
+TEST(PlayerScopeRest, TheRevisionIsTheSameForTheSameRightsInAnyOrderAndChangesWithAnyMark) {
+    ScopeFixture f(kBasePort + 31);
+    auto admin = f.person("root", sa::Role::Admin);
+    auto op    = f.person("op", sa::Role::Operator);
+    auto cli = f.client();
+    auto saved = [&](const json& grants) {
+        auto r = cli.Put(("/api/auth/users/" + std::to_string(op.id) + "/player-grants").c_str(),
+                         bearer(admin.token), json{{"grants", grants}}.dump(), "application/json");
+        EXPECT_EQ(r->status, 200) << r->body;
+        return json::parse(r->body)["revision"].get<std::string>();
+    };
+    const auto a = saved(json::array({ScopeFixture::grant("group", f.G11), ScopeFixture::grant("group", f.G12)}));
+    const auto b = saved(json::array({ScopeFixture::grant("group", f.G12), ScopeFixture::grant("group", f.G11)}));
+    EXPECT_EQ(a, b) << "the order of the list is not a change";
+    const auto c = saved(json::array({ScopeFixture::grant("group", f.G11, false, false, true), ScopeFixture::grant("group", f.G12)}));
+    EXPECT_NE(a, c) << "one mark is a change";
+}
+
+TEST(PlayerScopeRest, ASaveWithoutARevisionStillWorksAndABadRevisionIsRefused) {
+    ScopeFixture f(kBasePort + 32);
+    auto admin = f.person("root", sa::Role::Admin);
+    auto op    = f.person("op", sa::Role::Operator);
+    auto cli = f.client();
+    const std::string path = "/api/auth/users/" + std::to_string(op.id) + "/player-grants";
+    EXPECT_EQ(cli.Put(path.c_str(), bearer(admin.token),
+                      json{{"grants", json::array({ScopeFixture::grant("group", f.G11)})}}.dump(), "application/json")->status, 200)
+        << "scripts that never sent a revision keep working";
+    auto bad = cli.Put(path.c_str(), bearer(admin.token),
+                       json{{"grants", json::array()}, {"revision", 5}}.dump(), "application/json");
+    ASSERT_TRUE(bad);
+    EXPECT_EQ(bad->status, 400);
+    EXPECT_EQ(json::parse(bad->body)["error"], "invalid_revision");
+    EXPECT_EQ(json::parse(cli.Get(path.c_str(), bearer(admin.token))->body)["grants"].size(), 1u);
+}
+
 TEST(PlayerScopeRest, ABadListOfRightsIsRefusedWholeAndSaysWhy) {
     ScopeFixture f(kBasePort + 6);
     auto admin = f.person("root", sa::Role::Admin);
