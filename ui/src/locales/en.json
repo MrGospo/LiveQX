@@ -9,6 +9,9 @@
     "operations": "Operations",
     "settings": "Settings",
     "docs": "Knowledge Base",
+    "players": "Screens",
+    "playersSettings": "Settings",
+    "playersBroker": "Broker",
     "settingsUsers": "Users",
     "settingsLdap": "LDAP",
     "settingsSmtp": "SMTP",
@@ -1471,6 +1474,253 @@
       "TROUBLESHOOTING": {
         "title": "Troubleshooting",
         "desc": "What to do if a channel won't start, an output is red, or viewers see no signal."
+      }
+    }
+  },
+  "players": {
+    "units": {
+      "seconds": "{{n}} s",
+      "minutes": "{{n}} min",
+      "hours": "{{n}} h",
+      "days": "{{n}} d"
+    },
+    "settings": {
+      "title": "Screens: settings",
+      "lead": "These addresses and limits apply to the whole screens module. The addresses go into the pairing package of every new screen.",
+      "loadFailed": "Could not load the settings.",
+      "saving": "Saving…",
+      "saved": "Settings saved",
+      "unsaved": "There are unsaved changes",
+      "toBroker": "Broker status →",
+      "fixErrors": "Fix the marked fields",
+      "notConfigured": {
+        "title": "The addresses are not set yet",
+        "text": "Until the three addresses in the first block are filled in, a new screen cannot be paired: the server will answer that the module is not configured."
+      },
+      "errors": {
+        "required": "Enter a number",
+        "range": "From {{min}} to {{max}}",
+        "scheme": "The address must start with {{scheme}}"
+      },
+      "serverErrors": {
+        "invalid_server_url": "The server did not accept the address: use https://host[:port] with no path",
+        "invalid_device_api_url": "The server did not accept the address: use https://host[:port] with no path",
+        "invalid_mqtt_broker_url": "The server did not accept the address: use mqtts://host[:port]",
+        "invalid_ca_cert_pem": "This does not look like a PEM certificate",
+        "invalid_token_ttl_days": "From 1 to 365 days",
+        "invalid_clock_policy": "Only “strict” or “relaxed” is allowed",
+        "invalid_command_ttl_s": "From 30 to 86400 seconds",
+        "invalid_confirm_timeout_restart_s": "From 30 to 86400 seconds",
+        "invalid_confirm_timeout_reboot_s": "From 30 to 86400 seconds",
+        "invalid_confirm_timeout_reload_s": "From 30 to 86400 seconds",
+        "invalid_command_batch_size": "From 1 to 100",
+        "invalid_command_batch_stop_percent": "From 1 to 100",
+        "invalid_events_retention_days": "From 7 to 3650 days",
+        "invalid_commands_retention_days": "From 7 to 3650 days"
+      },
+      "addresses": {
+        "title": "Addresses for screens",
+        "hint": "A screen takes them from its pairing package and then connects by them on its own. After pairing they need changing only if the server's address changes."
+      },
+      "server_url": {
+        "label": "Server address (pairing and administration)",
+        "hint": "Like https://host or https://host:port, no path. https only."
+      },
+      "device_api_url": {
+        "label": "Device port address (status and certificate renewal)",
+        "hint": "A separate port where the server checks the screen's certificate. For example https://host:8444."
+      },
+      "mqtt_broker_url": {
+        "label": "Command broker address (MQTT)",
+        "hint": "Screens receive commands through it. Like mqtts://host:port, for example mqtts://host:8883."
+      },
+      "pairing": {
+        "title": "Pairing new screens"
+      },
+      "token_ttl_days": {
+        "label": "Pairing token lifetime, days",
+        "hint": "The token is given once, with the pairing package. After this time it can no longer pair a screen, but a new one can be issued."
+      },
+      "clock_policy": {
+        "label": "Clock check on new screens",
+        "hint": "Applied by default to the screens you create.",
+        "strict": "Strict (recommended)",
+        "relaxed": "Relaxed: for networks without accurate time",
+        "relaxedWarning": "The relaxed check does not compare the validity dates of the server's and broker's certificates: a screen will accept even an expired certificate from our authority. The risk is low in a closed local network; do not enable it for a server reachable from the internet."
+      },
+      "ca_cert_pem": {
+        "summary": "Your own server root certificate (optional)",
+        "label": "Root certificate (PEM)",
+        "hint": "Leave empty to use the certificate that signed the server's own certificate. Fill in only if screens must trust a different root."
+      },
+      "commands": {
+        "title": "Commands to screens",
+        "hint": "How long a command lives and how long the server waits for an answer. Times are in seconds, with a familiar form beside them."
+      },
+      "command_ttl_s": {
+        "label": "Command lifetime, s",
+        "hint": "If a screen does not receive the command within this time (switched off, no network) it is dropped and will not run later."
+      },
+      "confirm_timeout_restart_s": {
+        "label": "Wait for a player restart to be confirmed, s",
+        "hint": "If the screen does not confirm in this time the command counts as unanswered and the screen can be restarted again."
+      },
+      "confirm_timeout_reboot_s": {
+        "label": "Wait for a screen reboot to be confirmed, s",
+        "hint": "Rebooting the computer takes longer, so the time is longer."
+      },
+      "confirm_timeout_reload_s": {
+        "label": "Wait for a playlist reload to be confirmed, s",
+        "hint": "A screen confirms this command at its next “I'm here” signal."
+      },
+      "command_batch_size": {
+        "label": "Batch size for a command to many screens",
+        "hint": "A command to a group, an object or everyone goes in batches: the next one when the previous is confirmed."
+      },
+      "command_batch_stop_percent": {
+        "label": "Stop if more than this share did not come back, %",
+        "hint": "If more than this share of a batch fails to confirm, the remaining batches are not sent."
+      },
+      "retention": {
+        "title": "Keeping the logs",
+        "hint": "Closed records older than the limit are deleted once a day. Deletion cannot be undone. Unconfirmed commands and jobs in progress are never deleted."
+      },
+      "events_retention_days": {
+        "label": "Screen events, days",
+        "hint": "Coming online and going offline, version changes, commands."
+      },
+      "commands_retention_days": {
+        "label": "Closed commands and jobs, days",
+        "hint": "The outcome of a command (confirmed or not answered). The fact of sending is kept separately in the audit trail."
+      }
+    },
+    "broker": {
+      "title": "Command broker (MQTT)",
+      "lead": "The server sends commands to screens through the broker and learns that a screen has switched on. Without the broker, screens are still visible by their regular “I'm here” signal, but commands do not reach them.",
+      "loadFailed": "Could not get the broker status.",
+      "reason": "Reason",
+      "state": {
+        "disabled": {
+          "label": "Off",
+          "text": "The link to the broker is switched off in the server configuration (players.broker.enabled). Commands to screens and instant appearance online do not work; screens are seen only by their regular signal."
+        },
+        "waiting": {
+          "label": "Waiting",
+          "text": "The server cannot connect until everything needed is in place — see the list below."
+        },
+        "connecting": {
+          "label": "Connecting",
+          "text": "The server is trying to connect to the broker. Commands are not going out yet."
+        },
+        "connected": {
+          "label": "Connected",
+          "text": "All is well: commands go out, and screens show as online as soon as they switch on."
+        },
+        "stopped": {
+          "label": "Stopped",
+          "text": "The link stopped together with the server."
+        }
+      },
+      "readiness": {
+        "title": "Is everything ready",
+        "hint": "The server connects to the broker once everything in the list is in place.",
+        "toSettings": "Open settings",
+        "mosquitto_in_build": {
+          "label": "This server build supports MQTT",
+          "fix": "This build was made without the MQTT library. A build with support (libmosquitto) is needed."
+        },
+        "device_ca": {
+          "label": "The device authority exists",
+          "fix": "The device authority is created once when the server is prepared (the root is kept separately). Until then the server cannot get an identity for the broker."
+        },
+        "trust_root": {
+          "label": "There is a root certificate to check the broker with",
+          "fix": "A root certificate that signed the broker's certificate is needed: either the server's own, or yours in Settings (the “Pairing” block)."
+        },
+        "broker_url_configured": {
+          "label": "The broker address for screens is set",
+          "fix": "Fill in “Command broker address” in the module settings."
+        }
+      },
+      "reconcile": {
+        "title": "Reconciling with the broker",
+        "hint": "The server brings the screens' records on the broker in line with its database: when a screen is created or revoked, after each connection, and by itself every {{interval}} s. So a screen created while the broker was down is not lost.",
+        "last": "Last reconciliation",
+        "ok": "Succeeded",
+        "failed": "Finished with errors",
+        "counts": "Records issued: {{issued}}, removed: {{removed}}, failed: {{failed}}",
+        "never": "No reconciliation yet.",
+        "button": "Reconcile now",
+        "requested": "Reconciliation requested"
+      },
+      "crl": {
+        "title": "Revocation list",
+        "hint": "If a screen is stolen or retired, its certificate is revoked. The broker keeps such a screen out when it is given this list.",
+        "off": "The list is not passed to the broker (the mode is off in the server configuration). A revoked screen loses all rights on the broker and is disconnected, but may connect again and do nothing. For full protection set players.broker.crl.mode = local.",
+        "ok": "The list is written",
+        "notPublished": "The list is not written",
+        "error": "Error",
+        "reloadFailed": "The list is written, but the broker could not be told",
+        "reloadErrors": {
+          "pid_file_unreadable": "the broker's process-id file cannot be read",
+          "bad_pid": "the process-id file holds a bad value",
+          "process_not_running": "the broker process is not running",
+          "not_the_broker": "the process at that number is not the broker",
+          "signal_failed": "the signal to the broker could not be sent"
+        },
+        "published": "Written",
+        "counts": "revoked: {{revoked}}, authority generations: {{generations}}",
+        "validUntil": "The list is valid until",
+        "soon": "The list is close to its end. The server renews it daily; if that is not happening, the broker will stop admitting anyone. Check the errors above."
+      },
+      "connection": {
+        "title": "Server connection to the broker",
+        "hint": "Change it only if the broker moved. A new address is first tried with a test connection and saved only if the broker answers.",
+        "disabledHint": "The link is switched off in the server configuration, so here you can only see how it is set up.",
+        "host": {
+          "label": "Broker address",
+          "hint": "A name or IP address the server can see. Often 127.0.0.1 when the broker is on the same machine."
+        },
+        "port": {
+          "label": "Port",
+          "hint": "Usually 8883."
+        },
+        "interval": {
+          "label": "How often to reconcile with the broker, s",
+          "hint": "From 10 to 86400. Reconciliation also runs at once when a screen is created or revoked."
+        },
+        "verify": {
+          "label": "Check the broker's name in its certificate",
+          "hint": "Protects against a fake broker. Leave it on.",
+          "warning": "The check is off: the server will not notice a broker being replaced, by name. Turn it back on as soon as the broker has a certificate with the right name."
+        },
+        "errors": {
+          "host": "Letters, digits, dot, hyphen, underscore and colon are allowed",
+          "port": "From 1 to 65535",
+          "interval": "From 10 to 86400"
+        },
+        "serverErrors": {
+          "invalid_host": "The server did not accept the address",
+          "invalid_port": "The server did not accept the port",
+          "invalid_reconcile_interval_s": "The server did not accept the interval",
+          "broker_disabled": "The link to the broker is switched off in the server configuration"
+        },
+        "check": "Test the connection",
+        "checking": "Testing…",
+        "checkOk": "The broker answered; connecting is possible. Nothing was changed.",
+        "checkFailed": "Could not connect: {{detail}}",
+        "probeFailed": {
+          "title": "The broker did not answer at the new address",
+          "text": "Nothing was changed; the old address stays in force. Reason:",
+          "skip": "Save anyway, without testing (the broker is not up yet). The server will start connecting at the new address."
+        },
+        "saving": "Saving…",
+        "applied": "Connection changed; the server is reconnecting",
+        "unchanged": "Nothing changed",
+        "mayTakeAWhile": "The test can take up to 8 seconds",
+        "warnings": {
+          "verify_hostname_disabled": "Checking the broker's name is off. Turn it on when you can."
+        }
       }
     }
   }

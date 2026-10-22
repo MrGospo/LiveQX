@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import {
   LayoutDashboard, Tv2, Network, Puzzle,
   Activity, Wrench, Settings, ChevronLeft, ChevronRight,
-  LogOut, User, AlertTriangle, X, BookOpen,
+  LogOut, User, AlertTriangle, X, BookOpen, MonitorSmartphone,
 } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth';
 import { useUiStore } from '@/stores/ui';
@@ -22,6 +22,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { path: '/dashboard',             labelKey: 'nav.dashboard',     Icon: LayoutDashboard },
   { path: '/channels',              labelKey: 'nav.channels',       Icon: Tv2 },
+  { path: '/players/settings',      labelKey: 'nav.players',        Icon: MonitorSmartphone, minRole: 'admin' },   // the list of screens joins here for everyone
   { path: '/gateways',              labelKey: 'nav.gateways',       Icon: Network,  minRole: 'admin' },
   { path: '/plugins',               labelKey: 'nav.plugins',        Icon: Puzzle,   minRole: 'admin' },
   { path: '/observability/metrics', labelKey: 'nav.observability',  Icon: Activity },

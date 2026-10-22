@@ -16,6 +16,9 @@ const CreateChannelPage        = React.lazy(() => import('@/features/channels/Cr
 const ChannelPreviewPage       = React.lazy(() => import('@/features/channels/ChannelPreviewPage'));
 
 
+const PlayersSettingsPage      = React.lazy(() => import('@/features/players/PlayersSettingsPage'));
+const BrokerPage               = React.lazy(() => import('@/features/players/BrokerPage'));
+
 const GatewaysListPage         = React.lazy(() => import('@/features/gateways/GatewaysListPage'));
 const GatewayCreatePage        = React.lazy(() => import('@/features/gateways/GatewayCreatePage'));
 const GatewayDetailPage        = React.lazy(() => import('@/features/gateways/GatewayDetailPage'));
@@ -100,6 +103,11 @@ export function AppRoutes() {
           <Route path="/channels/new"       element={<RequireRole minRole="admin"><CreateChannelPage /></RequireRole>} />
           <Route path="/channels/:id"       element={<ChannelDetailPage />} />
           <Route path="/channels/:id/preview" element={<ChannelPreviewPage />} />
+
+          {/* Screens (players) */}
+          <Route path="/players"           element={<Navigate to="/players/settings" replace />} />
+          <Route path="/players/settings"  element={<RequireRole minRole="admin"><PlayersSettingsPage /></RequireRole>} />
+          <Route path="/players/broker"    element={<RequireRole minRole="admin"><BrokerPage /></RequireRole>} />
 
           {/* Gateways */}
           <Route path="/gateways"           element={<RequireRole minRole="admin"><GatewaysListPage /></RequireRole>} />

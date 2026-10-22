@@ -145,6 +145,17 @@ export function EventBusProvider({ children }: { children: React.ReactNode }) {
           case 'audit_event':
             qc.invalidateQueries({ queryKey: ['audit-trail'] });
             break;
+          // Screens (players): a screen came or went, changed version, got a command or
+          // settled one. Only the lists of screens are refetched; the settings and broker
+          // pages sit under their own query root and are not touched by a screen's comings
+          // and goings.
+          case 'player_registered':
+          case 'player_online':
+          case 'player_offline':
+          case 'player_version_changed':
+          case 'player_command':
+            qc.invalidateQueries({ queryKey: ['players'] });
+            break;
           // fix33 D1 — gateway lifecycle: invalidate gateway list and the
           // affected gateway's status. Payload carries `id` (not channel_id).
           case 'gateway_state_change': {
