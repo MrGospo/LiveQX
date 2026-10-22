@@ -215,6 +215,9 @@ public:
         std::string id;
         std::string cert_chain_pem;
         std::string key_pem;
+        std::string serial_hex;
+        int         generation{0};
+        std::int64_t not_before{0}, not_after{0};
     };
 
     // nullopt when a broker can be started here; otherwise why not.
@@ -226,8 +229,11 @@ public:
     }
 
     // `broker_dns` / `broker_ips`: names and addresses the broker's own certificate is valid for.
+    // `with_crl`: the broker checks a revocation list (it starts with an empty one for
+    // every generation) and writes a pid file, so it can be told to re-read the list.
     explicit TestBroker(std::vector<std::string> broker_dns = {"localhost"},
-                        std::vector<std::string> broker_ips = {"127.0.0.1"}) {
+                        std::vector<std::string> broker_ips = {"127.0.0.1"},
+                        bool with_crl = false) : with_crl_(with_crl) {
         static std::atomic<int> seq{0};
         dir_ = fs::temp_directory_path() /
                ("lqx-broker-" + std::to_string(::getpid()) + "-" + std::to_string(seq.fetch_add(1)));
@@ -277,9 +283,12 @@ public:
 
     // A player with a certificate from the device CA; `provision` registers it
     // (client + personal role + common role) on the broker, as pairing will.
-    Player enrollPlayer(bool provision = true) {
+    Player enrollPlayer(bool provision = true) { return enrollPlayerAs(randomUuidV4(), provision); }
+
+    // The same, for a player id that already exists elsewhere (in a database).
+    Player enrollPlayerAs(const std::string& id, bool provision = true) {
         Player p;
-        p.id = randomUuidV4();
+        p.id = id;
         std::string key;
         const std::string csr = makeCsrAndKey(key);
         tls::IssuedClientCert cert;
@@ -287,6 +296,10 @@ public:
         if (!ca_->signClientCsr(csr, p.id, 365, cert, err)) { problem_ = "sign: " + err; return p; }
         p.cert_chain_pem = cert.cert_pem + cert.chain_pem;
         p.key_pem = key;
+        p.serial_hex = cert.serial_hex;
+        p.generation = cert.generation;
+        p.not_before = cert.not_before_unix;
+        p.not_after = cert.not_after_unix;
         if (provision) provision_(p.id);
         return p;
     }
@@ -300,6 +313,11 @@ public:
         argv.insert(argv.end(), args.begin(), args.end());
         return runProcess(argv, dir_).output;
     }
+
+    fs::path crlFile() const { return dir_ / "crl.pem"; }
+    fs::path pidFile() const { return dir_ / "broker.pid"; }
+    fs::path caDir() const { return dir_ / "ca"; }
+    const auth::MasterKey& masterKey() const { return *mk_; }
 
     void stop() {
         if (pid_ <= 0) return;
@@ -376,14 +394,28 @@ private:
         writeFileText(dir_ / "ctrl.crt", identity_.cert_chain_pem);
         writeFileText(dir_ / "ctrl.key", identity_.key_pem);
 
+        if (with_crl_) {
+            // An empty list for every generation, as the server writes it.
+            std::string all;
+            for (int g : tls::DeviceCa::generations(dir_ / "ca")) {
+                auto gen = tls::DeviceCa::openGeneration(dir_ / "ca", *mk_, g, err);
+                std::string pem;
+                if (!gen || !gen->generateCrl({}, 1, 30, pem, err)) { problem_ = "initial CRL: " + err; return false; }
+                all += pem;
+            }
+            writeFileText(crlFile(), all, 0644);
+        }
+
         const auto plugin = *findDynsecPlugin();
         fs::create_directories(dir_ / "data");
         std::ostringstream conf;
+        if (with_crl_) conf << "pid_file " << pidFile().string() << "\n";
         conf << "listener " << port_ << " 127.0.0.1\n"
              << "cafile " << (dir_ / "cafile.pem").string() << "\n"
              << "certfile " << (sca / "server.crt").string() << "\n"
              << "keyfile " << (sca / "server.key").string() << "\n"
              << "require_certificate true\n"
+             << (with_crl_ ? "crlfile " + crlFile().string() + "\n" : std::string())
              << "use_identity_as_username true\n"
              << "allow_anonymous false\n"
              << "persistence true\n"
@@ -428,6 +460,7 @@ private:
 
     static constexpr const char* kBrokerName = "liveqx-server";
 
+    bool        with_crl_{false};
     fs::path    dir_;
     int         port_{0};
     pid_t       pid_{-1};

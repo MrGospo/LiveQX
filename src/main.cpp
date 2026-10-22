@@ -49,12 +49,14 @@
 #include "mounts/MountdRpcClient.h"
 #include "mounts/MountsDb.h"
 #include "mqtt/BrokerLink.h"
+#include "mqtt/BrokerReload.h"
 #ifdef LIVEQX_HAVE_MOSQUITTO
 #include "mqtt/MosquittoClient.h"
 #endif
 #include "players/AuditScope.h"
 #include "players/BrokerSettings.h"
 #include "players/CommandService.h"
+#include "players/CrlPublisher.h"
 #include "players/DeviceApi.h"
 #include "players/EnrollService.h"
 #include "players/PresenceService.h"
@@ -968,6 +970,8 @@ int main(int argc, char* argv[]) {
             liveqx::mqtt::BrokerLink* link{nullptr};
             void poke() { std::lock_guard<std::mutex> lk(mu); if (link) link->requestSync(); }
             void set(liveqx::mqtt::BrokerLink* l) { std::lock_guard<std::mutex> lk(mu); link = l; }
+            std::function<void()> on_revoked;                  // asks for a new revocation list; set once, cleared on the way out
+            void pokeRevoked() { std::function<void()> f; { std::lock_guard<std::mutex> lk(mu); f = on_revoked; } if (f) f(); }
             void clearRetained(const std::string& topic) {
                 std::lock_guard<std::mutex> lk(mu);
                 if (link) link->clearRetained(topic);
@@ -979,12 +983,18 @@ int main(int argc, char* argv[]) {
         };
         auto broker_hook = std::make_shared<BrokerHook>();
         std::unique_ptr<liveqx::mqtt::BrokerLink> broker_link;
+        std::unique_ptr<liveqx::players::CrlPublisher> crl_publisher;   // the revocation list for the broker
         std::unique_ptr<liveqx::players::CommandService> command_service;
         std::jthread command_sweeper;       // settles commands nobody confirmed in time
         std::jthread players_retention;     // removes old closed records once a day
         struct BrokerHookDetach {
             std::shared_ptr<BrokerHook> h;
-            ~BrokerHookDetach() { if (h) h->set(nullptr); }
+            ~BrokerHookDetach() {
+                if (!h) return;
+                h->set(nullptr);
+                std::lock_guard<std::mutex> lk(h->mu);
+                h->on_revoked = nullptr;
+            }
         } broker_hook_detach{broker_hook};
         std::function<std::shared_ptr<const liveqx::tls::DeviceCa>()> device_ca_provider;
         if (players_db.open()) {
@@ -996,8 +1006,9 @@ int main(int argc, char* argv[]) {
             // Layers 2 and 3 (broker, CRL file) join the same hook later.
             LOG_INFO("Players: {} revoked certificate(s) loaded",
                      cert_revocations.rebuildFrom(players_db));
-            po.on_certs_revoked = [&cert_revocations](const std::vector<liveqx::players::CertRow>& c) {
-                cert_revocations.add(c);
+            po.on_certs_revoked = [&cert_revocations, broker_hook](const std::vector<liveqx::players::CertRow>& c) {
+                cert_revocations.add(c);              // the lock in the server: at once
+                broker_hook->pokeRevoked();           // the lock at the broker: a new list, soon
             };
             po.on_player_created = [broker_hook](const std::string&) { broker_hook->poke(); };
             po.on_player_gone    = [broker_hook](const std::string&) { broker_hook->poke(); };
@@ -1149,6 +1160,43 @@ int main(int argc, char* argv[]) {
                     nap(86400);
                 }
             });
+
+            // The list of revoked certificates for the broker (players.broker.crl):
+            // mode "off" (default) or "local" — write the file and tell a broker on this
+            // machine to re-read it. A broker elsewhere cannot be signalled and is
+            // protected by its records of players alone (the other locks).
+            // Keys: path, pid_file, next_update_days (30), refresh_hours (24).
+            {
+                json ccfg = json::object();
+                if (cfg.contains("players") && cfg["players"].is_object() &&
+                    cfg["players"].contains("broker") && cfg["players"]["broker"].is_object() &&
+                    cfg["players"]["broker"].contains("crl") && cfg["players"]["broker"]["crl"].is_object())
+                    ccfg = cfg["players"]["broker"]["crl"];
+                if (ccfg.value("mode", std::string("off")) == "local") {
+                    liveqx::players::CrlPublisherOptions co;
+                    co.path = ccfg.value("path", paths.brokerCrlFile().string());
+                    co.next_update_days   = std::clamp(ccfg.value("next_update_days", 30), 2, 365);
+                    co.refresh_interval_s = std::clamp<std::int64_t>(ccfg.value("refresh_hours", 24), 1, 24 * 7) * 3600;
+                    const auto ca_dir = paths.deviceCaDir();
+                    co.generations = [ca_dir] { return liveqx::tls::DeviceCa::generations(ca_dir); };
+                    co.open_generation = [ca_dir, &master_key](int g, std::string& err) {
+                        return liveqx::tls::DeviceCa::openGeneration(ca_dir, master_key, g, err);
+                    };
+                    const std::string pid_file = ccfg.value("pid_file", std::string());
+                    if (!pid_file.empty())
+                        co.reload = [pid_file] { return liveqx::mqtt::reloadBrokerFromPidFile(pid_file); };
+                    else
+                        LOG_WARN("Players: broker CRL is written but players.broker.crl.pid_file is not set — the broker is not told to re-read it");
+                    const std::string crl_file = co.path.string();
+                    crl_publisher = std::make_unique<liveqx::players::CrlPublisher>(players_db, std::move(co));
+                    {
+                        std::lock_guard<std::mutex> lk(broker_hook->mu);
+                        broker_hook->on_revoked = [p = crl_publisher.get()] { p->request(); };
+                    }
+                    crl_publisher->start();
+                    LOG_INFO("Players: broker revocation list is kept in {}", crl_file);
+                }
+            }
 
             // The MQTT broker (players.broker): the server's standing connection
             // and the upkeep of the players' records on it. Off unless enabled;
@@ -1533,6 +1581,20 @@ int main(int argc, char* argv[]) {
 #else
                     constexpr bool kBuilt = false;
 #endif
+                    {
+                        json crl = {{"mode", crl_publisher ? "local" : "off"}};
+                        if (crl_publisher) {
+                            const auto c = crl_publisher->status();
+                            crl["last_publish_at"] = c.last_publish_at;
+                            crl["last_ok"]         = c.last_ok;
+                            crl["error"]           = c.error;
+                            crl["reload_error"]    = c.reload_error;
+                            crl["revoked"]         = c.revoked;
+                            crl["generations"]     = c.generations;
+                            crl["valid_until"]     = c.valid_until;
+                        }
+                        j["crl"] = std::move(crl);
+                    }
                     j["readiness"] = {
                         {"mosquitto_in_build", kBuilt},
                         {"device_ca", device_ca_provider ? device_ca_provider() != nullptr : false},
@@ -1541,7 +1603,12 @@ int main(int argc, char* argv[]) {
                          players_service ? !players_service->settings().mqtt_broker_url.empty() : false}};
                     return j.dump();
                 },
-                broker_link ? std::function<void()>([&]() { broker_link->requestSync(); }) : std::function<void()>{},
+                (broker_link || crl_publisher)
+                    ? std::function<void()>([&]() {
+                          if (broker_link)   broker_link->requestSync();
+                          if (crl_publisher) crl_publisher->request();
+                      })
+                    : std::function<void()>{},
                 [&](const std::string& body) {
                     ControlApi::BrokerUpdate out;
                     auto j = json::parse(body, nullptr, false);

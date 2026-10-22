@@ -98,6 +98,8 @@ public:
     // CA that issues player client certificates (utils/DeviceCa.h). Holds
     // the CA key sealed with the master key.
     std::filesystem::path deviceCaDir() const                 { return state_dir_ / "device_ca"; }
+    // What the MQTT broker reads from us: the list of revoked player certificates.
+    std::filesystem::path brokerCrlFile() const               { return state_dir_ / "broker" / "crl.pem"; }
     // Enterprise audit trail. Separate DB (not auth.db) so retention,
     // backup profile and BEGIN IMMEDIATE contention are independent from
     // the auth path — audit must never be starved by login load and

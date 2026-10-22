@@ -361,6 +361,26 @@ std::unique_ptr<DeviceCa> DeviceCa::open(const fs::path& dir,
     }
 
     const auto& [gen, gdir] = *gens.rbegin();
+    return loadGeneration(dir, gen, gdir, key, err);
+}
+
+std::unique_ptr<DeviceCa> DeviceCa::openGeneration(const fs::path& dir, const liveqx::auth::MasterKey& key,
+                                                   int generation, std::string& err) {
+    err.clear();
+    auto gens = listGenerations(dir);
+    auto it = gens.find(generation);
+    if (it == gens.end()) { err = "no_such_generation"; return nullptr; }
+    return loadGeneration(dir, generation, it->second, key, err);
+}
+
+std::vector<int> DeviceCa::generations(const fs::path& dir) {
+    std::vector<int> out;
+    for (const auto& [n, path] : listGenerations(dir)) out.push_back(n);
+    return out;
+}
+
+std::unique_ptr<DeviceCa> DeviceCa::loadGeneration(const fs::path& dir, int gen, const fs::path& gdir,
+                                                      const liveqx::auth::MasterKey& key, std::string& err) {
     auto cert_pem = readFile(gdir / "ca.crt");
     auto blob     = readFile(gdir / "ca.key.enc");
     if (!cert_pem || !blob) {

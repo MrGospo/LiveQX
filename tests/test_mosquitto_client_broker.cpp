@@ -22,10 +22,14 @@
 
 #include "mqtt/BrokerAdmin.h"
 #include "mqtt/BrokerLink.h"
+#include "mqtt/BrokerReload.h"
+#include "players/CrlPublisher.h"
+#include "players/PlayersDb.h"
 #include "mqtt/MosquittoClient.h"
 
 #include <gtest/gtest.h>
 
+#include <ctime>
 #include <mutex>
 
 namespace mqtt = liveqx::mqtt;
@@ -502,4 +506,112 @@ TEST_F(MosquittoBrokerTest, ARevokedPlayerIsCutOffAtOnceAndWhateverItDoesNextRea
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
     EXPECT_FALSE(at_player.has(cmd.topic, "after")) << "no commands for a revoked player";
+}
+
+// ── the revocation list, against a real broker ──────────────────────────────
+namespace {
+
+// Players that exist in a database AND have certificates the broker knows, as after pairing.
+struct RevocationRig {
+    std::filesystem::path dir;
+    std::unique_ptr<liveqx::players::PlayersDb> db;
+    std::unique_ptr<TestBroker> broker;
+
+    explicit RevocationRig() {
+        static std::atomic<int> seq{0};
+        dir = std::filesystem::temp_directory_path() /
+              ("lqx-revrig-" + std::to_string(::getpid()) + "-" + std::to_string(seq.fetch_add(1)));
+        std::filesystem::create_directories(dir);
+        db = std::make_unique<liveqx::players::PlayersDb>(dir / "players.db");
+        db->open();
+        broker = std::make_unique<TestBroker>(std::vector<std::string>{"localhost"}, std::vector<std::string>{"127.0.0.1"},
+                                              /*with_crl=*/true);
+    }
+    ~RevocationRig() {
+        broker.reset();
+        db.reset();
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+
+    TestBroker::Player pair(const std::string& name) {
+        const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
+        auto created = db->createPlayer(name, std::nullopt, "strict", 86400, now);
+        auto player = broker->enrollPlayerAs(created->player.id, /*provision=*/true);
+        auto claim = db->claimToken(player.id, created->token, now);
+        liveqx::players::CertRow row;
+        row.serial_hex = player.serial_hex; row.generation = player.generation; row.player_id = player.id;
+        row.issued_at = now; row.not_before = player.not_before; row.not_after = player.not_after;
+        db->finishEnrollment(claim.token_id, row, now);
+        return player;
+    }
+
+    liveqx::players::CrlPublisherOptions publisher(std::function<std::int64_t()> now = nullptr, int days = 30) {
+        liveqx::players::CrlPublisherOptions o;
+        o.path = broker->crlFile();
+        o.next_update_days = days;
+        o.now = std::move(now);
+        auto ca_dir = broker->caDir();
+        auto* key = &broker->masterKey();
+        o.generations = [ca_dir] { return liveqx::tls::DeviceCa::generations(ca_dir); };
+        o.open_generation = [ca_dir, key](int g, std::string& err) { return liveqx::tls::DeviceCa::openGeneration(ca_dir, *key, g, err); };
+        auto pid = broker->pidFile();
+        o.reload = [pid] { return mqtt::reloadBrokerFromPidFile(pid); };
+        return o;
+    }
+};
+
+bool connectsWithin(const mqtt::ClientOptions& o, int ms) {
+    mqtt::MosquittoClient c(o);
+    if (!c.start()) return false;
+    const bool up = waitFor([&] { return c.connected(); }, ms);
+    c.stop();
+    return up;
+}
+
+}  // namespace
+
+TEST(MosquittoRevocation, ARevokedCertificateIsTurnedAwayAtTheHandshakeAndOthersAreNotAfterTheBrokerIsToldToReread) {
+    if (auto why = TestBroker::unavailable()) GTEST_SKIP() << *why;
+    RevocationRig rig;
+    ASSERT_TRUE(rig.broker->ok()) << rig.broker->problem();
+    auto a = rig.pair("screen-a");
+    auto b = rig.pair("screen-b");
+
+    EXPECT_TRUE(connectsWithin(rig.broker->playerOptions(a), 8000)) << "before: both come in";
+    EXPECT_TRUE(connectsWithin(rig.broker->playerOptions(b), 8000));
+
+    ASSERT_TRUE(rig.db->revokePlayer(a.id, "stolen").has_value());
+    liveqx::players::CrlPublisher pub(*rig.db, rig.publisher());
+    auto st = pub.publishNow();
+    ASSERT_TRUE(st.last_ok) << st.error;
+    EXPECT_EQ(st.revoked, 1u);
+    ASSERT_TRUE(st.reload_error.empty()) << "the broker was told: " << st.reload_error;
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));          // the broker handles the hangup
+
+    EXPECT_FALSE(connectsWithin(rig.broker->playerOptions(a), 3000)) << "the revoked certificate does not get through";
+    EXPECT_TRUE(connectsWithin(rig.broker->playerOptions(b), 8000)) << "the others still do";
+    EXPECT_TRUE(connectsWithin(rig.broker->serverOptions(), 8000)) << "and so does the server itself";
+}
+
+TEST(MosquittoRevocation, AListThatHasRunOutShutsEveryoneOutAndAFreshOneRepairsItWhichIsWhyItIsRefreshed) {
+    if (auto why = TestBroker::unavailable()) GTEST_SKIP() << *why;
+    RevocationRig rig;
+    ASSERT_TRUE(rig.broker->ok()) << rig.broker->problem();
+    auto b = rig.pair("screen-b");
+    ASSERT_TRUE(connectsWithin(rig.broker->playerOptions(b), 8000));
+
+    // A list published three days ago that was good for two.
+    const std::int64_t real_now = static_cast<std::int64_t>(std::time(nullptr));
+    {
+        liveqx::players::CrlPublisher stale(*rig.db, rig.publisher([=] { return real_now - 3 * 86400; }, 2));
+        ASSERT_TRUE(stale.publishNow().last_ok);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    EXPECT_FALSE(connectsWithin(rig.broker->playerOptions(b), 3000)) << "an expired list: nobody gets in";
+
+    liveqx::players::CrlPublisher fresh(*rig.db, rig.publisher());
+    ASSERT_TRUE(fresh.publishNow().last_ok);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    EXPECT_TRUE(connectsWithin(rig.broker->playerOptions(b), 8000)) << "a new list and the hangup bring everyone back";
 }

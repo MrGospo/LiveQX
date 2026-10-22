@@ -90,6 +90,17 @@ public:
                                           std::string& err,
                                           bool allow_create = true);
 
+    // Opens ONE generation, not necessarily the newest. Certificates issued by an
+    // older generation stay valid for up to their lifetime after a newer one has
+    // taken over, and their revocation list can only be signed by that
+    // generation's own key. err: no_such_generation, or why it cannot be read
+    // (same reasons as open()).
+    static std::unique_ptr<DeviceCa> openGeneration(const std::filesystem::path& dir,
+                                                    const liveqx::auth::MasterKey& key,
+                                                    int generation, std::string& err);
+    // The generation numbers present in `dir`, ascending (pending requests excluded).
+    static std::vector<int> generations(const std::filesystem::path& dir);
+
     // ── two-tier: getting an intermediate signed ──
     // Creates the key of the next generation (sealed with MasterKey) and a CSR
     // for the offline root to sign. Calling it again while a request is
@@ -188,6 +199,9 @@ public:
                           std::string& err);
 
 private:
+    static std::unique_ptr<DeviceCa> loadGeneration(const std::filesystem::path& dir, int generation,
+                                                    const std::filesystem::path& generation_dir,
+                                                    const liveqx::auth::MasterKey& key, std::string& err);
     struct Impl;
     explicit DeviceCa(std::unique_ptr<Impl> impl);
     std::unique_ptr<Impl> impl_;

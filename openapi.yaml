@@ -5557,6 +5557,22 @@ components:
             removed: { type: integer }
             failed: { type: integer }
             error: { type: string }
+        crl:
+          type: object
+          description: |
+            Список отозванных сертификатов для брокера (`players.broker.crl.mode`: `off` или `local`).
+            При `local` сервер раз в сутки (и при каждом отзыве) пишет файл с отдельным списком на
+            каждое поколение центра устройств и сообщает локальному брокеру перечитать его.
+            Просроченный список запирает всех, поэтому `valid_until` должен быть далеко впереди.
+          properties:
+            mode: { type: string, enum: [off, local] }
+            last_publish_at: { type: integer, format: int64 }
+            last_ok: { type: boolean }
+            error: { type: string, description: 'Почему не получилось записать файл; прежний файл остаётся в силе.' }
+            reload_error: { type: string, description: 'Файл записан, но брокеру не удалось сообщить (pid-файл, процесс).' }
+            revoked: { type: integer }
+            generations: { type: integer }
+            valid_until: { type: integer, format: int64 }
         readiness:
           type: object
           properties:

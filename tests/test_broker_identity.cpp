@@ -23,6 +23,7 @@
 
 #include <gtest/gtest.h>
 
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
@@ -280,4 +281,59 @@ TEST_F(BrokerIdentityTest, ThePlayerSigningPathStillRefusesThisCn) {
     tls::IssuedClientCert out;
     EXPECT_FALSE(ca_->signClientCsr(makeCsr(), "liveqx-server", 365, out, err));
     EXPECT_EQ(err, "bad_player_id") << "only a player id can be a player certificate's CN";
+}
+
+// ── opening an older generation (needed to sign its revocation list) ────────
+TEST_F(BrokerIdentityTest, AnOlderGenerationCanBeOpenedAndSignsItsOwnRevocationList) {
+    const std::string gen1_cert = ca_->certPem();
+    ASSERT_EQ(ca_->generation(), 1);
+    addGeneration();                                       // the intermediate is replaced: generation 2 is active
+    ASSERT_EQ(ca_->generation(), 2);
+    EXPECT_EQ(tls::DeviceCa::generations(dir_ / "ca"), (std::vector<int>{1, 2}));
+
+    std::string err;
+    auto old = tls::DeviceCa::openGeneration(dir_ / "ca", *mk_, 1, err);
+    ASSERT_TRUE(old) << err;
+    EXPECT_EQ(old->generation(), 1);
+    EXPECT_EQ(old->certPem(), gen1_cert);
+    EXPECT_NE(old->certPem(), ca_->certPem());
+
+    std::string crl_pem;
+    ASSERT_TRUE(old->generateCrl({{"ABCD01", now_}}, 1, 30, crl_pem, err, now_)) << err;
+    // The list verifies against generation 1's intermediate and not against generation 2's.
+    auto verifies = [&](const std::string& issuer_pem) {
+        BIO* b = BIO_new_mem_buf(crl_pem.data(), static_cast<int>(crl_pem.size()));
+        X509_CRL* crl = PEM_read_bio_X509_CRL(b, nullptr, nullptr, nullptr);
+        BIO_free_all(b);
+        CertPtr issuer = firstCert(issuer_pem);
+        const bool ok = crl && X509_CRL_verify(crl, X509_get0_pubkey(issuer.get())) == 1;
+        ERR_clear_error();
+        X509_CRL_free(crl);
+        return ok;
+    };
+    EXPECT_TRUE(verifies(gen1_cert));
+    EXPECT_FALSE(verifies(ca_->certPem()));
+}
+
+TEST_F(BrokerIdentityTest, ANonexistentGenerationOrTheWrongMasterKeyIsRefusedWithAReason) {
+    std::string err;
+    EXPECT_FALSE(tls::DeviceCa::openGeneration(dir_ / "ca", *mk_, 9, err));
+    EXPECT_EQ(err, "no_such_generation");
+
+    liveqx::auth::MasterKey other((dir_ / "other.key").string());
+    ASSERT_TRUE(other.load());
+    EXPECT_FALSE(tls::DeviceCa::openGeneration(dir_ / "ca", other, 1, err));
+    EXPECT_FALSE(err.empty()) << "a key that cannot be unsealed is said so";
+    EXPECT_TRUE(tls::DeviceCa::generations(dir_ / "nowhere").empty());
+}
+
+TEST_F(BrokerIdentityTest, OpeningTheNewestStillWorksTheSameWayAsBefore) {
+    addGeneration();
+    std::string err;
+    auto newest = tls::DeviceCa::open(dir_ / "ca", *mk_, err, false);
+    ASSERT_TRUE(newest) << err;
+    auto same = tls::DeviceCa::openGeneration(dir_ / "ca", *mk_, 2, err);
+    ASSERT_TRUE(same) << err;
+    EXPECT_EQ(newest->certPem(), same->certPem());
+    EXPECT_EQ(newest->generation(), same->generation());
 }
