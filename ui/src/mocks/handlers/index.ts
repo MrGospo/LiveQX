@@ -6,6 +6,7 @@ import type {
   ProfileSnapshot, WatcherStatus, NetworkInterface, GpuInfo,
 } from '@/api/types';
 import { fix25Handlers } from './fix25';
+import { playersHandlers } from './players';
 
 const D = 200; // simulated network delay ms
 
@@ -571,4 +572,6 @@ export const handlers = [
 
   // fix25 round 2 batch (Q1 sessions, Q5 live-status, Q8 preview, perf, system, stress, plugin detail, healthz)
   ...fix25Handlers,
+  // screens (players): module settings and the broker link
+  ...playersHandlers,
 ];
