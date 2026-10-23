@@ -19,6 +19,7 @@ namespace liveqx::api {
 //   Player*                — Admin: all. Others: only players in a group or
 //                            object they were given (B13); the event carries
 //                            group_id/object_id, one without them is Admin-only
+//   PlayerCommandJob       — Admin: all. Operator: only the jobs they started
 //   PlayersBrokerStatus    — Admin only (the broker page)
 //   PluginStatusChange     — Admin + Operator
 //   ChannelStateChange,

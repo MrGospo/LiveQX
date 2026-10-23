@@ -52,6 +52,23 @@ TEST(SseFilter, TheBrokerStatusIsForAdministratorsOnly) {
     EXPECT_FALSE(sseEventVisibleTo(ctxFor(Role::Viewer), evtFor(EventType::PlayersBrokerStatus)));
 }
 
+TEST(SseFilter, AJobsNewsGoesToAdministratorsAndToWhoeverStartedIt) {
+    auto job = [](std::int64_t by) {
+        Event e = evtFor(EventType::PlayerCommandJob);
+        if (by >= 0) e.payload["created_by"] = by;
+        e.payload["job_id"] = "j";
+        return e;
+    };
+    auto op = ctxFor(Role::Operator);
+    op.user_id = 7;
+    EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Admin), job(7)));
+    EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Admin), job(-1))) << "an administrator sees a job nobody is named on";
+    EXPECT_TRUE(sseEventVisibleTo(op, job(7)));
+    EXPECT_FALSE(sseEventVisibleTo(op, job(8))) << "somebody else's job";
+    EXPECT_FALSE(sseEventVisibleTo(op, job(-1)));
+    EXPECT_FALSE(sseEventVisibleTo(ctxFor(Role::Viewer), job(7))) << "a viewer never commands";
+}
+
 TEST(SseFilter, OperatorBlockedFromAuditEvent) {
     auto ctx = ctxFor(Role::Operator);
     EXPECT_FALSE(sseEventVisibleTo(ctx, evtFor(EventType::AuditEvent)));

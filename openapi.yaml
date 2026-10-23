@@ -5731,6 +5731,7 @@ components:
             type: object
             properties:
               player_id: { type: string, format: uuid }
+              player_name: { type: string, description: 'Нет, если экран уже удалён.' }
               batch: { type: integer }
               state: { type: string, enum: [queued, sent, skipped_offline, failed, cancelled] }
               command_id: { type: string, format: uuid }
@@ -5764,6 +5765,7 @@ components:
             type: object
             properties:
               player_id: { type: string, format: uuid }
+              name: { type: string, description: 'Название экрана, который ещё ждёт такую же команду.' }
               command_id: { type: string, format: uuid }
         sent:
           type: array

@@ -173,6 +173,8 @@ public:
 
 private:
     void announce(const CommandRow& c);
+    // A job started, sent a batch or finished: the page that shows jobs looks again.
+    void announceJob(const std::string& job_id);
     // Runs a job as far as it can go right now. Caller holds jobs_mu_.
     void advance(JobRow job, std::int64_t now);
     void endJob(const std::string& job_id, const std::string& state, const std::string& reason,

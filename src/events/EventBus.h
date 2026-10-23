@@ -51,6 +51,7 @@ enum class EventType {
     PlayerHeartbeat,       // {player_id, ...last state}              frequent; not in the default stream
     PlayerVersionChanged,  // {player_id, name, from, to}             player software updated
     PlayerCommand,         // {player_id, command_id, type, state, result}  a command was sent / settled
+    PlayerCommandJob,      // {job_id, state, created_by}            a command job started, sent a batch or finished
     PlayersBrokerStatus,   // {}                                      the broker link or the revocation file changed (administrators)
     AuditEvent,            // enterprise audit trail — one row inserted:
                            // {category, action, target_type, target_id,

@@ -649,6 +649,55 @@ TEST_F(BatchTest, AScreenThatDisappearedBeforeItsTurnIsSkippedNotCounted) {
     EXPECT_EQ(batcher_->jobView(out.job_id)->job.state, "done") << "a skipped screen is not a failure";
 }
 
+// Every change of a job is announced, so a page showing jobs never has to ask again.
+namespace {
+std::vector<nlohmann::json> jobEvents(const std::vector<liveqx::events::Event>& ev) {
+    std::vector<nlohmann::json> out;
+    for (const auto& e : ev)
+        if (e.type == EventType::PlayerCommandJob) out.push_back(e.payload);
+    return out;
+}
+}  // namespace
+
+TEST_F(BatchTest, AJobIsAnnouncedWhenItStartsWhenABatchGoesOutAndWhenItIsDone) {
+    ASSERT_EQ(players_->updateSettings({{"command_batch_size", "1"}}), "");
+    connected(2);
+    events();
+    auto out = startGroup(2);
+    ASSERT_TRUE(out.ok) << out.error;
+    auto started = jobEvents(events());
+    ASSERT_FALSE(started.empty());
+    for (const auto& p : started) {
+        EXPECT_EQ(p["job_id"], out.job_id);
+        EXPECT_EQ(p["state"], "running");
+        EXPECT_EQ(p["created_by"], 3) << "the filter shows the news to whoever started the job";
+    }
+
+    confirm(out.sent[0].player_id, out.sent[0].command_id);
+    batcher_->tick(kT0 + 10);                                 // the second batch goes out
+    EXPECT_FALSE(jobEvents(events()).empty()) << "a batch going out is news, though no state changed";
+
+    auto second = db_->pendingCommandsOf(batcher_->jobView(out.job_id)->items[1].item.player_id);
+    ASSERT_FALSE(second.empty());
+    confirm(second[0].player_id, second[0].id);
+    events();
+    batcher_->tick(kT0 + 20);                                 // the last screen has answered: the job closes
+    auto closing = jobEvents(events());
+    ASSERT_FALSE(closing.empty()) << "the closing comes after the last command's own news, so it needs its own";
+    EXPECT_EQ(closing.back()["state"], "done");
+}
+
+TEST_F(BatchTest, ACancelledOrStoppedJobIsAnnouncedToo) {
+    ASSERT_EQ(players_->updateSettings({{"command_batch_size", "2"}}), "");
+    connected(5);
+    auto out = startGroup(5);
+    events();
+    ASSERT_TRUE(batcher_->cancelJob(out.job_id, kT0 + 5).has_value());
+    auto ev = jobEvents(events());
+    ASSERT_FALSE(ev.empty());
+    EXPECT_EQ(ev.back()["state"], "cancelled");
+}
+
 TEST_F(BatchTest, ABatchWhollyAbsentWhenItsTurnComesDoesNotStallTheJob) {
     ASSERT_EQ(players_->updateSettings({{"command_batch_size", "1"}}), "");
     auto ids = connected(3);

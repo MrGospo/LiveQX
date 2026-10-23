@@ -64,6 +64,13 @@ bool sseEventVisibleTo(const liveqx::auth::RequestContext& ctx,
     switch (e.type) {
         case EventType::AuditEvent:
             return auditEventVisible(ctx, e);
+        case EventType::PlayerCommandJob: {
+            // A job is shown to whoever started it and to administrators, so its news goes the same way.
+            if (ctx.role == Role::Admin) return true;
+            if (ctx.role != Role::Operator) return false;
+            auto by = e.payload.find("created_by");
+            return by != e.payload.end() && by->is_number_integer() && by->get<std::int64_t>() == ctx.user_id;
+        }
         case EventType::PlayersBrokerStatus:           // the state of the broker is an administrator's page
             return ctx.role == Role::Admin;
         case EventType::PluginStatusChange:

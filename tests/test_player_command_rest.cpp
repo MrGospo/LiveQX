@@ -414,6 +414,7 @@ TEST(PlayerCommandRest, AGroupCommandNeedsThePhraseAndTheCountAndThenReachesTheC
     EXPECT_EQ(e["error"], "screens_busy");
     ASSERT_EQ(e["busy"].size(), 1u);
     EXPECT_EQ(e["busy"][0]["player_id"], f.P11);
+    EXPECT_EQ(e["busy"][0]["name"], "screen-11") << "the person is told WHICH screen still waits, not an id";
 }
 
 TEST(PlayerCommandRest, ScreensThatAreNotConnectedAreSkippedAndListed) {
@@ -540,6 +541,9 @@ TEST(PlayerCommandRest, AGroupCommandIsAJobThatTheStarterAndTheAdministratorCanF
     EXPECT_EQ(v["summary"]["pending"], 1);
     EXPECT_EQ(v["target"]["name"], "O1 / G11");
     EXPECT_EQ(v["items"].size(), 3u);
+    std::set<std::string> names;
+    for (const auto& it : v["items"]) names.insert(it.value("player_name", ""));
+    EXPECT_EQ(names, (std::set<std::string>{"screen-11", "extra-1", "extra-2"})) << "each row names its screen";
 
     EXPECT_EQ(cli.Get(("/api/command-jobs/" + job).c_str(), bearer(other.token))->status, 404)
         << "someone else's job is not theirs to see";

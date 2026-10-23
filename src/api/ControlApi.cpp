@@ -3690,9 +3690,14 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         if (!allowed) { writeJson(res, 403, {{"error", "forbidden"}}); return; }
 
         const CommandTarget target{kind, id};
-        auto planJson = [](const BulkPlan& p) {
+        auto planJson = [pls](const BulkPlan& p) {
             json busy = json::array();
-            for (const auto& b : p.busy) busy.push_back({{"player_id", b.player_id}, {"command_id", b.command_id}});
+            for (const auto& b : p.busy) {
+                // The name, so the person sees WHICH screens still wait (an id means nothing to them).
+                auto who = pls->db().findPlayer(b.player_id);
+                busy.push_back({{"player_id", b.player_id}, {"name", who ? who->name : std::string()},
+                                {"command_id", b.command_id}});
+            }
             return json{{"target_name", p.target_name}, {"required_phrase", p.required_phrase},
                         {"expected_count", p.total}, {"online", p.online.size()},
                         {"offline", p.offline}, {"busy", std::move(busy)}};
@@ -3725,7 +3730,11 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             else if (out.error == "screens_busy") {
                 code = 409;
                 json busy = json::array();
-                for (const auto& b : out.plan.busy) busy.push_back({{"player_id", b.player_id}, {"command_id", b.command_id}});
+                for (const auto& b : out.plan.busy) {
+                    auto who = pls->db().findPlayer(b.player_id);
+                    busy.push_back({{"player_id", b.player_id}, {"name", who ? who->name : std::string()},
+                                    {"command_id", b.command_id}});
+                }
                 err["busy"] = std::move(busy);
             }
             else if (out.error == "broker_unavailable")     code = 503;
@@ -3768,7 +3777,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
 
     // ─── Jobs that send a command in batches ────────────────────────────────
     // Visible to whoever started them and to administrators.
-    auto jobJson = [](const liveqx::players::JobView& v, bool with_items) {
+    auto jobJson = [](const liveqx::players::JobView& v, bool with_items, liveqx::players::PlayersDb* db) {
         const auto& j = v.job;
         json o = {{"id", j.id}, {"type", j.type},
                   {"target", {{"kind", j.target_kind}, {"id", j.target_id}, {"name", j.target_name}}},
@@ -3786,6 +3795,9 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             json arr = json::array();
             for (const auto& it : v.items) {
                 json x = {{"player_id", it.item.player_id}, {"batch", it.item.batch_no}, {"state", it.item.state}};
+                if (db) {
+                    if (auto who = db->findPlayer(it.item.player_id)) x["player_name"] = who->name;   // gone screens have none
+                }
                 if (!it.item.command_id.empty()) x["command_id"] = it.item.command_id;
                 if (!it.command_state.empty())   x["command_state"] = it.command_state;
                 if (!it.command_result.empty())  x["command_result"] = it.command_result;
@@ -3819,7 +3831,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         }
         json arr = json::array();
         for (const auto& j : pls->db().listJobs(only, 50))
-            if (auto v = cmds->jobView(j.id)) arr.push_back(jobJson(*v, false));
+            if (auto v = cmds->jobView(j.id)) arr.push_back(jobJson(*v, false, nullptr));
         writeJson(res, 200, json{{"jobs", std::move(arr)}});
     });
 
@@ -3833,7 +3845,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             writeJson(res, signed_in ? 404 : 401, {{"error", signed_in ? "not_found" : "unauthorized"}});
             return;
         }
-        writeJson(res, 200, jobJson(*v, true));
+        writeJson(res, 200, jobJson(*v, true, &pls->db()));
     });
 
     s.Post(R"(/api/command-jobs/([^/]+)/cancel)",
@@ -3849,7 +3861,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         }
         if (!cmds->cancelJob(id)) { writeJson(res, 409, {{"error", "not_running"}}); return; }
         auditPlayer("player.command_job_cancel", json{{"job_id", id}, {"type", before->type}, {"target", before->target_name}}, "");
-        writeJson(res, 200, jobJson(*cmds->jobView(id), true));
+        writeJson(res, 200, jobJson(*cmds->jobView(id), true, &pls->db()));
     });
 
     // ─── Who may see and command which players (B13) ────────────────────────

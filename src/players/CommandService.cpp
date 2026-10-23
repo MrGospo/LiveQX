@@ -66,6 +66,15 @@ void CommandService::announce(const CommandRow& c) {
     opts_.events->publish(events::EventType::PlayerCommand, -1, std::move(payload));
 }
 
+void CommandService::announceJob(const std::string& job_id) {
+    if (!opts_.events) return;
+    auto job = db_.findJob(job_id);
+    if (!job) return;
+    nlohmann::json payload = {{"job_id", job->id}, {"state", job->state}};
+    if (job->created_by) payload["created_by"] = *job->created_by;
+    opts_.events->publish(events::EventType::PlayerCommandJob, -1, std::move(payload));
+}
+
 CommandOutcome CommandService::sendToPlayer(const std::string& player_id, const std::string& type,
                                             std::optional<std::int64_t> issued_by, std::int64_t now) {
     CommandOutcome out;
@@ -263,6 +272,7 @@ BulkOutcome CommandService::sendToTarget(const CommandTarget& target, const std:
     std::lock_guard<std::mutex> lk(jobs_mu_);
     if (!db_.createJob(job, items)) { out.error = "storage_error"; return out; }
     advance(job, now);
+    announceJob(job.id);
 
     out.job_id     = job.id;
     out.batch_size = job.batch_size;
@@ -288,6 +298,7 @@ BulkOutcome CommandService::sendToTarget(const CommandTarget& target, const std:
 void CommandService::endJob(const std::string& job_id, const std::string& state, const std::string& reason,
                             std::int64_t now, bool notify) {
     if (!db_.finishJob(job_id, state, reason, now)) return;
+    announceJob(job_id);
     if (!notify || !opts_.on_job_end) return;
     if (auto v = jobView(job_id)) opts_.on_job_end(v->job, v->summary);
 }
@@ -346,6 +357,7 @@ void CommandService::advance(JobRow job, std::int64_t now) {
         }
         db_.setNextBatch(job.id, next + 1);
         job.next_batch = next + 1;
+        announceJob(job.id);                              // a new batch is out
     }
 }
 
