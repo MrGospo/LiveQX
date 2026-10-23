@@ -305,6 +305,21 @@ describe('BrokerPage', () => {
       expect(screen.getByText(/revoked: 3, authority generations: 2/)).toBeInTheDocument();
     });
 
+    it('calls the time before the setup ceremony waiting, not a failure', () => {
+      brokerState.data = baseBroker({ crl: { mode: 'local', last_ok: false, waiting: true, error: '', reload_error: '' } });
+      renderPage(<BrokerPage />);
+      expect(screen.getByText(/Waiting for the device authority/)).toBeInTheDocument();
+      expect(screen.queryByText('The list is not written')).not.toBeInTheDocument();
+      expect(screen.queryByText(/close to its end/)).not.toBeInTheDocument();
+    });
+
+    it('says in words when the broker is never told about a new list because its process-id file is not set', () => {
+      brokerState.data = baseBroker({ crl: { mode: 'local', last_ok: true, last_publish_at: nowSec() - 60,
+        valid_until: nowSec() + 80 * 86400, reload_error: 'pid_file_not_configured', revoked: 0, generations: 1 } });
+      renderPage(<BrokerPage />);
+      expect(screen.getByText(/process-id file is not set in the server's settings/)).toBeInTheDocument();
+    });
+
     it('warns loudly when the list is close to running out, since that would lock everyone out', () => {
       brokerState.data = baseBroker({ crl: {
         mode: 'local', last_ok: false, error: 'generation_1: cannot be opened',

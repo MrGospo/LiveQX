@@ -1178,7 +1178,7 @@ int main(int argc, char* argv[]) {
             // mode "off" (default) or "local" — write the file and tell a broker on this
             // machine to re-read it. A broker elsewhere cannot be signalled and is
             // protected by its records of players alone (the other locks).
-            // Keys: path, pid_file, next_update_days (30), refresh_hours (24).
+            // Keys: path, pid_file, next_update_days (90), refresh_hours (24).
             {
                 json ccfg = json::object();
                 if (cfg.contains("players") && cfg["players"].is_object() &&
@@ -1189,7 +1189,7 @@ int main(int argc, char* argv[]) {
                     liveqx::players::CrlPublisherOptions co;
                     co.path = ccfg.value("path", paths.brokerCrlFile().string());
                     co.on_change = announce_broker_change;
-                    co.next_update_days   = std::clamp(ccfg.value("next_update_days", 30), 2, 365);
+                    co.next_update_days   = std::clamp(ccfg.value("next_update_days", 90), 2, 365);
                     co.refresh_interval_s = std::clamp<std::int64_t>(ccfg.value("refresh_hours", 24), 1, 24 * 7) * 3600;
                     const auto ca_dir = paths.deviceCaDir();
                     co.generations = [ca_dir] { return liveqx::tls::DeviceCa::generations(ca_dir); };
@@ -1199,8 +1199,10 @@ int main(int argc, char* argv[]) {
                     const std::string pid_file = ccfg.value("pid_file", std::string());
                     if (!pid_file.empty())
                         co.reload = [pid_file] { return liveqx::mqtt::reloadBrokerFromPidFile(pid_file); };
-                    else
+                    else {
                         LOG_WARN("Players: broker CRL is written but players.broker.crl.pid_file is not set — the broker is not told to re-read it");
+                        co.reload = [] { return std::string("pid_file_not_configured"); };    // shown on the broker page
+                    }
                     const std::string crl_file = co.path.string();
                     crl_publisher = std::make_unique<liveqx::players::CrlPublisher>(players_db, std::move(co));
                     {
@@ -1602,6 +1604,7 @@ int main(int argc, char* argv[]) {
                             const auto c = crl_publisher->status();
                             crl["last_publish_at"] = c.last_publish_at;
                             crl["last_ok"]         = c.last_ok;
+                            crl["waiting"]         = c.waiting;
                             crl["error"]           = c.error;
                             crl["reload_error"]    = c.reload_error;
                             crl["revoked"]         = c.revoked;

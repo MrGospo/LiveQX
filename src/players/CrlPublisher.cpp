@@ -2,21 +2,65 @@
 
 #include "utils/Log.h"
 
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+
 #include <sys/stat.h>
 
 #include <algorithm>
 #include <chrono>
 #include <ctime>
 #include <fstream>
+#include <iterator>
 
 namespace liveqx::players {
 
 namespace fs = std::filesystem;
 
+namespace {
+
+// When the lists in an existing file run out (the earliest of them); 0 if there is no usable file.
+std::int64_t validUntilOfFile(const fs::path& path) {
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec)) return 0;
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return 0;
+    const std::string pem((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
+    if (!bio) return 0;
+    std::int64_t earliest = 0;
+    while (X509_CRL* crl = PEM_read_bio_X509_CRL(bio, nullptr, nullptr, nullptr)) {
+        const ASN1_TIME* next = X509_CRL_get0_nextUpdate(crl);
+        std::tm tm{};
+        if (next && ASN1_TIME_to_tm(next, &tm) == 1) {
+            const std::int64_t t = static_cast<std::int64_t>(timegm(&tm));
+            if (earliest == 0 || t < earliest) earliest = t;
+        }
+        X509_CRL_free(crl);
+    }
+    BIO_free(bio);
+    ERR_clear_error();
+    return earliest;
+}
+
+}  // namespace
+
 CrlPublisher::CrlPublisher(PlayersDb& db, CrlPublisherOptions opts) : db_(db), opts_(std::move(opts)) {
     opts_.next_update_days = std::max(2, opts_.next_update_days);
     opts_.refresh_interval_s = std::max<std::int64_t>(60, opts_.refresh_interval_s);
     opts_.retry_s = std::max<std::int64_t>(1, opts_.retry_s);
+    opts_.waiting_retry_s = std::max<std::int64_t>(1, opts_.waiting_retry_s);
+    // A list that is refreshed less often than it runs out would shut every screen out between refreshes.
+    const std::int64_t most = std::int64_t{opts_.next_update_days} * 86400 / 3;
+    if (opts_.refresh_interval_s > most) {
+        LOG_WARN("Broker CRL: refresh every {} h is too rare for lists valid {} days — refreshing every {} h",
+                 opts_.refresh_interval_s / 3600, opts_.next_update_days, most / 3600);
+        opts_.refresh_interval_s = most;
+    }
+    // Until the first publication the page should still know how long the file on disk is good for.
+    status_.valid_until = validUntilOfFile(opts_.path);
 }
 
 CrlPublisher::~CrlPublisher() { stop(); }
@@ -32,6 +76,7 @@ CrlStatus CrlPublisher::publishNow() {
     CrlStatus st = status();
     st.last_attempt_at = now;
     st.last_ok = false;
+    st.waiting = false;
     st.error.clear();
     st.reload_error.clear();
     auto finish = [&]() {
@@ -44,7 +89,7 @@ CrlStatus CrlPublisher::publishNow() {
     };
 
     const std::vector<int> gens = opts_.generations ? opts_.generations() : std::vector<int>{};
-    if (gens.empty()) { st.error = "no_device_ca"; return finish(); }
+    if (gens.empty()) { st.waiting = true; return finish(); }      // before the device CA ceremony: normal, not a fault
 
     // Every generation, in one file. If any cannot be signed, nothing is written.
     std::string all;
@@ -131,20 +176,28 @@ void CrlPublisher::request() {
 void CrlPublisher::run() {
     std::unique_lock<std::mutex> lk(mu_);
     std::int64_t wait_s = opts_.refresh_interval_s;
+    bool was_waiting = false;
     while (!stopping_) {
         cv_.wait_for(lk, std::chrono::seconds(wait_s), [&] { return stopping_ || wanted_; });
         if (stopping_) break;
         wanted_ = false;
         lk.unlock();
         const CrlStatus st = publishNow();
-        if (!st.last_ok)
+        if (st.waiting) {
+            if (!was_waiting) LOG_INFO("Broker CRL: waiting for the device CA (nothing to publish yet)");
+        } else if (!st.last_ok) {
             LOG_ERROR("Broker CRL: could not publish — {}", st.error);
-        else if (!st.reload_error.empty())
-            LOG_WARN("Broker CRL: written ({} revoked, {} generation(s)) but the broker was not told: {}",
-                     st.revoked, st.generations, st.reload_error);
+        } else {
+            if (was_waiting) LOG_INFO("Broker CRL: the device CA is there, the list is published");
+            if (!st.reload_error.empty())
+                LOG_WARN("Broker CRL: written ({} revoked, {} generation(s)) but the broker was not told: {}",
+                         st.revoked, st.generations, st.reload_error);
+        }
+        was_waiting = st.waiting;
         lk.lock();
-        // Sooner after a failure; otherwise the usual refresh, long before any list runs out.
-        wait_s = (!st.last_ok || !st.reload_error.empty()) ? opts_.retry_s : opts_.refresh_interval_s;
+        // Soon again while waiting for the CA or after a failure; otherwise the usual refresh, long before any list runs out.
+        wait_s = st.waiting ? opts_.waiting_retry_s
+               : (!st.last_ok || !st.reload_error.empty()) ? opts_.retry_s : opts_.refresh_interval_s;
     }
 }
 

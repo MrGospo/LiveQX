@@ -90,6 +90,15 @@ int countLists(const std::string& pem) {
     return n;
 }
 
+template <class P>
+bool waitUntil(P pred, int limit_ms = 3000) {
+    for (int waited = 0; waited < limit_ms; waited += 10) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return pred();
+}
+
 class CrlPublisherTest : public ::testing::Test {
 protected:
     fs::path dir_;
@@ -293,7 +302,7 @@ TEST_F(CrlPublisherTest, EachPublicationCarriesANewListNumberAndTheUsualTimeToLi
     ASSERT_TRUE(st.last_ok);
     const std::string second = slurp(dir_ / "crl.pem");
     EXPECT_NE(first, second) << "a fresh list every time";
-    EXPECT_EQ(st.valid_until, now_ + 30LL * 86400);
+    EXPECT_EQ(st.valid_until, now_ + 90LL * 86400) << "the usual time to live is 90 days";
 
     BIO* b = BIO_new_mem_buf(second.data(), static_cast<int>(second.size()));
     X509_CRL* crl = PEM_read_bio_X509_CRL(b, nullptr, nullptr, nullptr);
@@ -337,8 +346,51 @@ TEST_F(CrlPublisherTest, WithoutADeviceCaThereIsNothingToPublishAndNoFile) {
     CrlPublisher pub(*db_, std::move(o));
     auto st = pub.publishNow();
     EXPECT_FALSE(st.last_ok);
-    EXPECT_EQ(st.error, "no_device_ca");
+    EXPECT_TRUE(st.waiting) << "no device CA yet is a state of waiting, not a fault";
+    EXPECT_EQ(st.error, "");
     EXPECT_FALSE(fs::exists(dir_ / "crl.pem"));
+}
+
+TEST_F(CrlPublisherTest, WhileWaitingForTheCaItLooksAgainSoonAndPublishesAsSoonAsItAppears) {
+    auto o = options(dir_ / "crl.pem");
+    std::atomic<bool> ca_there{false};
+    auto real = o.generations;
+    o.generations = [&, real] { return ca_there.load() ? real() : std::vector<int>{}; };
+    o.waiting_retry_s = 1;
+    o.refresh_interval_s = 3600;
+    CrlPublisher pub(*db_, std::move(o));
+    pub.start();
+    ASSERT_TRUE(waitUntil([&] { return pub.status().waiting; }));
+    ca_there = true;
+    EXPECT_TRUE(waitUntil([&] { return pub.status().last_ok; }, 5000)) << "the ceremony was done a moment ago; no need to wait the hour";
+    EXPECT_FALSE(pub.status().waiting);
+    pub.stop();
+}
+
+TEST_F(CrlPublisherTest, ThePageKnowsHowLongTheFileOnDiskIsGoodForBeforeTheFirstPublicationOfThisRun) {
+    CrlPublisher first(*db_, options(dir_ / "crl.pem"));
+    const auto st = first.publishNow();
+    ASSERT_TRUE(st.last_ok);
+    CrlPublisher second(*db_, options(dir_ / "crl.pem"));         // the server restarted
+    EXPECT_NEAR(static_cast<double>(second.status().valid_until), static_cast<double>(st.valid_until), 2.0);
+
+    const fs::path broken = dir_ / "broken.pem";
+    { std::ofstream(broken) << "not a list"; }
+    CrlPublisher third(*db_, options(broken));
+    EXPECT_EQ(third.status().valid_until, 0) << "a file that is not a list says nothing, and does not break the start";
+}
+
+TEST_F(CrlPublisherTest, ARefreshThatIsTooRareForHowLongTheListIsValidIsMadeFrequentEnough) {
+    auto o = options(dir_ / "crl.pem");
+    o.next_update_days = 3;
+    o.refresh_interval_s = 7 * 86400;
+    CrlPublisher pub(*db_, std::move(o));
+    EXPECT_LE(pub.refreshIntervalSeconds() * 3, std::int64_t{3} * 86400);
+
+    auto fine = options(dir_ / "crl2.pem");
+    fine.next_update_days = 90;
+    fine.refresh_interval_s = 86400;
+    EXPECT_EQ(CrlPublisher(*db_, std::move(fine)).refreshIntervalSeconds(), 86400) << "a sensible setting is left alone";
 }
 
 TEST_F(CrlPublisherTest, TheBrokerIsToldAfterTheFileIsWrittenAndFailingToTellIsReportedNotFatal) {

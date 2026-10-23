@@ -209,8 +209,7 @@ bool MosquittoClient::start() {
     mosquitto_void_option(mosq_, MOSQ_OPT_SSL_CTX, ctx.get());
     mosquitto_int_option(mosq_, MOSQ_OPT_SSL_CTX_WITH_DEFAULTS, 0);   // our settings, as built
     mosquitto_tls_insecure_set(mosq_, !opts_.verify_hostname);
-    mosquitto_reconnect_delay_set(mosq_, std::max(1, opts_.reconnect_min_s),
-                                  std::max(opts_.reconnect_min_s, opts_.reconnect_max_s), true);
+    mosquitto_threaded_set(mosq_, true);     // other threads publish while ours runs the loop
     mosquitto_connect_v5_callback_set(mosq_, &Callbacks::connect);
     mosquitto_disconnect_v5_callback_set(mosq_, &Callbacks::disconnect);
     mosquitto_message_v5_callback_set(mosq_, &Callbacks::message);
@@ -218,31 +217,44 @@ bool MosquittoClient::start() {
 
     stopping_ = false;
     started_  = true;
-    connector_ = std::thread([this] { connectLoop(); });
+    worker_ = std::thread([this] { run(); });
     return true;
 }
 
-void MosquittoClient::connectLoop() {
+void MosquittoClient::run() {
     mosquitto_property* props = nullptr;
     mosquitto_property_add_int32(&props, MQTT_PROP_SESSION_EXPIRY_INTERVAL, opts_.session_expiry_s);
 
-    int pause = std::max(1, opts_.reconnect_min_s);
+    const int pause_min = std::max(1, opts_.reconnect_min_s);
+    const int pause_max = std::max(pause_min, opts_.reconnect_max_s);
+    int pause = pause_min;
     while (!stopping_.load()) {
+        ERR_clear_error();                       // nothing left over from the last connection may sway this one
         const int rc = mosquitto_connect_bind_v5(mosq_, opts_.host.c_str(), opts_.port, opts_.keepalive_s,
                                                  nullptr, props);
         if (rc == MOSQ_ERR_SUCCESS) {
-            mosquitto_loop_start(mosq_);         // from here the library keeps the session alive
-            mosquitto_property_free_all(&props);
-            return;
+            bool was_up = false;
+            while (!stopping_.load()) {
+                if (mosquitto_loop(mosq_, 100, 1) != MOSQ_ERR_SUCCESS) break;   // the connection is gone
+                was_up = was_up || connected_.load();
+            }
+            if (was_up) pause = pause_min;       // it worked for a while: start the pauses over
+        } else {
+            std::string why = rc == MOSQ_ERR_TLS     ? "TLS handshake failed (certificate rejected or the name does not match)"
+                            : rc == MOSQ_ERR_ERRNO   ? std::string("cannot connect: ") + std::strerror(errno)
+                                                     : std::string("cannot connect: ") + mosquitto_strerror(rc);
+            setError(why);
+            notifyState(false, why);
         }
-        std::string why = rc == MOSQ_ERR_TLS     ? "TLS handshake failed (certificate rejected or the name does not match)"
-                        : rc == MOSQ_ERR_ERRNO   ? std::string("cannot connect: ") + std::strerror(errno)
-                                                 : std::string("cannot connect: ") + mosquitto_strerror(rc);
-        setError(why);
-        notifyState(false, why);
         for (int waited = 0; waited < pause * 10 && !stopping_.load(); ++waited)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        pause = std::min(pause * 2, std::max(opts_.reconnect_min_s, opts_.reconnect_max_s));
+        pause = std::min(pause * 2, pause_max);
+    }
+
+    // Leaving: say goodbye while the connection is still up (a few turns of the loop send it).
+    if (connected_.load()) {
+        mosquitto_disconnect(mosq_);
+        for (int i = 0; i < 10 && mosquitto_loop(mosq_, 100, 1) == MOSQ_ERR_SUCCESS; ++i) {}
     }
     mosquitto_property_free_all(&props);
 }
@@ -256,7 +268,6 @@ void MosquittoClient::onConnect(int reason) {
         notifyState(false, why);
         return;
     }
-    connected_ = true;
     std::vector<std::pair<std::string, int>> subs;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -265,6 +276,7 @@ void MosquittoClient::onConnect(int reason) {
     }
     for (const auto& [filter, qos] : subs)
         mosquitto_subscribe_v5(mosq_, nullptr, filter.c_str(), qos, 0, nullptr);
+    connected_ = true;                       // only now: whoever sees "connected" may rely on the subscriptions being queued first
     notifyState(true, "");
 }
 
@@ -279,10 +291,8 @@ void MosquittoClient::onDisconnect(int reason) {
 void MosquittoClient::stop() {
     if (!started_.exchange(false)) return;
     stopping_ = true;
-    if (connector_.joinable()) connector_.join();
+    if (worker_.joinable()) worker_.join();
     if (mosq_) {
-        mosquitto_disconnect(mosq_);
-        mosquitto_loop_stop(mosq_, true);
         mosquitto_destroy(mosq_);
         mosq_ = nullptr;
     }

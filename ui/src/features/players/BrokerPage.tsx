@@ -30,7 +30,7 @@ const STATE_STYLE: Record<BrokerState, string> = {
 };
 
 const HOST_RE = /^[A-Za-z0-9._:][A-Za-z0-9._:-]*$/;
-const RELOAD_ERRORS = ['pid_file_unreadable', 'bad_pid', 'process_not_running', 'not_the_broker', 'signal_failed'];
+const RELOAD_ERRORS = ['pid_file_unreadable', 'bad_pid', 'process_not_running', 'not_the_broker', 'signal_failed', 'pid_file_not_configured'];
 const SOON_SECONDS = 7 * 86400;                // a revocation list this close to its end is worth a warning
 
 type Form = { host: string; port: number | ''; verify_hostname: boolean; reconcile_interval_s: number | '' };
@@ -265,10 +265,17 @@ export default function BrokerPage() {
             <p className="text-sm text-[var(--text-muted)] m-0">{t('players.broker.crl.off')}</p>
           ) : (
             <div className="flex flex-col gap-2 text-sm">
-              <p className={clsx('m-0 flex items-center gap-1.5', crl.last_ok ? 'text-[var(--success)]' : 'text-[var(--danger)]')}>
-                {crl.last_ok ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
-                {crl.last_ok ? t('players.broker.crl.ok') : t('players.broker.crl.notPublished')}
-              </p>
+              {crl.waiting ? (
+                <p className="m-0 flex items-center gap-1.5 text-[var(--warning)]">
+                  <Loader2 size={14} className="animate-spin" aria-hidden />
+                  {t('players.broker.crl.waiting')}
+                </p>
+              ) : (
+                <p className={clsx('m-0 flex items-center gap-1.5', crl.last_ok ? 'text-[var(--success)]' : 'text-[var(--danger)]')}>
+                  {crl.last_ok ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
+                  {crl.last_ok ? t('players.broker.crl.ok') : t('players.broker.crl.notPublished')}
+                </p>
+              )}
               {!!crl.error && <p className="m-0 text-xs text-[var(--danger)]">{t('players.broker.crl.error')}: <span className="font-mono">{crl.error}</span></p>}
               {!!crl.reload_error && (
                 <p className="m-0 text-xs text-[var(--warning)]">

@@ -208,10 +208,18 @@ PublishResult BrokerLink::publish(const Message& m) {
 }
 
 void BrokerLink::tearDown() {
-    std::lock_guard<std::mutex> lk(client_mu_);
-    if (client_) client_->stop();          // joins its threads before the administrator goes
-    admin_.reset();
-    client_.reset();
+    // Take them out under the lock, stop them outside it: stopping waits for the client's thread,
+    // which may be in the middle of a slow connect, and publish() must not queue up behind that.
+    std::unique_ptr<IMqttClient> client;
+    std::unique_ptr<BrokerAdmin> admin;
+    {
+        std::lock_guard<std::mutex> lk(client_mu_);
+        client = std::move(client_);
+        admin  = std::move(admin_);
+    }
+    if (client) client->stop();            // joins its threads before the administrator goes
+    admin.reset();
+    client.reset();
     was_up_ = false;
     serial_.clear();
 }
@@ -300,6 +308,8 @@ void BrokerLink::run() {
                 if (!rep.ok) {
                     dirty_ = true;                // try again soon
                     status_.detail = rep.error;
+                } else {
+                    status_.detail.clear();       // a pass that worked ends the complaint of the one before
                 }
             }
             if (opts_.on_change) opts_.on_change();               // the time and the result of the pass are on the page

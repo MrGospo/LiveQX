@@ -13,7 +13,8 @@
 // Two ways this can go wrong, and what is done about them:
 //   * A list has an expiry date, and past it the broker rejects EVERYONE. So the
 //     file is rewritten and the broker told to re-read it on a schedule (daily),
-//     long before the date (30 days ahead), not only when someone is revoked.
+//     long before the date (90 days ahead), not only when someone is revoked. The
+//     refresh must come at least three times within the validity, or it is made so.
 //   * Writing can fail half way. The file is replaced atomically, and if any
 //     generation cannot be signed nothing is written: the old file stays in force.
 //
@@ -37,9 +38,10 @@ namespace liveqx::players {
 
 struct CrlPublisherOptions {
     std::filesystem::path path;                  // the file the broker reads
-    int                   next_update_days{30};  // how long a list is valid
+    int                   next_update_days{90};  // how long a list is valid
     std::int64_t          refresh_interval_s{86400};
     std::int64_t          retry_s{60};           // after a failure
+    std::int64_t          waiting_retry_s{10};   // while there is no device CA yet (normal before the ceremony)
     // Which generations of the device CA exist, and how to open one.
     std::function<std::vector<int>()> generations;
     std::function<std::unique_ptr<tls::DeviceCa>(int generation, std::string& err)> open_generation;
@@ -55,11 +57,12 @@ struct CrlStatus {
     std::int64_t last_attempt_at{0};
     std::int64_t last_publish_at{0};             // the last time the file was really written
     bool         last_ok{false};
+    bool         waiting{false};                 // no device CA yet: nothing to publish, and that is not a fault
     std::string  error;                          // why the last attempt failed ("" if it did not)
     std::string  reload_error;                   // the file was written but the broker was not told
     std::size_t  revoked{0};                     // entries in the lists
     std::size_t  generations{0};
-    std::int64_t valid_until{0};                 // when the lists in the file run out
+    std::int64_t valid_until{0};                 // when the lists in the file run out (read from the file at start)
 };
 
 class CrlPublisher {
@@ -80,6 +83,8 @@ public:
     void request();
 
     CrlStatus status() const;
+    // How often the list is rewritten (after the check against how long it is valid).
+    std::int64_t refreshIntervalSeconds() const { return opts_.refresh_interval_s; }
 
 private:
     void run();

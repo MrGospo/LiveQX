@@ -177,6 +177,22 @@ TEST(BrokerLink, ALostConnectionIsReportedAndRecoveredFrom) {
     link.stop();
 }
 
+TEST(BrokerLink, TheComplaintOfAFailedPassIsGoneOnceAPassWorks) {
+    Rig rig;
+    rig.setWanted({A});
+    BrokerLink link(rig.options());
+    link.start();
+    ASSERT_TRUE(waitFor([&] { return link.status().state == "connected" && link.status().last_reconcile_ok; }));
+    rig.last()->dynsec = false;                         // the broker stops answering administration
+    link.requestSync();
+    ASSERT_TRUE(waitFor([&] { return !link.status().last_reconcile_ok; }));
+    EXPECT_FALSE(link.status().detail.empty());
+    rig.last()->dynsec = true;
+    ASSERT_TRUE(waitFor([&] { return link.status().last_reconcile_ok; }));
+    EXPECT_EQ(link.status().detail, "") << "a good pass leaves no old complaint on the page";
+    link.stop();
+}
+
 TEST(BrokerLink, ARenewedIdentityMakesItReconnectWithTheNewOne) {
     Rig rig;
     BrokerLink link(rig.options());

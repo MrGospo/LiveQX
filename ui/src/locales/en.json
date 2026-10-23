@@ -2147,6 +2147,7 @@
         "hint": "If a screen is stolen or retired, its certificate is revoked. The broker keeps such a screen out when it is given this list.",
         "off": "The list is not passed to the broker (the mode is off in the server configuration). A revoked screen loses all rights on the broker and is disconnected, but may connect again and do nothing. For full protection set players.broker.crl.mode = local.",
         "ok": "The list is written",
+        "waiting": "Waiting for the device authority: the list will be written after the setup ceremony",
         "notPublished": "The list is not written",
         "error": "Error",
         "reloadFailed": "The list is written, but the broker could not be told",
@@ -2155,6 +2156,7 @@
           "bad_pid": "the process-id file holds a bad value",
           "process_not_running": "the broker process is not running",
           "not_the_broker": "the process at that number is not the broker",
+          "pid_file_not_configured": "the broker's process-id file is not set in the server's settings, so the broker is not told to reread the list",
           "signal_failed": "the signal to the broker could not be sent"
         },
         "published": "Written",

@@ -4,9 +4,10 @@
 //
 // TLS material is handed to the library as an in-memory SSL_CTX, so the
 // server's private key (which administers the broker) never touches the disk.
-// The first connection and its retries run on a thread of ours (the library's
-// MQTT 5 connect is blocking); once connected, the library's own thread keeps
-// the session alive and reconnects with a growing pause.
+// One thread of ours connects, keeps the session alive and reconnects with a
+// growing pause. The library's own network thread is not used: it ends for good
+// when a broker dies without a TLS goodbye (OpenSSL reports that as a protocol
+// error, which the library treats as fatal), and then nothing would reconnect.
 
 #include "mqtt/MqttClient.h"
 
@@ -39,7 +40,7 @@ private:
     struct Callbacks;                       // libmosquitto trampolines
     friend struct Callbacks;
 
-    void connectLoop();
+    void run();
     void onConnect(int reason);
     void onDisconnect(int reason);
     void setError(std::string e);
@@ -47,7 +48,7 @@ private:
 
     ClientOptions opts_;
     mosquitto*    mosq_{nullptr};
-    std::thread   connector_;
+    std::thread   worker_;
     std::atomic<bool> stopping_{false};
     std::atomic<bool> started_{false};
     std::atomic<bool> connected_{false};

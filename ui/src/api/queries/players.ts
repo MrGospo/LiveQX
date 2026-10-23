@@ -61,6 +61,7 @@ export interface BrokerCrlStatus {
   mode:             'off' | 'local';
   last_publish_at?: number;
   last_ok?:         boolean;
+  waiting?:         boolean;
   error?:           string;
   reload_error?:    string;
   revoked?:         number;
