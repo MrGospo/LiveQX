@@ -13,6 +13,7 @@
     "playersSettings": "Настройки",
     "playersList": "Список",
     "playersJobs": "Задания",
+    "playersAudit": "Журнал",
     "playersObjects": "Объекты и группы",
     "playersBroker": "Брокер",
     "settingsUsers": "Пользователи",
@@ -1524,6 +1525,59 @@
     }
   },
   "players": {
+    "audit": {
+      "title": "Журнал по местам",
+      "fullJournal": "Полный журнал сервера",
+      "lead": "Что делали с экранами в тех местах, журнал которых вам открыл администратор. Здесь видны только они.",
+      "leadAdmin": "Что делали с экранами по всем местам. Можно сузить до объекта или группы.",
+      "noRight": "Журнал ни одного места вам не открыт. Если он нужен, попросите администратора.",
+      "loadFailed": "Не удалось загрузить журнал.",
+      "otherPlace": "другое место",
+      "to": "→",
+      "empty": {
+        "title": "Записей нет",
+        "text": "Действия с экранами этого места появятся здесь."
+      },
+      "col": {
+        "time": "Когда",
+        "who": "Кто",
+        "what": "Что сделано",
+        "about": "С чем",
+        "where": "Где"
+      },
+      "action": {
+        "player_register": "Добавлен экран",
+        "player_delete": "Удалён экран",
+        "player_revoke": "Экран отозван",
+        "player_token_reissue": "Выдан новый токен",
+        "player_re_enroll": "Экран привязан заново",
+        "player_move": "Экран перенесён",
+        "player_enroll": "Экран привязан",
+        "player_renew": "Продлён сертификат",
+        "player_object_create": "Создан объект",
+        "player_object_rename": "Объект переименован",
+        "player_object_delete": "Объект удалён",
+        "player_group_create": "Создана группа",
+        "player_group_rename": "Группа переименована",
+        "player_group_delete": "Группа удалена",
+        "player_command_sent": "Команда экрану",
+        "player_command_group": "Команда группе",
+        "player_command_object": "Команда объекту",
+        "player_command_all": "Команда всем экранам",
+        "player_command_release": "Блокировка команды снята",
+        "player_command_job_end": "Задание закончено",
+        "player_command_job_cancel": "Задание отменено",
+        "player_device_denied": "Отказано устройству",
+        "player_renew_denied": "Отказано в продлении",
+        "player_renew_failed": "Не удалось продлить"
+      }
+    },
+    "place": {
+      "object": "Объект",
+      "group": "Группа",
+      "allObjects": "Все объекты",
+      "allGroups": "Все группы"
+    },
     "command": {
       "button": "Команда",
       "one": "Команда",

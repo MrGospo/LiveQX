@@ -20,6 +20,7 @@ const PlayersPage               = React.lazy(() => import('@/features/players/Pl
 const PlayerDetailPage         = React.lazy(() => import('@/features/players/PlayerDetailPage'));
 const JobsPage                  = React.lazy(() => import('@/features/players/JobsPage'));
 const JobDetailPage            = React.lazy(() => import('@/features/players/JobDetailPage'));
+const PlayersAuditPage         = React.lazy(() => import('@/features/players/PlayersAuditPage'));
 const ObjectsPage               = React.lazy(() => import('@/features/players/ObjectsPage'));
 const PlayersSettingsPage      = React.lazy(() => import('@/features/players/PlayersSettingsPage'));
 const BrokerPage               = React.lazy(() => import('@/features/players/BrokerPage'));
@@ -113,6 +114,7 @@ export function AppRoutes() {
           <Route path="/players"           element={<PlayersPage />} />
           <Route path="/players/jobs"      element={<RequireRole minRole="operator"><JobsPage /></RequireRole>} />
           <Route path="/players/jobs/:id"  element={<RequireRole minRole="operator"><JobDetailPage /></RequireRole>} />
+          <Route path="/players/audit"     element={<PlayersAuditPage />} />
           <Route path="/players/objects"   element={<RequireRole minRole="admin"><ObjectsPage /></RequireRole>} />
           <Route path="/players/settings"  element={<RequireRole minRole="admin"><PlayersSettingsPage /></RequireRole>} />
           <Route path="/players/broker"    element={<RequireRole minRole="admin"><BrokerPage /></RequireRole>} />

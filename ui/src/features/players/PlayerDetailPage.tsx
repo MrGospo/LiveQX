@@ -9,9 +9,8 @@ import {
 } from '@/api/queries/players';
 import { ApiClientError } from '@/api/client';
 import { Block } from '@/components/Block';
-import { SubNav } from '@/components/SubNav';
 import { useNow } from '@/hooks/useNow';
-import { PLAYERS_NAV } from './nav';
+import { PlayersSubNav } from './PlayersSubNav';
 import { absoluteTime, formatDuration, relativeFromNow } from './format';
 import { PlayerActions } from './PlayerActions';
 import { StatusBadge, screenStatus, describeEvent, commandTypeLabel } from './status';
@@ -130,7 +129,7 @@ export default function PlayerDetailPage() {
     const notFound = player.error instanceof ApiClientError && player.error.status === 404;
     return (
       <div className="p-7 flex flex-col gap-5">
-        <SubNav items={PLAYERS_NAV} />
+        <PlayersSubNav />
         {back}
         <p role="alert" className="text-sm text-[var(--danger)]">
           {notFound ? t('players.detail.notFound') : t('players.detail.loadFailed')}
@@ -146,7 +145,7 @@ export default function PlayerDetailPage() {
 
   return (
     <div className="p-7 flex flex-col gap-5">
-      <SubNav items={PLAYERS_NAV} />
+      <PlayersSubNav />
       {back}
 
       <div className="flex flex-wrap items-center gap-3">

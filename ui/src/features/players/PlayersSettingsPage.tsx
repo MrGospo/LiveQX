@@ -8,9 +8,8 @@ import {
 } from '@/api/queries/players';
 import { ApiClientError } from '@/api/client';
 import { Block } from '@/components/Block';
-import { SubNav } from '@/components/SubNav';
 import { useToast } from '@/hooks/useToast';
-import { PLAYERS_NAV } from './nav';
+import { PlayersSubNav } from './PlayersSubNav';
 import { TextField, NumberField, Field, SectionTitle, inputCls } from './fields';
 import { humanSeconds } from './format';
 
@@ -134,7 +133,7 @@ export default function PlayersSettingsPage() {
   if (isError || !form || !data) {
     return (
       <div className="p-7 flex flex-col gap-5">
-        <SubNav items={PLAYERS_NAV} />
+        <PlayersSubNav />
         <p role="alert" className="text-sm text-[var(--danger)]">{t('players.settings.loadFailed')}</p>
       </div>
     );
@@ -159,7 +158,7 @@ export default function PlayersSettingsPage() {
 
   return (
     <div className="p-7 flex flex-col gap-5">
-      <SubNav items={PLAYERS_NAV} />
+      <PlayersSubNav />
 
       <div className="flex items-center gap-3">
         <MonitorSmartphone size={20} className="text-[var(--accent)]" />

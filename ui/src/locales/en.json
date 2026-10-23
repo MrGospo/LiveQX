@@ -13,6 +13,7 @@
     "playersSettings": "Settings",
     "playersList": "List",
     "playersJobs": "Jobs",
+    "playersAudit": "Journal",
     "playersObjects": "Objects and groups",
     "playersBroker": "Broker",
     "settingsUsers": "Users",
@@ -1517,6 +1518,59 @@
     }
   },
   "players": {
+    "audit": {
+      "title": "Journal by place",
+      "fullJournal": "The server's full journal",
+      "lead": "What was done with screens in the places whose journal an administrator has opened to you. Only those are shown.",
+      "leadAdmin": "What was done with screens, in every place. You can narrow it to an object or a group.",
+      "noRight": "No place's journal is open to you. If you need one, ask an administrator.",
+      "loadFailed": "Could not load the journal.",
+      "otherPlace": "another place",
+      "to": "→",
+      "empty": {
+        "title": "No records",
+        "text": "Actions on the screens of this place will appear here."
+      },
+      "col": {
+        "time": "When",
+        "who": "Who",
+        "what": "What was done",
+        "about": "About",
+        "where": "Where"
+      },
+      "action": {
+        "player_register": "Screen added",
+        "player_delete": "Screen deleted",
+        "player_revoke": "Screen revoked",
+        "player_token_reissue": "New token issued",
+        "player_re_enroll": "Screen bound again",
+        "player_move": "Screen moved",
+        "player_enroll": "Screen enrolled",
+        "player_renew": "Certificate renewed",
+        "player_object_create": "Object created",
+        "player_object_rename": "Object renamed",
+        "player_object_delete": "Object deleted",
+        "player_group_create": "Group created",
+        "player_group_rename": "Group renamed",
+        "player_group_delete": "Group deleted",
+        "player_command_sent": "Command to a screen",
+        "player_command_group": "Command to a group",
+        "player_command_object": "Command to an object",
+        "player_command_all": "Command to every screen",
+        "player_command_release": "Command block released",
+        "player_command_job_end": "Job finished",
+        "player_command_job_cancel": "Job cancelled",
+        "player_device_denied": "Device refused",
+        "player_renew_denied": "Renewal refused",
+        "player_renew_failed": "Renewal failed"
+      }
+    },
+    "place": {
+      "object": "Object",
+      "group": "Group",
+      "allObjects": "All objects",
+      "allGroups": "All groups"
+    },
     "command": {
       "button": "Command",
       "one": "Command",

@@ -6,9 +6,8 @@ import { useCommandJob, useCancelCommandJob, type CommandJobItem } from '@/api/q
 import { ApiClientError } from '@/api/client';
 import { Block } from '@/components/Block';
 import { ConfirmModal } from '@/components/ConfirmModal';
-import { SubNav } from '@/components/SubNav';
 import { useToast } from '@/hooks/useToast';
-import { PLAYERS_NAV } from './nav';
+import { PlayersSubNav } from './PlayersSubNav';
 import { absoluteTime } from './format';
 import { commandTypeLabel } from './status';
 import { JobStateBadge, progressOf } from './JobsPage';
@@ -51,7 +50,7 @@ export default function JobDetailPage() {
     const notFound = job.error instanceof ApiClientError && job.error.status === 404;
     return (
       <div className="p-7 flex flex-col gap-5">
-        <SubNav items={PLAYERS_NAV} />
+        <PlayersSubNav />
         {back}
         <p role="alert" className="text-sm text-[var(--danger)]">{notFound ? t('players.jobs.notFound') : t('players.jobs.loadFailed')}</p>
       </div>
@@ -81,7 +80,7 @@ export default function JobDetailPage() {
 
   return (
     <div className="p-7 flex flex-col gap-5">
-      <SubNav items={PLAYERS_NAV} />
+      <PlayersSubNav />
       {back}
 
       <div className="flex flex-wrap items-center gap-3">

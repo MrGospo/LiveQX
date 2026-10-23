@@ -156,7 +156,7 @@ export interface PlayerGroup {
   created_at: number;
   players:    number;
   // What THIS person may do in the group; the server still decides every action.
-  can?:       { move: boolean; command_group: boolean };
+  can?:       { move: boolean; command_group: boolean; view_audit?: boolean };
 }
 
 export interface PlayerObject {
@@ -164,7 +164,7 @@ export interface PlayerObject {
   name:       string;
   created_at: number;
   groups:     PlayerGroup[];
-  can?:       { command_object: boolean };
+  can?:       { command_object: boolean; view_audit?: boolean };
 }
 
 // A shared root so one invalidation refreshes the tree after any change; the

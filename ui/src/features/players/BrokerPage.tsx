@@ -10,10 +10,9 @@ import {
 } from '@/api/queries/players';
 import { ApiClientError } from '@/api/client';
 import { Block } from '@/components/Block';
-import { SubNav } from '@/components/SubNav';
 import { useNow } from '@/hooks/useNow';
 import { useToast } from '@/hooks/useToast';
-import { PLAYERS_NAV } from './nav';
+import { PlayersSubNav } from './PlayersSubNav';
 import { TextField, NumberField, Toggle, SectionTitle } from './fields';
 import { absoluteTime, relativeFromNow } from './format';
 
@@ -173,7 +172,7 @@ export default function BrokerPage() {
   if (isError || !st) {
     return (
       <div className="p-7 flex flex-col gap-5">
-        <SubNav items={PLAYERS_NAV} />
+        <PlayersSubNav />
         <p role="alert" className="text-sm text-[var(--danger)]">{t('players.broker.loadFailed')}</p>
       </div>
     );
@@ -186,7 +185,7 @@ export default function BrokerPage() {
 
   return (
     <div className="p-7 flex flex-col gap-5">
-      <SubNav items={PLAYERS_NAV} />
+      <PlayersSubNav />
 
       <div className="flex items-center gap-3">
         <Radio size={20} className="text-[var(--accent)]" />

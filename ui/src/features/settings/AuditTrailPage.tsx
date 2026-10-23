@@ -19,6 +19,9 @@ import { SubNav } from '@/components/SubNav';
 import { SETTINGS_NAV } from './nav';
 import { useToast } from '@/hooks/useToast';
 import { api } from '@/api/client';
+import { usePlayerTree } from '@/api/queries/players';
+import { PlaceFilter, type PlaceValue } from '@/features/players/PlaceFilter';
+import { placeIndex, placeText } from '@/features/players/places';
 import {
   useAuditTrail, useAuditTrailCategories, useAuditTrailStats,
   useAuditTrailReverify,
@@ -111,6 +114,7 @@ export default function AuditTrailPage() {
   const [actorName, setActorName]   = React.useState('');
   const [targetType, setTargetType] = React.useState('');
   const [targetId, setTargetId]     = React.useState('');
+  const [place, setPlace]           = React.useState<PlaceValue>({});
   const [offset, setOffset]         = React.useState(0);
   const [selected, setSelected]     = React.useState<AuditTrailEvent | null>(null);
   const [exporting, setExporting]   = React.useState(false);
@@ -121,10 +125,20 @@ export default function AuditTrailPage() {
     actor_username: actorName      || undefined,
     target_type:    targetType     || undefined,
     target_id:      targetId       || undefined,
+    object_id:      place.objectId,
+    group_id:       place.groupId,
     limit:          PAGE_SIZE,
     offset,
-  }), [category, action, actorName, targetType, targetId, offset]);
+  }), [category, action, actorName, targetType, targetId, place, offset]);
 
+  const tree = usePlayerTree();
+  const idx = React.useMemo(() => placeIndex(tree.data), [tree.data]);
+  const where = (ev: AuditTrailEvent) => {
+    const other = t('players.audit.otherPlace');
+    const to = placeText(idx, ev.object_id, ev.group_id, other);
+    if (ev.from_object_id == null && ev.from_group_id == null) return to || '—';
+    return `${placeText(idx, ev.from_object_id, ev.from_group_id, other)} → ${to}`;
+  };
   const { data, isLoading, isFetching } = useAuditTrail(filter);
   const { data: categories = [] } = useAuditTrailCategories();
   const { data: stats } = useAuditTrailStats({ refetchInterval: 5000 });
@@ -132,7 +146,7 @@ export default function AuditTrailPage() {
     useAuditTrailReverify();
 
   // Reset pagination when the filter changes.
-  React.useEffect(() => { setOffset(0); }, [category, action, actorName, targetType, targetId]);
+  React.useEffect(() => { setOffset(0); }, [category, action, actorName, targetType, targetId, place]);
 
   const events = data?.events ?? [];
   const total  = data?.total  ?? 0;
@@ -271,6 +285,7 @@ export default function AuditTrailPage() {
           <input value={targetId} onChange={e => setTargetId(e.target.value)}
             placeholder={t('auditTrail.targetIdPlaceholder')}
             className="bg-canvas border border-[var(--border-subtle)] rounded-md px-3 py-2 text-sm text-[var(--text-primary)] w-32" />
+          <PlaceFilter objects={tree.data ?? []} value={place} onChange={setPlace} />
         </div>
         <div className="flex gap-2 items-center">
           <button onClick={handleReverify} disabled={verifying}
@@ -318,7 +333,7 @@ export default function AuditTrailPage() {
                   t('auditTrail.colTime'), t('auditTrail.colCategory'),
                   t('auditTrail.colAction'), t('auditTrail.colTarget'),
                   t('auditTrail.colActor'), t('auditTrail.colIp'),
-                  t('auditTrail.colStatus'),
+                  t('auditTrail.colStatus'), t('players.audit.col.where'),
                 ].map(h =>
                   <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">
                     {h}
@@ -357,6 +372,7 @@ export default function AuditTrailPage() {
                   <td className={'px-4 py-2.5 font-mono text-xs tabular-nums ' + statusClass(ev.http_status)}>
                     {ev.http_status || '—'}
                   </td>
+                  <td className="px-4 py-2.5 text-xs text-[var(--text-muted)]">{where(ev)}</td>
                 </tr>
               ))}
             </tbody>

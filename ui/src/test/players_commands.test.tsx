@@ -35,6 +35,7 @@ vi.mock('@/api/queries/players', async (orig) => {
     useCommandJobs: () => jobsState,
     useCommandJob: () => jobState,
     useCancelCommandJob: () => ({ mutateAsync: cancel, isPending: false }),
+    usePlayerTree: () => ({ data: [], isLoading: false, isError: false }),
   };
 });
 

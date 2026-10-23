@@ -419,3 +419,34 @@ export const playerCommandHandlers = [
     return HttpResponse.json(jobView(j, true));
   }),
 ];
+
+// ─── Journal by place ─────────────────────────────────────────────────────────
+const ev = (id: number, ago: number, action: string, who: string, name: string, place: { o?: number; g?: number; fo?: number; fg?: number }) => ({
+  id, ts_ms: Date.now() - ago * 1000, category: 'player', action, summary: '', target_type: 'player', target_id: '3b1f0c9e-0000-4000-8000-000000000001',
+  http_method: 'POST', http_path: '/', http_status: 200, elapsed_ms: 3, actor_user_id: 1, actor_username: who, actor_role: 'admin',
+  actor_ip: '10.0.0.5', request_id: `r${id}`, key_fingerprint: '', legacy: false, details: { name },
+  ...(place.o != null ? { object_id: place.o } : {}), ...(place.g != null ? { group_id: place.g } : {}),
+  ...(place.fo != null ? { from_object_id: place.fo } : {}), ...(place.fg != null ? { from_group_id: place.fg } : {}),
+});
+const journal = () => [
+  ev(5, 60, 'player.command_group', 'admin', 'Перезапуск плеера', { o: 1, g: 1 }),
+  ev(4, 600, 'player.move', 'admin', 'Касса 3', { o: 1, g: 1, fo: 1, fg: 2 }),
+  ev(3, 3600, 'player.re_enroll', 'admin', 'Касса 1', { o: 1, g: 1 }),
+  ev(2, 7200, 'player.register', 'admin', 'Витрина слева', { o: 1, g: 2 }),
+  ev(1, 86400, 'player.object_create', 'admin', 'Склад', { o: 2 }),
+];
+
+export const playerAuditHandlers = [
+  http.get('/api/audit/events', async ({ request }) => {
+    await delay(150);
+    const u = new URL(request.url);
+    const o = u.searchParams.get('object_id'); const g = u.searchParams.get('group_id');
+    const touches = (e: ReturnType<typeof ev>) => {
+      if (g) return [e.group_id, e.from_group_id].map(String).includes(g);
+      if (o) return [e.object_id, e.from_object_id].map(String).includes(o);
+      return true;
+    };
+    const events = journal().filter(touches);
+    return HttpResponse.json({ total: events.length, limit: 50, offset: 0, events });
+  }),
+];

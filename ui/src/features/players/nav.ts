@@ -4,6 +4,7 @@ import type { SubNavItem } from '@/components/SubNav';
 // (rights, commands, audit).
 export const PLAYERS_NAV: SubNavItem[] = [
   { to: '/players',          labelKey: 'nav.playersList',     end: true },          // every role: the server cuts it to their rights
+  { to: '/players/audit',    labelKey: 'nav.playersAudit' },        // shown only to those who may read a journal (PlayersSubNav)
   { to: '/players/jobs',     labelKey: 'nav.playersJobs',     minRole: 'operator' },
   { to: '/players/objects',  labelKey: 'nav.playersObjects',  minRole: 'admin' },
   { to: '/players/settings', labelKey: 'nav.playersSettings', minRole: 'admin' },

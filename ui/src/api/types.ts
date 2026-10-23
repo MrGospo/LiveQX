@@ -208,6 +208,12 @@ export interface AuditTrailEvent {
   prev_mac?:       string;
   details?:        unknown;
   details_raw?:    string;
+  // Where the event happened (events about a place); a screen moved from one place to another
+  // is ONE row with both: where it went and where it came from.
+  object_id?:      number;
+  group_id?:       number;
+  from_object_id?: number;
+  from_group_id?:  number;
 }
 
 export interface AuditTrailListResponse {
@@ -227,6 +233,8 @@ export interface AuditTrailFilter {
   target_type?:    string;
   target_id?:      string;
   request_id?:     string;
+  object_id?:      number;     // events of this object (all its groups); a move is found by either end
+  group_id?:       number;
   limit?:          number;
   offset?:         number;
 }

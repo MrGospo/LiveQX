@@ -9,10 +9,9 @@ import {
 } from '@/api/queries/players';
 import { Block } from '@/components/Block';
 import { EmptyState } from '@/components/EmptyState';
-import { SubNav } from '@/components/SubNav';
 import { useNow } from '@/hooks/useNow';
 import { useAuthStore } from '@/stores/auth';
-import { PLAYERS_NAV } from './nav';
+import { PlayersSubNav } from './PlayersSubNav';
 import { inputCls } from './fields';
 import { relativeFromNow, absoluteTime } from './format';
 import { AddPlayerDialog } from './AddPlayerDialog';
@@ -155,7 +154,7 @@ export default function PlayersPage() {
 
   return (
     <div className="p-7 flex flex-col gap-5">
-      <SubNav items={PLAYERS_NAV} />
+      <PlayersSubNav />
 
       <div className="flex items-center gap-3">
         <MonitorSmartphone size={20} className="text-[var(--accent)]" />

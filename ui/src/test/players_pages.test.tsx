@@ -43,6 +43,7 @@ vi.mock('@/api/queries/players', async (orig) => {
     useBrokerStatus: () => brokerState,
     useBrokerUpdate: () => ({ mutateAsync: update, isPending: false, variables: updateVariables }),
     useBrokerReconcile: () => ({ mutateAsync: reconcile, isPending: false }),
+    usePlayerTree: () => ({ data: [], isLoading: false, isError: false }),
   };
 });
 

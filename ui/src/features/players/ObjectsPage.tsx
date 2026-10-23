@@ -9,10 +9,9 @@ import { ApiClientError } from '@/api/client';
 import { Block } from '@/components/Block';
 import { ConfirmModal } from '@/components/ConfirmModal';
 import { EmptyState } from '@/components/EmptyState';
-import { SubNav } from '@/components/SubNav';
 import { useEscClose } from '@/hooks/useEscClose';
 import { useToast } from '@/hooks/useToast';
-import { PLAYERS_NAV } from './nav';
+import { PlayersSubNav } from './PlayersSubNav';
 import { TextField } from './fields';
 import { nameProblem, trimName } from './names';
 
@@ -138,7 +137,7 @@ export default function ObjectsPage() {
   if (isError || !data) {
     return (
       <div className="p-7 flex flex-col gap-5">
-        <SubNav items={PLAYERS_NAV} />
+        <PlayersSubNav />
         <p role="alert" className="text-sm text-[var(--danger)]">{t('players.objects.loadFailed')}</p>
       </div>
     );
@@ -146,7 +145,7 @@ export default function ObjectsPage() {
 
   return (
     <div className="p-7 flex flex-col gap-5">
-      <SubNav items={PLAYERS_NAV} />
+      <PlayersSubNav />
 
       <div className="flex items-center gap-3">
         <Building2 size={20} className="text-[var(--accent)]" />
