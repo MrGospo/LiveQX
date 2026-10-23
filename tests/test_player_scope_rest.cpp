@@ -329,6 +329,15 @@ TEST(PlayerScopeRest, TheTreeAndTheCardTellWhatThePersonMayDo) {
     EXPECT_EQ(card(view)["move"], false);
     EXPECT_EQ(card(view)["command"], false) << "a viewer only looks";
     EXPECT_EQ(card(admin)["move"], true);
+
+    // The journal marks, for the tab that is shown only to those who may read something.
+    auto aud = f.person("aud", sa::Role::Viewer);
+    ASSERT_EQ(f.putGrants(admin, aud.id, json::array({ScopeFixture::grant("group", f.G11, false, false, false, true)}))->status, 200);
+    auto gAud = firstGroup(aud);
+    EXPECT_EQ(gAud["groups"][0]["can"]["view_audit"], true);
+    EXPECT_EQ(gAud["can"]["view_audit"], false) << "a group mark does not open the object's whole journal";
+    EXPECT_EQ(firstGroup(plain)["groups"][0]["can"]["view_audit"], false);
+    EXPECT_EQ(firstGroup(admin)["can"]["view_audit"], true);
 }
 
 TEST(PlayerScopeRest, WhatTheCardSaysIsWhatTheServerDoes) {

@@ -57,6 +57,8 @@ public:
     // canMove() still decides each concrete move: the target needs the mark as well.
     bool canMoveFrom(const Place& from) const;
     bool canViewAudit(const Place& p) const;
+    // Whole object: only an object-level mark (a group mark covers that group, not the object).
+    bool canViewAuditObject(std::int64_t object_id) const;
 
     // For the tree: a group is shown when it is covered; an object is "seen"
     // by an object right, and merely "contained" when only one of its groups

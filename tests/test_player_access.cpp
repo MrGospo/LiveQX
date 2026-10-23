@@ -173,6 +173,16 @@ TEST(PlayerAccess, WhatTheButtonPromisesIsWhatTheMoveDecides) {
     EXPECT_EQ(half.canMove(P11, P12), half.canMoveFrom(P11) && half.canMoveFrom(P12));
 }
 
+TEST(PlayerAccess, TheWholeObjectsJournalNeedsTheMarkOnTheObjectItself) {
+    PlayerAccess byGroup(Role::Operator, {group(G11, false, false, /*au=*/true)});
+    EXPECT_TRUE(byGroup.canViewAudit(P11));
+    EXPECT_FALSE(byGroup.canViewAuditObject(O1)) << "a group mark covers that group, not the object around it";
+    PlayerAccess byObject(Role::Viewer, {object(O1, false, false, false, /*au=*/true)});
+    EXPECT_TRUE(byObject.canViewAuditObject(O1));
+    EXPECT_FALSE(byObject.canViewAuditObject(O2));
+    EXPECT_TRUE(PlayerAccess(Role::Admin, {}).canViewAuditObject(O2));
+}
+
 TEST(PlayerAccess, MovingNeedsTheMarkOnBothGroups) {
     PlayerAccess both(Role::Operator, {group(G11, false, /*mv=*/true), group(G12, false, /*mv=*/true)});
     EXPECT_TRUE(both.canMove(P11, P12));

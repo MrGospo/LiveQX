@@ -77,6 +77,12 @@ bool PlayerAccess::canViewAudit(const Place& p) const {
     return false;
 }
 
+bool PlayerAccess::canViewAuditObject(std::int64_t object_id) const {
+    if (isAdmin()) return true;
+    auto* o = objectGrant(object_id);
+    return o && o->can_view_audit;
+}
+
 bool PlayerAccess::canSeeGroup(std::int64_t group_id, std::int64_t object_id) const {
     if (isAdmin()) return true;
     return groupGrant(group_id) != nullptr || objectGrant(object_id) != nullptr;

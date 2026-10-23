@@ -3414,13 +3414,15 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
                 gs.push_back({{"id", g.id}, {"object_id", g.object_id}, {"name", g.name},
                               {"created_at", g.created_at}, {"players", c == counts.end() ? 0 : c->second},
                               {"can", {{"move", access->canMoveFrom(place)},
-                                       {"command_group", access->canCommandGroup(place)}}}});
+                                       {"command_group", access->canCommandGroup(place)},
+                                       {"view_audit", access->canViewAudit(place)}}}});
             }
             // An object is shown when it is granted, or holds a granted group
             // (then only as the container of that group).
             if (!access->canSeeObject(o.id) && !access->seesObjectContaining(o.id)) continue;
             objs.push_back({{"id", o.id}, {"name", o.name}, {"created_at", o.created_at}, {"groups", std::move(gs)},
-                            {"can", {{"command_object", access->canCommandObject(o.id)}}}});
+                            {"can", {{"command_object", access->canCommandObject(o.id)},
+                                     {"view_audit", access->canViewAuditObject(o.id)}}}});
         }
         writeJson(res, 200, json{{"objects", std::move(objs)}});
     });

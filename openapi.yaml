@@ -5628,6 +5628,7 @@ components:
           properties:
             move: { type: boolean, description: 'Можно переносить отсюда экраны (отметка переноса у оператора, всё у администратора).' }
             command_group: { type: boolean, description: 'Можно слать команду всей группе.' }
+            view_audit: { type: boolean, description: 'Можно читать журнал действий по этой группе.' }
 
     PlayerObjectBrief:
       type: object
@@ -5647,6 +5648,7 @@ components:
               type: object
               properties:
                 command_object: { type: boolean, description: 'Можно слать команду всему объекту.' }
+                view_audit: { type: boolean, description: 'Можно читать журнал действий по всему объекту (отметка на самом объекте).' }
             groups:
               type: array
               items: { $ref: '#/components/schemas/PlayerGroup' }
