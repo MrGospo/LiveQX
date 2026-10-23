@@ -284,7 +284,8 @@ if(MOSQUITTO_FOUND)
         test_mosquitto_client_config.cpp
         test_mosquitto_client_broker.cpp)
     target_link_libraries(liveqx-tests PRIVATE PkgConfig::MOSQUITTO)
-    target_compile_definitions(liveqx-tests PRIVATE LIVEQX_HAVE_MOSQUITTO=1)
+    target_compile_definitions(liveqx-tests PRIVATE LIVEQX_HAVE_MOSQUITTO=1
+        LIVEQX_MOSQUITTO_PREFIX="${CMAKE_BINARY_DIR}/mosquitto-patched")
 endif()
 include(GoogleTest)
 gtest_discover_tests(liveqx-tests DISCOVERY_MODE PRE_TEST)

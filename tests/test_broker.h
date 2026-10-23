@@ -81,6 +81,28 @@ inline std::optional<fs::path> findExecutable(const std::string& name) {
     return std::nullopt;
 }
 
+// The broker the tests run. The stock Mosquitto 2.0.18 can corrupt its own session list when it
+// rereads its settings (see packaging/mosquitto/README.md), so the patched build is used when it
+// has been made (packaging/mosquitto/build.sh); otherwise whatever `mosquitto` is on the PATH.
+inline std::optional<fs::path> brokerBinary() {
+#ifdef LIVEQX_MOSQUITTO_PREFIX
+    {
+        const fs::path patched = fs::path(LIVEQX_MOSQUITTO_PREFIX) / "sbin" / "mosquitto";
+        std::error_code ec;
+        if (fs::exists(patched, ec) && ::access(patched.c_str(), X_OK) == 0) return patched;
+    }
+#endif
+    return findExecutable("mosquitto");
+}
+inline bool brokerIsPatched() {
+#ifdef LIVEQX_MOSQUITTO_PREFIX
+    const auto b = brokerBinary();
+    return b && b->parent_path().parent_path() == fs::path(LIVEQX_MOSQUITTO_PREFIX);
+#else
+    return false;
+#endif
+}
+
 inline std::optional<fs::path> findDynsecPlugin() {
     for (const char* r : {"/usr/lib", "/usr/local/lib", "/usr/lib64"}) {
         std::error_code ec;
@@ -334,7 +356,7 @@ public:
     }
     bool start() {
         if (pid_ > 0) return true;
-        std::vector<std::string> argv = {"mosquitto", "-c", (dir_ / "mosquitto.conf").string()};
+        std::vector<std::string> argv = {brokerBinary()->string(), "-c", (dir_ / "mosquitto.conf").string()};
         std::vector<char*> args;
         for (auto& a : argv) args.push_back(a.data());
         args.push_back(nullptr);
@@ -356,6 +378,16 @@ public:
         return true;
     }
     void restart() { stop(); start(); }
+    // The broker rereads its settings and the revocation list, as when the server publishes a new one.
+    void reload() { if (pid_ > 0) ::kill(pid_, SIGHUP); }
+    // The broker dies with no goodbye (power cut, OOM kill): open connections are cut, not closed.
+    void crash() {
+        if (pid_ <= 0) return;
+        ::kill(pid_, SIGKILL);
+        int status = 0;
+        ::waitpid(pid_, &status, 0);
+        pid_ = -1;
+    }
     std::string log() const { return readFileText(dir_ / "broker.log"); }
 
 private:

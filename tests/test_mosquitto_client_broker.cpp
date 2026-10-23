@@ -191,6 +191,53 @@ TEST_F(MosquittoBrokerTest, AfterTheBrokerRestartsTheClientComesBackAndSubscribe
     dev.stop();
 }
 
+TEST_F(MosquittoBrokerTest, AfterTheBrokerIsKilledOutrightAndStartedAgainTheClientComesBack) {
+    mqtt::MosquittoClient server(broker_->serverOptions());
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(waitFor([&] { return server.connected(); })) << broker_->log();
+
+    broker_->crash();
+    EXPECT_TRUE(waitFor([&] { return !server.connected(); }));
+    std::this_thread::sleep_for(std::chrono::seconds(3));        // a few attempts fail while it is down
+    ASSERT_TRUE(broker_->start());
+    EXPECT_TRUE(waitFor([&] { return server.connected(); }, 40000)) << server.lastError() << "\n" << broker_->log();
+    server.stop();
+}
+
+TEST_F(MosquittoBrokerTest, RereadingItsSettingsLeavesTheSessionsOfOfflineClientsAlone) {
+    // The stock 2.0.18 "disconnects" every offline persistent session again at a reload, which puts
+    // it in its expiry list twice and later kills the broker. The patched build leaves them be.
+    if (!liveqx::testing::brokerIsPatched())
+        GTEST_SKIP() << "needs the patched broker: packaging/mosquitto/build.sh";
+    auto player = broker_->enrollPlayer();
+    mqtt::MosquittoClient dev(broker_->playerOptions(player));
+    dev.subscribe(commandsOf(player), 1);
+    ASSERT_TRUE(dev.start());
+    ASSERT_TRUE(waitFor([&] { return dev.connected(); })) << broker_->log();
+    dev.stop();                                          // the screen is switched off; its session stays
+
+    auto goodbyes = [&] {
+        std::size_t n = 0;
+        const std::string log = broker_->log();
+        for (std::size_t at = log.find("Client " + player.id + " disconnected"); at != std::string::npos;
+             at = log.find("Client " + player.id + " disconnected", at + 1))
+            ++n;
+        return n;
+    };
+    ASSERT_TRUE(waitFor([&] { return goodbyes() == 1; })) << broker_->log();
+
+    for (int i = 0; i < 3; ++i) {
+        broker_->reload();
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    }
+    EXPECT_EQ(goodbyes(), 1u) << "an offline session was disconnected again by a reload\n" << broker_->log();
+
+    mqtt::MosquittoClient server(broker_->serverOptions());
+    ASSERT_TRUE(server.start());
+    EXPECT_TRUE(waitFor([&] { return server.connected(); })) << "the broker is not answering after the reloads";
+    server.stop();
+}
+
 TEST_F(MosquittoBrokerTest, APersistentSessionKeepsAMessageForAnOfflineClientAndDropsAnExpiredOne) {
     auto player = broker_->enrollPlayer();
     mqtt::MosquittoClient server(broker_->serverOptions());

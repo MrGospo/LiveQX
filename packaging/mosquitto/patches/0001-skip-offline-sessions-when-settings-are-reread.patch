@@ -1,0 +1,56 @@
+Do not re-check sessions that are waiting for their client when the settings are reread
+
+When the broker rereads its settings (SIGHUP, which LiveQX sends after it
+publishes a new certificate revocation list), mosquitto_security_apply_default()
+walks every context, including persistent sessions whose client is offline.
+With use_identity_as_username such a context has no TLS connection any more, so
+it is disconnected "again" with the state forced back to "disconnecting".
+context__disconnect() then runs a second time and puts the context into the
+session expiry list a second time. The first entry is left pointing at the
+context, which is freed later; session_expiry__check() then reads freed memory
+and the broker dies with SIGSEGV (found with AddressSanitizer on 2.0.18; the
+code is the same in 2.0.22).
+
+Minimal reproduction: one MQTT 5 client connected with clean start off and a
+session expiry interval above zero, disconnect it, send SIGHUP to the broker.
+
+Two changes:
+  * security_default.c: a context with no socket is skipped. There is nothing
+    to re-check; it is judged when it connects (the code already says so for
+    the per-listener branch: "Client not currently connected, so defer
+    judgement until it does connect").
+  * session_expiry.c: a context is in the list at most once, so the same
+    mistake from any other path cannot leave a stale entry behind.
+
+diff -ru a/src/security_default.c b/src/security_default.c
+--- a/src/security_default.c	2023-09-19 00:29:34.000000000 +0300
++++ b/src/security_default.c	2026-10-23 13:43:41.353860745 +0300
+@@ -1124,6 +1124,14 @@
+ 			continue;
+ 		}
+ 
++		if(context->sock == INVALID_SOCKET){
++			/* Not connected (a persistent session waiting for its client):
++			 * there is no certificate, user or listener state to re-check, and
++			 * disconnecting it again would add it to the session expiry list a
++			 * second time. It is judged when it connects. */
++			continue;
++		}
++
+ 		/* Check for anonymous clients when allow_anonymous is false */
+ 		if(db.config->per_listener_settings){
+ 			if(context->listener){
+diff -ru a/src/session_expiry.c b/src/session_expiry.c
+--- a/src/session_expiry.c	2023-09-19 00:29:34.000000000 +0300
++++ b/src/session_expiry.c	2026-10-23 13:43:41.353860745 +0300
+@@ -75,6 +75,10 @@
+ 		}
+ 	}
+ 
++	/* A context is in the list at most once; a second entry would be left
++	 * pointing at the context after it is freed. */
++	session_expiry__remove(context);
++
+ 	item = mosquitto__calloc(1, sizeof(struct session_expiry_list));
+ 	if(!item) return MOSQ_ERR_NOMEM;
+ 
