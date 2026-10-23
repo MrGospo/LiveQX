@@ -1426,6 +1426,7 @@
       "start": "Getting started",
       "channels": "Channels",
       "outputs": "Outputs",
+      "screens": "Screens",
       "plugins": "Plugins",
       "settings": "Settings",
       "operations": "Operations"
@@ -1491,6 +1492,7 @@
         "title": "Profile",
         "desc": "Personal settings: language, change password, active sessions."
       },
+      "SCREENS_USER": {"title": "Screens", "desc": "Enrolling screens, commands and jobs, rights, the journal by place, and what to do when something is wrong."},
       "USERS_USER": {
         "title": "Users",
         "desc": "Accounts, roles, and blocking. Administrators-only section."
@@ -1518,6 +1520,18 @@
     }
   },
   "players": {
+    "summary": {
+      "title": "Screens",
+      "open": "Open the list",
+      "none": "No screens yet. Add the first one on the Screens page.",
+      "attention": "Needs attention",
+      "offlineNote_one": "{{count}} screen is offline.",
+      "offlineNote_other": "{{count}} screens are offline.",
+      "jobs_one": "{{count}} command job is running.",
+      "jobs_other": "{{count}} command jobs are running.",
+      "brokerDown": "The server is not connected to the command broker: commands will not reach screens.",
+      "show": "Show"
+    },
     "audit": {
       "title": "Journal by place",
       "fullJournal": "The server's full journal",
@@ -1862,6 +1876,11 @@
         "state": { "valid": "valid", "soon": "ends soon", "expired": "expired", "revoked": "revoked" }
       },
       "commands": {
+        "release": "Lift the block",
+        "releaseHint": "The screen does not answer and the same command has to be sent: the block is lifted and the command can be sent again.",
+        "released": "Block lifted",
+        "releaseFailed": "Could not lift the block",
+        "action": "Action",
         "title": "Commands",
         "none": "No commands have been sent to this screen.",
         "loadFailed": "Could not load commands.",

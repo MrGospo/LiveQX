@@ -4,10 +4,12 @@ import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, Building2, AlertTriangle } from 'lucide-react';
 import { clsx } from 'clsx';
 import {
-  usePlayer, usePlayerCommands,
+  usePlayer, usePlayerCommands, useReleaseCommand,
   type PlayerCertificate, type PlayerCommand, type PlayerReport,
 } from '@/api/queries/players';
 import { ApiClientError } from '@/api/client';
+import { useAuthStore } from '@/stores/auth';
+import { useToast } from '@/hooks/useToast';
 import { Block } from '@/components/Block';
 import { useNow } from '@/hooks/useNow';
 import { PlayersSubNav } from './PlayersSubNav';
@@ -78,6 +80,13 @@ function Report({ r }: { r: PlayerReport }) {
 
 function CommandsTable({ commands }: { commands: PlayerCommand[] }) {
   const { t } = useTranslation();
+  const toast = useToast();
+  const isAdmin = useAuthStore(s => s.role) === 'admin';
+  const release = useReleaseCommand();
+  const lift = async (c: PlayerCommand) => {
+    try { await release.mutateAsync({ playerId: c.player_id, commandId: c.id }); toast(t('players.detail.commands.released'), 'success'); }
+    catch { toast(t('players.detail.commands.releaseFailed'), 'danger'); }
+  };
   return (
     <table className="w-full text-sm">
       <thead>
@@ -86,6 +95,7 @@ function CommandsTable({ commands }: { commands: PlayerCommand[] }) {
           <th className="font-medium py-2 pr-4">{t('players.detail.commands.col.state')}</th>
           <th className="font-medium py-2 pr-4">{t('players.detail.commands.col.sent')}</th>
           <th className="font-medium py-2">{t('players.detail.commands.col.finished')}</th>
+          {isAdmin && <th className="font-medium py-2"><span className="sr-only">{t('players.detail.commands.col.action')}</span></th>}
         </tr>
       </thead>
       <tbody>
@@ -100,6 +110,17 @@ function CommandsTable({ commands }: { commands: PlayerCommand[] }) {
             </td>
             <td className="py-2 pr-4 text-[var(--text-muted)]">{absoluteTime(c.issued_at)}</td>
             <td className="py-2 text-[var(--text-muted)]">{c.finished_at ? absoluteTime(c.finished_at) : '—'}</td>
+            {isAdmin && (
+              <td className="py-2 text-right">
+                {c.state === 'pending' && (
+                  <button type="button" onClick={() => lift(c)} disabled={release.isPending}
+                          title={t('players.detail.commands.releaseHint')}
+                          className="px-2.5 py-1 text-xs rounded-md border border-[var(--border-subtle)] text-[var(--text-primary)] hover:border-[var(--warning)] disabled:opacity-40">
+                    {t('players.detail.commands.release')}
+                  </button>
+                )}
+              </td>
+            )}
           </tr>
         ))}
       </tbody>

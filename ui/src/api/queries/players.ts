@@ -120,8 +120,9 @@ export interface BrokerApplyResult {
   connection: BrokerConnection;
 }
 
-export const useBrokerStatus = () =>
+export const useBrokerStatus = (opts?: { enabled?: boolean }) =>
   useQuery({
+    enabled: opts?.enabled ?? true,
     queryKey: ['players-admin', 'broker'],
     queryFn: () => api.get<BrokerStatus>('/api/players/broker'),
     staleTime: 10_000,                      // the server announces every change (players_broker_status)
@@ -531,8 +532,9 @@ export const useScreenCommand = () => {
 
 // Jobs live under the screens' root: a command settling refreshes them, and so does the
 // server's own "a job changed" event (a job closes after its last command has already reported).
-export const useCommandJobs = () =>
+export const useCommandJobs = (opts?: { enabled?: boolean }) =>
   useQuery({
+    enabled: opts?.enabled ?? true,
     queryKey: ['players', 'jobs', 'list'],
     queryFn: async () => (await api.get<{ jobs: CommandJob[] }>('/api/command-jobs')).jobs,
     staleTime: 5_000,
@@ -552,3 +554,25 @@ export const useCancelCommandJob = () => {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['players', 'jobs'] }); },
   });
 };
+
+// An administrator lifts the block of a command that still waits for its answer (a screen that
+// will not confirm): the same command can then be sent again. The server writes it to the journal.
+export const useReleaseCommand = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { playerId: string; commandId: string }) =>
+      api.post<PlayerCommand>(`/api/players/${encodeURIComponent(v.playerId)}/commands/${encodeURIComponent(v.commandId)}/release`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['players'] }); },
+  });
+};
+
+// The counts for the main page: one cheap request (a single row), the same counts the list shows.
+export const usePlayersSummary = () =>
+  useQuery({
+    queryKey: ['players', 'summary'],
+    queryFn: async () => {
+      const r = await api.get<PlayerPage>('/api/players?limit=1');
+      return { counts: r.counts, total: r.total };
+    },
+    staleTime: 10_000,
+  });

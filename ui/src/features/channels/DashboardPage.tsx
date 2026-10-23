@@ -7,6 +7,7 @@ import { useAuthStore } from '@/stores/auth';
 import { HealthBadge } from '@/components/HealthBadge';
 import { EmptyState } from '@/components/EmptyState';
 import { Block } from '@/components/Block';
+import { PlayersSummary } from '@/features/players/PlayersSummary';
 import { fmtDuration } from '@/lib/format';
 import { useToast } from '@/hooks/useToast';
 import { Tv2 } from 'lucide-react';
@@ -64,6 +65,9 @@ export default function DashboardPage() {
           </Block>
         ))}
       </div>
+
+      {/* Screens (players): shown only to those who have some */}
+      <PlayersSummary />
 
       {/* Toolbar */}
       <div className="flex items-center gap-2 flex-wrap">

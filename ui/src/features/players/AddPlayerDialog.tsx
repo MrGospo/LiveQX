@@ -5,6 +5,7 @@ import { X } from 'lucide-react';
 import { usePlayerActions, type ClockPolicy, type PairingPackage, type PlayerObject } from '@/api/queries/players';
 import { ApiClientError } from '@/api/client';
 import { useEscClose } from '@/hooks/useEscClose';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 import { Field, TextField, inputCls } from './fields';
 import { nameProblem, trimName } from './names';
 import { PairingPackageDialog } from './PairingPackageDialog';
@@ -29,6 +30,7 @@ export function AddPlayerDialog({ objects, initialGroupId, onClose }: {
   const [errorCode, setErrorCode] = React.useState<string | null>(null);
   const [given, setGiven] = React.useState<{ pkg: PairingPackage; name: string } | null>(null);
   useEscClose(onClose, !create.isPending && !given);
+  const dialogRef = useDialogFocus<HTMLFormElement>();
 
   // Once the package window is closed nothing of it may stay in memory.
   const finish = () => { create.reset(); setGiven(null); onClose(); };
@@ -57,7 +59,7 @@ export function AddPlayerDialog({ objects, initialGroupId, onClose }: {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <form onSubmit={submit} role="dialog" aria-modal="true" aria-label={t('players.add.title')}
+      <form ref={dialogRef} onSubmit={submit} role="dialog" aria-modal="true" aria-label={t('players.add.title')}
             className="bg-surface border border-[var(--border-subtle)] rounded-xl w-full max-w-md shadow-2xl flex flex-col">
         <div className="flex items-center justify-between p-5 border-b border-[var(--border-subtle)]">
           <h2 className="text-lg font-semibold text-[var(--text-primary)] m-0">{t('players.add.title')}</h2>

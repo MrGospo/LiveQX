@@ -8,6 +8,7 @@ import {
 } from '@/api/queries/players';
 import { ApiClientError } from '@/api/client';
 import { useEscClose } from '@/hooks/useEscClose';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 import { useToast } from '@/hooks/useToast';
 import { Field, TextField, inputCls } from './fields';
 import { phraseMatches } from './commands';
@@ -23,9 +24,10 @@ function Shell({ title, pending, onClose, children, footer }: {
   title: string; pending: boolean; onClose: () => void; children: React.ReactNode; footer: React.ReactNode;
 }) {
   useEscClose(onClose, !pending);
+  const dialogRef = useDialogFocus<HTMLDivElement>();
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div role="dialog" aria-modal="true" aria-label={title}
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={title}
            className="bg-surface border border-[var(--border-subtle)] rounded-xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl flex flex-col">
         <div className="flex items-center justify-between p-5 border-b border-[var(--border-subtle)]">
           <h2 className="text-lg font-semibold text-[var(--text-primary)] m-0">{title}</h2>

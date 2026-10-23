@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Copy, Download, KeyRound, Check } from 'lucide-react';
 import type { PairingPackage } from '@/api/queries/players';
 import { useEscClose } from '@/hooks/useEscClose';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 import { absoluteTime } from './format';
 
 // The pairing package of a screen, shown once. The server never gives the token
@@ -24,6 +25,7 @@ export function PairingPackageDialog({ pkg, playerName, onClose }: {
   const text = React.useMemo(() => JSON.stringify(pkg, null, 2), [pkg]);
   const expires = Date.parse(pkg.token_expires_at);
   useEscClose(onClose, kept);
+  const dialogRef = useDialogFocus<HTMLDivElement>();
 
   const copy = async () => {
     try {
@@ -50,7 +52,7 @@ export function PairingPackageDialog({ pkg, playerName, onClose }: {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div role="dialog" aria-modal="true" aria-label={t('players.pairing.title', { name: playerName })}
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={t('players.pairing.title', { name: playerName })}
            className="bg-surface border border-[var(--border-subtle)] rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl flex flex-col">
         <div className="flex items-center gap-2 p-5 border-b border-[var(--border-subtle)]">
           <KeyRound size={18} className="text-[var(--accent)]" />

@@ -10,6 +10,7 @@ import { Block } from '@/components/Block';
 import { ConfirmModal } from '@/components/ConfirmModal';
 import { EmptyState } from '@/components/EmptyState';
 import { useEscClose } from '@/hooks/useEscClose';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 import { useToast } from '@/hooks/useToast';
 import { PlayersSubNav } from './PlayersSubNav';
 import { TextField } from './fields';
@@ -45,6 +46,7 @@ function NameDialog({ title, label, initial, submitLabel, pending, serverError, 
   const [value, setValue] = React.useState(initial);
   const [touched, setTouched] = React.useState(false);
   useEscClose(onCancel, !pending);
+  const dialogRef = useDialogFocus<HTMLFormElement>();
 
   const problem = nameProblem(value);
   const error = serverError ?? (touched && problem ? t(`players.objects.nameErrors.${problem}`) : null);
@@ -58,7 +60,7 @@ function NameDialog({ title, label, initial, submitLabel, pending, serverError, 
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <form onSubmit={submit} role="dialog" aria-modal="true" aria-label={title}
+      <form ref={dialogRef} onSubmit={submit} role="dialog" aria-modal="true" aria-label={title}
             className="bg-surface border border-[var(--border-subtle)] rounded-xl w-full max-w-md shadow-2xl flex flex-col">
         <div className="flex items-center justify-between p-5 border-b border-[var(--border-subtle)]">
           <h2 className="text-lg font-semibold text-[var(--text-primary)] m-0">{title}</h2>

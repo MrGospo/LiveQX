@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
 import { BookOpen, ChevronRight, FileText, Search, X } from 'lucide-react';
 
-type CategoryKey = 'start' | 'channels' | 'outputs' | 'settings' | 'operations';
+type CategoryKey = 'start' | 'channels' | 'outputs' | 'screens' | 'settings' | 'operations';
 
 interface DocEntry {
   file: string;
@@ -29,6 +29,9 @@ const DOCS: DocEntry[] = [
   { file: 'ADD_OUTPUT.md',          category: 'outputs' },
   { file: 'LIVE_INPUT_USER.md',     category: 'outputs' },
 
+  // Экраны / Screens
+  { file: 'SCREENS_USER.md',        category: 'screens' },
+
   // Настройки / Settings
   { file: 'PROFILE_USER.md',        category: 'settings' },
   { file: 'USERS_USER.md',          category: 'settings' },
@@ -45,11 +48,12 @@ const CATEGORY_ICONS: Record<CategoryKey, string> = {
   start:      '🚀',
   channels:   '📺',
   outputs:    '📡',
+  screens:    '🖥️',
   settings:   '⚙️',
   operations: '🛠️',
 };
 
-const CATEGORY_ORDER: CategoryKey[] = ['start', 'channels', 'outputs', 'settings', 'operations'];
+const CATEGORY_ORDER: CategoryKey[] = ['start', 'channels', 'outputs', 'screens', 'settings', 'operations'];
 
 function docKey(file: string): string {
   return file.replace(/\.md$/i, '');

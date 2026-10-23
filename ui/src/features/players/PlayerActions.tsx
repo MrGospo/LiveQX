@@ -9,6 +9,7 @@ import {
 import { ApiClientError } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
 import { useEscClose } from '@/hooks/useEscClose';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 import { useToast } from '@/hooks/useToast';
 import { Field, TextField, inputCls } from './fields';
 import { PairingPackageDialog } from './PairingPackageDialog';
@@ -35,9 +36,10 @@ function Shell({ title, pending, onClose, onSubmit, submitLabel, danger, submitD
 }) {
   const { t } = useTranslation();
   useEscClose(onClose, !pending);
+  const dialogRef = useDialogFocus<HTMLFormElement>();
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <form onSubmit={e => { e.preventDefault(); onSubmit(); }} role="dialog" aria-modal="true" aria-label={title}
+      <form ref={dialogRef} onSubmit={e => { e.preventDefault(); onSubmit(); }} role="dialog" aria-modal="true" aria-label={title}
             className="bg-surface border border-[var(--border-subtle)] rounded-xl w-full max-w-md shadow-2xl flex flex-col">
         <div className="flex items-center justify-between p-5 border-b border-[var(--border-subtle)]">
           <h2 className="text-lg font-semibold text-[var(--text-primary)] m-0">{title}</h2>

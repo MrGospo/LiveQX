@@ -10,6 +10,9 @@ import { ApiClientError } from '@/api/client';
 import type { Player, PlayerObject, PlayerDetails, PlayerCommand, PlayerListQuery, PlayerPage } from '@/api/queries/players';
 
 let role: 'viewer' | 'operator' | 'admin' = 'viewer';
+vi.mock('@/stores/ui', () => ({
+  useUiStore: vi.fn((selector: (s: object) => unknown) => selector({ addToast: toastSpy })),
+}));
 vi.mock('@/stores/auth', () => ({
   useAuthStore: vi.fn((selector: (s: object) => unknown) => selector({ role, user: { id: 2, username: 'ann', role } })),
 }));
@@ -20,6 +23,8 @@ const treeState: Q<PlayerObject[]> = { isLoading: false, isError: false };
 const oneState: Q<PlayerDetails> = { isLoading: false, isError: false };
 const cmdState: Q<PlayerCommand[]> = { isLoading: false, isError: false };
 const listCalls: PlayerListQuery[] = [];
+const release = vi.fn();
+const toastSpy = vi.fn();
 const lastCall = () => listCalls[listCalls.length - 1];
 
 vi.mock('@/api/queries/players', async (orig) => {
@@ -30,6 +35,7 @@ vi.mock('@/api/queries/players', async (orig) => {
     usePlayerTree: () => treeState,
     usePlayer: () => oneState,
     usePlayerCommands: () => cmdState,
+    useReleaseCommand: () => ({ mutateAsync: release, isPending: false }),
     useBulkPlan: () => ({ mutateAsync: vi.fn(), isPending: false }),
     useBulkSend: () => ({ mutateAsync: vi.fn(), isPending: false }),
     usePlayerActions: () => { const a = { mutateAsync: vi.fn(), reset: vi.fn(), isPending: false }; return { create: a, reissueToken: a, reEnroll: a, move: a, revoke: a, remove: a }; },
@@ -71,6 +77,7 @@ const renderDetail = () =>
   );
 
 beforeEach(() => {
+  release.mockReset(); toastSpy.mockClear();
   role = 'viewer';
   listCalls.length = 0;
   setPage([
@@ -313,6 +320,37 @@ describe('PlayerDetailPage', () => {
     const row = screen.getByText('Reboot the screen').closest('tr')!;
     expect(within(row).getByText(/failed/)).toBeInTheDocument();
     expect(within(row).getByText(/did not reboot/)).toBeInTheDocument();
+  });
+
+  const pendingCommand = () => [{ id: 'c1', player_id: 'p1', type: 'reboot_screen' as const, state: 'pending' as const, result: '',
+    issued_at: nowSec() - 60, ttl_seconds: 300, deadline_at: nowSec() + 1000 }];
+
+  it('lets an administrator lift the block of a command that still waits, and only then', async () => {
+    const user = userEvent.setup();
+    role = 'admin';
+    release.mockResolvedValue({});
+    oneState.data = details();
+    cmdState.data = pendingCommand();
+    renderDetail();
+    await user.click(screen.getByRole('button', { name: 'Lift the block' }));
+    expect(release).toHaveBeenCalledWith({ playerId: 'p1', commandId: 'c1' });
+    expect(toastSpy).toHaveBeenCalledWith('Block lifted', 'success');
+  });
+
+  it('offers no way to lift a block to anyone but an administrator, nor for a command that is settled', () => {
+    role = 'operator';
+    oneState.data = details();
+    cmdState.data = pendingCommand();
+    renderDetail();
+    expect(screen.queryByRole('button', { name: 'Lift the block' })).not.toBeInTheDocument();
+  });
+
+  it('shows no lift button on a command that has already finished', () => {
+    role = 'admin';
+    oneState.data = details();
+    cmdState.data = [{ ...pendingCommand()[0], state: 'executed' as const, result: 'executed', finished_at: nowSec() }];
+    renderDetail();
+    expect(screen.queryByRole('button', { name: 'Lift the block' })).not.toBeInTheDocument();
   });
 
   it('says "not found" without telling a missing screen from one the person may not see', () => {

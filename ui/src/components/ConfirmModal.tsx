@@ -1,6 +1,7 @@
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, X } from 'lucide-react';
 import { useEscClose } from '@/hooks/useEscClose';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 
 interface Props {
   title:        string;
@@ -22,9 +23,11 @@ export function ConfirmModal({
 }: Props) {
   const { t } = useTranslation();
   useEscClose(onCancel, !pending);
+  const dialogRef = useDialogFocus<HTMLDivElement>();
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="bg-surface border border-[var(--border-subtle)] rounded-xl w-full max-w-md shadow-2xl flex flex-col">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={title}
+           className="bg-surface border border-[var(--border-subtle)] rounded-xl w-full max-w-md shadow-2xl flex flex-col">
         <div className="flex items-center justify-between p-5 border-b border-[var(--border-subtle)]">
           <div className="flex items-center gap-2">
             {danger && <AlertTriangle size={18} className="text-[var(--warning)]" />}
