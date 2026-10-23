@@ -42,8 +42,48 @@ The test suite uses `build/mosquitto-patched/sbin/mosquitto` when it exists. The
 `RereadingItsSettingsLeavesTheSessionsOfOfflineClientsAlone` checks the fix and is skipped
 without the patched broker (it fails on the stock one).
 
-## Running the broker
+## Installing and running it
 
-* Do not rotate the broker's log by signalling it: logrotate hooks that send SIGHUP run into
-  the same code. Log to the journal, or use `copytruncate`.
-* Run it under a supervisor with `Restart=always`.
+`packaging/install.sh` does all of this (`--broker=local`, the default answer; `--broker=none` for an
+external broker). The distribution's `mosquitto` and `mosquitto-clients` packages are installed for
+the Dynamic Security plugin and `mosquitto_ctrl` only; their own `mosquitto.service` is not used (the
+installer stops it if it was the one that brought the package in).
+
+| What | Where |
+|---|---|
+| the broker (our build) | `/usr/local/libexec/liveqx/mosquitto` — the file name matters, the server signals only a process called `mosquitto` |
+| its configuration | `/etc/liveqx/mosquitto.conf` (from `mosquitto.conf.in`; yours once it exists, a newer template is saved as `.dist`) |
+| services | `liveqx-broker.path` (enabled) starts `liveqx-broker.service` (`Restart=always`, never gives up) |
+| everything it reads or keeps | `/var/lib/liveqx/state/broker/` — owned by `liveqx`, the same user as the server |
+| the process-id file | `/run/liveqx-broker/mosquitto.pid` (the server signals the broker through it) |
+
+**Order of things on a new installation.** Before the device CA ceremony the server has nothing to
+give the broker, so the broker is not started. After the ceremony the server writes, within about a
+minute, `cafile.pem` (the device CA certificates of every generation), `broker.crt` and `broker.key`
+(the broker's own certificate), `crl.pem` (the revocation list) and last of all `ready`; the path unit
+sees `ready` and starts the broker. Nothing has to be started by hand. The Screens → Broker page
+shows each step.
+
+**The broker's certificate.** If the server holds the key of the root the screens are told to trust
+(the default, `auto` TLS mode), it issues the certificate for the host in the `mqtt_broker_url`
+setting and for the addresses of this machine, valid from a day ago (clocks of the screens drift),
+and renews it 30 days before the end or when the host in the settings changes. If an administrator
+brought their own root (the `ca_cert_pem` override), the server cannot issue one: put `broker.crt` and
+`broker.key` into the broker directory yourself (the key readable by `liveqx` only). The page says
+which of the two it is, and until when the certificate is good.
+
+**Stopping and starting by hand.** `ready` stays, and the path unit would start the broker again, so
+stop both: `systemctl stop liveqx-broker.path liveqx-broker.service`; start with
+`systemctl start liveqx-broker.path`. A reload without stopping: `systemctl reload liveqx-broker`.
+
+**Rights.** `dynamic-security.json` holds the broker's rights and is written by the broker itself.
+The server rebuilds what players need from its own database (every few minutes and after any change),
+so losing the file is not a loss of data; initialise it again with `mosquitto_ctrl dynsec init` as the
+installer does (`liveqx-server` is the administrator, by certificate; the password asked for is never
+used) and restart the broker. Never run `dynsec init` over a working file: it drops every right.
+
+**Do not**
+* rotate the broker's log with a signal; it logs to the journal (`journalctl -u liveqx-broker`);
+* open port 1883 or any listener without client certificates: the configuration has one listener,
+  on the port you chose (default 8883), and screens need a certificate to get in;
+* forget the firewall: the screens come from outside, the port has to be reachable.

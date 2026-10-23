@@ -42,4 +42,5 @@ make -j2 binary WITH_DOCS=no WITH_CJSON=no WITH_WEBSOCKETS=no WITH_SRV=no WITH_T
     || { tail -30 "$work/build.log" >&2; exit 1; }
 
 install -D -m 0755 src/mosquitto "$prefix/sbin/mosquitto"
-echo "installed $prefix/sbin/mosquitto"
+echo "${VERSION}" > "$prefix/VERSION"
+echo "installed $prefix/sbin/mosquitto (${VERSION})"

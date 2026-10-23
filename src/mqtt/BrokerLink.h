@@ -128,6 +128,10 @@ public:
 private:
     void run();
     bool bringUp(std::string& why);
+    // Gives the server's own identity its working rights on a connection of its own, before the
+    // standing one exists: the broker drops every connection of a user whose roles change, so doing
+    // it on the standing connection would cut it. Best effort; the reconciliation checks again.
+    void prepareServerRights(const ClientOptions& standing);
     void tearDown();
     void setStatus(const std::string& state, const std::string& detail);
     void wait(int seconds);

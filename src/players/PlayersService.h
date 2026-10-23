@@ -81,6 +81,9 @@ struct PlayersServiceOptions {
     // rebuilt so that the old device's open connection ends, and what the server
     // remembers about the old device's presence is dropped. Never fails the call.
     std::function<void(const std::string& player_id)> on_player_reset;
+    // The module's settings were stored (any key). The broker's certificate follows the host in
+    // `mqtt_broker_url`, so whoever keeps it is asked to look again. Never fails the call.
+    std::function<void()> on_settings_changed;
 };
 
 struct PairingResult {

@@ -54,10 +54,14 @@ struct Rig {
     bool broker_up{true};
     std::vector<FakeMqttClient*> made;           // every client the link created
     std::vector<ClientOptions>   made_with;
+    std::vector<FakeMqttClient*> setups;         // the short connections that give the server its rights first
+    std::vector<ClientOptions>   setups_with;
+    std::vector<std::string>     order;          // "setup" / "standing", in the order they were made
 
     BrokerLinkOptions options() {
         BrokerLinkOptions o;
         o.retry_s = 1;
+        o.probe_timeout_s = 1;
         o.reconcile_interval_s = 1;
         o.admin.reply_timeout = 500ms;
         o.identity = [this](BrokerIdentityPem& id, std::string& why) {
@@ -76,8 +80,15 @@ struct Rig {
             f->clients.insert("liveqx-server");
             f->up = broker_up;
             std::lock_guard<std::mutex> lk(mu);
+            if (co.client_id == "liveqx-server-setup") {
+                setups.push_back(f.get());
+                setups_with.push_back(co);
+                order.push_back("setup");
+                return f;
+            }
             made.push_back(f.get());
             made_with.push_back(co);
+            order.push_back("standing");
             return f;
         };
         return o;
@@ -144,6 +155,24 @@ TEST(BrokerLink, ARequestedSyncIssuesTheNewPlayerAndRemovesTheRevokedOne) {
     })) << "the report of the pass that did the work";
     EXPECT_TRUE(rig.made[0]->clients.count(B));
     EXPECT_FALSE(rig.made[0]->clients.count(A));
+    link.stop();
+}
+
+TEST(BrokerLink, TheServerIsGivenItsRightsOnAShortConnectionBeforeTheStandingOneExists) {
+    // The broker drops every connection of a user whose roles change; done on the standing connection
+    // that would cut it at the very first start. So it is done before, on a throwaway connection.
+    Rig rig;
+    BrokerLink link(rig.options());
+    link.start();
+    ASSERT_TRUE(waitFor([&] { return link.status().state == "connected"; }));
+    ASSERT_EQ(rig.setups.size(), 1u);
+    ASSERT_EQ(rig.order.size(), 2u);
+    EXPECT_EQ(rig.order[0], "setup") << "first the rights, then the standing connection";
+    EXPECT_EQ(rig.setups_with[0].client_id, "liveqx-server-setup") << "another id: it must not displace the standing one";
+    EXPECT_TRUE(rig.setups_with[0].clean_start);
+    EXPECT_EQ(rig.setups_with[0].session_expiry_s, 0u);
+    EXPECT_EQ(rig.setups_with[0].cert_chain_pem, "CERT") << "the same identity, so the same rights";
+    EXPECT_GE(rig.setups[0]->countCommand("addClientRole"), 1u) << "the server's own role was bound there";
     link.stop();
 }
 

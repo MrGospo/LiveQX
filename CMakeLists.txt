@@ -264,6 +264,7 @@ set(SOURCES
     src/mqtt/BrokerLink.cpp
     src/mqtt/BrokerReload.cpp
     src/players/CrlPublisher.cpp
+    src/players/BrokerTls.cpp
     src/players/BrokerSettings.cpp
     src/players/EnrollService.cpp
     src/players/RevocationList.cpp

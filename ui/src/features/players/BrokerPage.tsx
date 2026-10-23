@@ -30,6 +30,7 @@ const STATE_STYLE: Record<BrokerState, string> = {
 };
 
 const HOST_RE = /^[A-Za-z0-9._:][A-Za-z0-9._:-]*$/;
+const PREPARE_ERRORS = ['broker_certificate_missing'];
 const RELOAD_ERRORS = ['pid_file_unreadable', 'bad_pid', 'process_not_running', 'not_the_broker', 'signal_failed', 'pid_file_not_configured'];
 const SOON_SECONDS = 7 * 86400;                // a revocation list this close to its end is worth a warning
 
@@ -298,6 +299,21 @@ export default function BrokerPage() {
                 </p>
               )}
               {crlSoon && <p className="m-0 text-xs text-[var(--warning)]">{t('players.broker.crl.soon')}</p>}
+              {!!crl.tls && (
+                <p className={clsx('m-0', crl.tls.certificate === 'missing' ? 'text-[var(--danger)]' : 'text-[var(--text-muted)]')}>
+                  {t('players.broker.crl.cert.title')}: {t(`players.broker.crl.cert.${crl.tls.certificate}`)}
+                  {!!crl.tls.not_after && crl.tls.certificate !== 'missing' &&
+                    <> · {t('players.broker.crl.validUntil')}: {absoluteTime(crl.tls.not_after)}</>}
+                </p>
+              )}
+              {!!crl.prepare_error && (
+                <p className="m-0 text-xs text-[var(--danger)]">
+                  {t('players.broker.crl.filesNotReady')}:{' '}
+                  {PREPARE_ERRORS.includes(crl.prepare_error)
+                    ? t(`players.broker.crl.prepareErrors.${crl.prepare_error}`)
+                    : <span className="font-mono">{crl.prepare_error}</span>}
+                </p>
+              )}
             </div>
           )}
         </Block>

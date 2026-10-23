@@ -56,6 +56,7 @@
 #include "players/AuditScope.h"
 #include "players/BrokerSettings.h"
 #include "players/CommandService.h"
+#include "players/BrokerTls.h"
 #include "players/CrlPublisher.h"
 #include "players/DeviceApi.h"
 #include "players/EnrollService.h"
@@ -989,6 +990,7 @@ int main(int argc, char* argv[]) {
             event_bus.publish(liveqx::events::EventType::PlayersBrokerStatus, -1, nlohmann::json::object());
         };
         std::unique_ptr<liveqx::mqtt::BrokerLink> broker_link;
+        std::unique_ptr<liveqx::players::BrokerTls> broker_tls;          // the broker's CA file and certificate (outlives the publisher)
         std::unique_ptr<liveqx::players::CrlPublisher> crl_publisher;   // the revocation list for the broker
         std::unique_ptr<liveqx::players::CommandService> command_service;
         std::jthread command_sweeper;       // settles commands nobody confirmed in time
@@ -1012,6 +1014,8 @@ int main(int argc, char* argv[]) {
             // Layers 2 and 3 (broker, CRL file) join the same hook later.
             LOG_INFO("Players: {} revoked certificate(s) loaded",
                      cert_revocations.rebuildFrom(players_db));
+            // The broker's certificate follows the host in mqtt_broker_url: look again when settings change.
+            po.on_settings_changed = [broker_hook] { broker_hook->pokeRevoked(); };
             po.on_certs_revoked = [&cert_revocations, broker_hook](const std::vector<liveqx::players::CertRow>& c) {
                 cert_revocations.add(c);              // the lock in the server: at once
                 broker_hook->pokeRevoked();           // the lock at the broker: a new list, soon
@@ -1196,6 +1200,31 @@ int main(int argc, char* argv[]) {
                     co.open_generation = [ca_dir, &master_key](int g, std::string& err) {
                         return liveqx::tls::DeviceCa::openGeneration(ca_dir, master_key, g, err);
                     };
+                    // The rest of what the broker needs to start: the CA file of the devices and its own
+                    // certificate, kept beside the list; `ready` appears when all of it is in place.
+                    {
+                        liveqx::players::BrokerTlsOptions bt;
+                        bt.dir = co.path.parent_path();
+                        bt.generations = co.generations;
+                        bt.open_generation = co.open_generation;
+                        bt.server_ca_dir = paths.tlsDir();
+                        bt.trust_root_pem = [&players_service] { return players_service->caCertPem(); };
+                        bt.host = [&players_service] {
+                            return liveqx::players::BrokerTls::hostOfBrokerUrl(players_service->settings().mqtt_broker_url);
+                        };
+                        // The server itself connects with its name checked, so the address it uses is covered too.
+                        if (cfg.contains("tls") && cfg["tls"].is_object() && cfg["tls"].contains("san_extra") &&
+                            cfg["tls"]["san_extra"].is_array())
+                            for (const auto& v : cfg["tls"]["san_extra"])
+                                if (v.is_string()) bt.san_extra.push_back(v.get<std::string>());
+                        if (cfg.contains("players") && cfg["players"].is_object() &&
+                            cfg["players"].contains("broker") && cfg["players"]["broker"].is_object())
+                            if (const auto h = cfg["players"]["broker"].value("host", std::string()); !h.empty())
+                                bt.san_extra.push_back(h);
+                        co.ready_path = bt.dir / "ready";
+                        broker_tls = std::make_unique<liveqx::players::BrokerTls>(std::move(bt));
+                        co.prepare = [p = broker_tls.get()](bool& changed) { return p->ensure(changed); };
+                    }
                     const std::string pid_file = ccfg.value("pid_file", std::string());
                     if (!pid_file.empty())
                         co.reload = [pid_file] { return liveqx::mqtt::reloadBrokerFromPidFile(pid_file); };
@@ -1610,6 +1639,11 @@ int main(int argc, char* argv[]) {
                             crl["revoked"]         = c.revoked;
                             crl["generations"]     = c.generations;
                             crl["valid_until"]     = c.valid_until;
+                            crl["prepare_error"]   = c.prepare_error;
+                            if (broker_tls) {
+                                const auto t = broker_tls->state();
+                                crl["tls"] = {{"certificate", t.certificate}, {"not_after", t.not_after}, {"error", t.error}};
+                            }
                         }
                         j["crl"] = std::move(crl);
                     }

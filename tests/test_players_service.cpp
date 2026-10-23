@@ -49,6 +49,7 @@ protected:
     std::vector<std::string> ntp_;
     std::vector<CertRow> revoked_by_hook_;
     std::vector<std::string> reset_by_hook_;
+    int settings_changed_{0};
     std::unique_ptr<PlayersService> svc_;
     std::int64_t group_{0};
 
@@ -85,6 +86,7 @@ protected:
             revoked_by_hook_.insert(revoked_by_hook_.end(), c.begin(), c.end());
         };
         o.on_player_reset = [this](const std::string& id) { reset_by_hook_.push_back(id); };
+        o.on_settings_changed = [this] { ++settings_changed_; };
         svc_ = std::make_unique<PlayersService>(*db_, std::move(o));
     }
 
@@ -104,6 +106,14 @@ protected:
 };
 
 }  // namespace
+
+TEST_F(PlayersServiceTest, WhoKeepsTheBrokersCertificateIsToldWhenSettingsAreStoredAndNotWhenTheyAreRefused) {
+    EXPECT_EQ(settings_changed_, 0);
+    ASSERT_EQ(svc_->updateSettings({{"mqtt_broker_url", "mqtts://screens.example.com:8883"}}), "");
+    EXPECT_EQ(settings_changed_, 1) << "the certificate must follow the host";
+    EXPECT_EQ(svc_->updateSettings({{"mqtt_broker_url", "http://not-mqtts.example.com"}}), "invalid_mqtt_broker_url");
+    EXPECT_EQ(settings_changed_, 1) << "a refused change changes nothing, so nobody is bothered";
+}
 
 TEST_F(PlayersServiceTest, SettingsHaveSafeDefaults) {
     auto s = svc_->settings();

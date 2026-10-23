@@ -185,7 +185,9 @@ std::string PlayersService::updateSettings(const std::map<std::string, std::stri
         }
         else return "unknown_setting";
     }
-    return db_.setSettings(patch) ? "" : "storage_error";
+    if (!db_.setSettings(patch)) return "storage_error";
+    if (opts_.on_settings_changed) opts_.on_settings_changed();
+    return "";
 }
 
 RetentionReport PlayersService::applyRetention(std::int64_t now) {

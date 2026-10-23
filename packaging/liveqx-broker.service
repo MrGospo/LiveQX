@@ -1,0 +1,51 @@
+[Unit]
+Description=LiveQX MQTT broker (Mosquitto with the LiveQX patch)
+Documentation=file:/usr/share/doc/liveqx/BROKER.md
+After=network-online.target
+Wants=network-online.target
+# Never stop trying to bring the broker back (the default gives up after a few quick failures).
+StartLimitIntervalSec=0
+# Not enabled by itself: liveqx-broker.path starts it once the LiveQX server has written
+# everything the broker reads (the CA file of the devices, its own certificate, the
+# revocation list). Before the device CA ceremony there is nothing to start.
+
+[Service]
+Type=simple
+# Our own build of the broker (packaging/mosquitto/build.sh), under the name "mosquitto":
+# the server sends SIGHUP only to a process of that name.
+ExecStart=/usr/local/libexec/liveqx/mosquitto -c /etc/liveqx/mosquitto.conf
+# The server rereads the revocation list and certificates by signalling; this is the same by hand.
+ExecReload=/bin/kill -HUP $MAINPID
+
+# The broker is what the screens reach. It comes back whatever the reason it went,
+# and systemd never gives up on it.
+Restart=always
+RestartSec=3s
+
+# The same user as the server: the server writes the files the broker reads and
+# signals it, and the broker keeps its rights (dynamic-security.json) and sessions
+# in the same directory.
+User=liveqx
+Group=liveqx
+# /run/liveqx-broker/mosquitto.pid (pid_file in the configuration).
+RuntimeDirectory=liveqx-broker
+RuntimeDirectoryMode=0750
+
+# Boundary: network, and one writable directory.
+ReadWritePaths=/var/lib/liveqx/state/broker
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LimitCORE=0
+# One connection per screen, with room to spare.
+LimitNOFILE=16384
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

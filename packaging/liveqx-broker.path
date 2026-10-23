@@ -1,0 +1,11 @@
+[Unit]
+Description=Start the LiveQX MQTT broker when the server has prepared everything it reads
+Documentation=file:/usr/share/doc/liveqx/BROKER.md
+
+[Path]
+# Written by the LiveQX server after the device CA ceremony, last of the broker's files.
+PathExists=/var/lib/liveqx/state/broker/ready
+Unit=liveqx-broker.service
+
+[Install]
+WantedBy=multi-user.target

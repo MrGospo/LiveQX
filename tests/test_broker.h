@@ -253,9 +253,11 @@ public:
     // `broker_dns` / `broker_ips`: names and addresses the broker's own certificate is valid for.
     // `with_crl`: the broker checks a revocation list (it starts with an empty one for
     // every generation) and writes a pid file, so it can be told to re-read the list.
+    // `bare`: only what `mosquitto_ctrl dynsec init` leaves — the server is the administrator and
+    // nothing else is set up; the server has to give itself and the players the rest.
     explicit TestBroker(std::vector<std::string> broker_dns = {"localhost"},
                         std::vector<std::string> broker_ips = {"127.0.0.1"},
-                        bool with_crl = false) : with_crl_(with_crl) {
+                        bool with_crl = false, bool bare = false) : with_crl_(with_crl), bare_(bare) {
         static std::atomic<int> seq{0};
         dir_ = fs::temp_directory_path() /
                ("lqx-broker-" + std::to_string(::getpid()) + "-" + std::to_string(seq.fetch_add(1)));
@@ -462,6 +464,7 @@ private:
                                 kBrokerName, "unused-password"}, dir_);
         if (init.code != 0 || !fs::exists(dir_ / "dynamic-security.json")) { problem_ = "dynsec init: " + init.output; return false; }
         if (!start()) return false;
+        if (bare_) return true;
 
         // Nothing is allowed unless a role says so.
         for (const char* t : {"publishClientSend", "publishClientReceive", "subscribe", "unsubscribe"})
@@ -493,6 +496,7 @@ private:
     static constexpr const char* kBrokerName = "liveqx-server";
 
     bool        with_crl_{false};
+    bool        bare_{false};
     fs::path    dir_;
     int         port_{0};
     pid_t       pid_{-1};

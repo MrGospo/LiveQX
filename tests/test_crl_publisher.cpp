@@ -17,6 +17,7 @@
 #include "auth/KeyWrap.h"
 #include "auth/MasterKey.h"
 #include "mqtt/BrokerReload.h"
+#include "players/BrokerTls.h"
 #include "players/CrlPublisher.h"
 #include "utils/DeviceCa.h"
 #include "utils/DeviceRootCa.h"
@@ -460,6 +461,187 @@ protected:
     }
     void writePid(const std::string& text) { std::ofstream(dir_ / "broker.pid") << text; }
 };
+
+// ── What the broker needs besides the list: its CA file and its own certificate ──
+
+int countCerts(const std::string& pem) {
+    int n = 0;
+    for (std::size_t at = 0; (at = pem.find("-----BEGIN CERTIFICATE-----", at)) != std::string::npos; ++at) ++n;
+    return n;
+}
+
+class BrokerTlsTest : public CrlPublisherTest {
+protected:
+    fs::path server_ca_, out_;
+    std::string host_{"screens.example.com"};
+
+    void SetUp() override {
+        CrlPublisherTest::SetUp();
+        server_ca_ = dir_ / "tls";
+        out_ = dir_ / "broker";
+        ASSERT_TRUE(tls::ensureCa(server_ca_).ok());
+    }
+    BrokerTlsOptions tlsOptions() {
+        BrokerTlsOptions o;
+        o.dir = out_;
+        o.generations = [this] { return tls::DeviceCa::generations(dir_ / "ca"); };
+        o.open_generation = [this](int g, std::string& err) { return tls::DeviceCa::openGeneration(dir_ / "ca", *mk_, g, err); };
+        o.server_ca_dir = server_ca_;
+        o.trust_root_pem = [this] { return slurp(server_ca_ / "ca.crt"); };
+        o.host = [this] { return host_; };
+        o.now = [this] { return now_; };
+        return o;
+    }
+};
+
+TEST(BrokerTlsUrl, TheHostIsTakenOutOfTheBrokerAddress) {
+    EXPECT_EQ(BrokerTls::hostOfBrokerUrl("mqtts://screens.example.com:8883"), "screens.example.com");
+    EXPECT_EQ(BrokerTls::hostOfBrokerUrl("mqtts://10.1.2.3"), "10.1.2.3");
+    EXPECT_EQ(BrokerTls::hostOfBrokerUrl("mqtts://[fd00::1]:8883/path"), "fd00::1");
+    EXPECT_EQ(BrokerTls::hostOfBrokerUrl("mqtts://user@host.lan:8883"), "host.lan");
+    EXPECT_EQ(BrokerTls::hostOfBrokerUrl(""), "");
+}
+
+TEST_F(BrokerTlsTest, TheCaFileHoldsTheRootAndEveryGenerationOnceAndIsLeftAloneWhenNothingChanged) {
+    BrokerTls bt(tlsOptions());
+    bool changed = false;
+    ASSERT_EQ(bt.ensure(changed), "");
+    EXPECT_TRUE(changed);
+    const std::string first = slurp(out_ / "cafile.pem");
+    EXPECT_EQ(countCerts(first), 2) << "the root and the intermediate of generation 1";
+
+    changed = true;
+    ASSERT_EQ(bt.ensure(changed), "");
+    EXPECT_FALSE(changed) << "the broker is not asked to reread what did not change";
+
+    addGeneration();                                             // a new intermediate under the same root
+    ASSERT_EQ(bt.ensure(changed), "");
+    EXPECT_TRUE(changed);
+    EXPECT_EQ(countCerts(slurp(out_ / "cafile.pem")), 3) << "the root once, both intermediates";
+}
+
+TEST_F(BrokerTlsTest, TheServerIssuesTheBrokersCertificateForTheHostInTheSettingsAndKeepsItAsLongAsItIsGood) {
+    BrokerTls bt(tlsOptions());
+    bool changed = false;
+    ASSERT_EQ(bt.ensure(changed), "");
+    EXPECT_TRUE(changed);
+    EXPECT_EQ(bt.state().certificate, "managed");
+
+    const auto info = tls::readCertInfo(out_ / "broker.crt");
+    EXPECT_NE(std::find(info.san_dns.begin(), info.san_dns.end(), host_), info.san_dns.end()) << "the host players are given";
+    EXPECT_NE(std::find(info.san_ip.begin(), info.san_ip.end(), "127.0.0.1"), info.san_ip.end()) << "the server itself connects locally";
+    EXPECT_TRUE(tls::verifyChain(out_ / "broker.crt", server_ca_ / "ca.crt").ok) << "players trust this root";
+    EXPECT_LE(info.not_before_unix, now_ - 86000) << "valid from a day ago: clocks of the players drift";
+    EXPECT_EQ(fs::status(out_ / "broker.key").permissions() & (fs::perms::group_all | fs::perms::others_all), fs::perms::none);
+
+    const std::string before = slurp(out_ / "broker.crt");
+    ASSERT_EQ(bt.ensure(changed), "");
+    EXPECT_FALSE(changed);
+    EXPECT_EQ(slurp(out_ / "broker.crt"), before) << "a good certificate is not replaced";
+}
+
+TEST_F(BrokerTlsTest, ACertificateIsIssuedAgainWhenTheHostChangesOrItIsAboutToRunOut) {
+    BrokerTls bt(tlsOptions());
+    bool changed = false;
+    ASSERT_EQ(bt.ensure(changed), "");
+    const std::string first = slurp(out_ / "broker.crt");
+
+    host_ = "10.9.8.7";                                           // the address in the settings changed
+    ASSERT_EQ(bt.ensure(changed), "");
+    EXPECT_TRUE(changed);
+    EXPECT_NE(slurp(out_ / "broker.crt"), first);
+    EXPECT_NE(std::find(tls::readCertInfo(out_ / "broker.crt").san_ip.begin(),
+                        tls::readCertInfo(out_ / "broker.crt").san_ip.end(), "10.9.8.7"),
+              tls::readCertInfo(out_ / "broker.crt").san_ip.end());
+
+    const std::string second = slurp(out_ / "broker.crt");
+    now_ += std::int64_t{340} * 86400;                            // 25 days left of 365
+    ASSERT_EQ(bt.ensure(changed), "");
+    EXPECT_TRUE(changed);
+    EXPECT_NE(slurp(out_ / "broker.crt"), second) << "renewed before it runs out";
+}
+
+TEST_F(BrokerTlsTest, ACertificateThatDoesNotBelongToTheKeyOrTheRootIsNotTrustedAndIsReplaced) {
+    BrokerTls bt(tlsOptions());
+    bool changed = false;
+    ASSERT_EQ(bt.ensure(changed), "");
+    const std::string good = slurp(out_ / "broker.crt");
+    { std::ofstream(out_ / "broker.crt", std::ios::trunc) << "garbage"; }
+    ASSERT_EQ(bt.ensure(changed), "");
+    EXPECT_TRUE(changed);
+    EXPECT_TRUE(tls::verifyKeyPair(out_ / "broker.crt", out_ / "broker.key").ok);
+}
+
+TEST_F(BrokerTlsTest, WithAnotherRootThanOursTheOperatorsCertificateIsOnlyCheckedNeverIssued) {
+    auto o = tlsOptions();
+    const fs::path other = dir_ / "other_ca";
+    ASSERT_TRUE(tls::ensureCa(other).ok());
+    o.trust_root_pem = [other] { return slurp(other / "ca.crt"); };     // the administrator's own root
+    BrokerTls bt(std::move(o));
+    bool changed = false;
+
+    EXPECT_EQ(bt.ensure(changed), "broker_certificate_missing");
+    EXPECT_EQ(bt.state().certificate, "missing");
+    EXPECT_FALSE(fs::exists(out_ / "broker.crt")) << "we do not hold that root's key and issue nothing";
+
+    tls::SanList sans; sans.dns_names = {host_};
+    ASSERT_TRUE(tls::issueServerCertTo(other, out_ / "broker.crt", out_ / "broker.key", "operator", sans).ok());
+    EXPECT_EQ(bt.ensure(changed), "");
+    EXPECT_EQ(bt.state().certificate, "provided");
+    EXPECT_GT(bt.state().not_after, now_);
+}
+
+TEST_F(BrokerTlsTest, TheBrokerMayStartOnlyWhenTheListAndEverythingBesideItAreThere) {
+    BrokerTls bt(tlsOptions());
+    auto o = options(out_ / "crl.pem");
+    o.ready_path = out_ / "ready";
+    o.prepare = [&bt](bool& changed) { return bt.ensure(changed); };
+    CrlPublisher pub(*db_, std::move(o));
+    EXPECT_FALSE(fs::exists(out_ / "ready"));
+
+    auto st = pub.publishNow();
+    ASSERT_TRUE(st.last_ok) << st.error;
+    EXPECT_EQ(st.prepare_error, "");
+    EXPECT_TRUE(fs::exists(out_ / "cafile.pem") && fs::exists(out_ / "broker.crt") && fs::exists(out_ / "broker.key") &&
+                fs::exists(out_ / "crl.pem"));
+    EXPECT_TRUE(fs::exists(out_ / "ready")) << "everything the broker reads is in place before this appears";
+    EXPECT_EQ(reloads_, 0) << "the broker starts on this very file: nobody to tell, and no complaint that nobody answered";
+    EXPECT_EQ(st.reload_error, "");
+
+    st = pub.publishNow();
+    EXPECT_EQ(reloads_, 1) << "from then on a running broker is told after every new list";
+}
+
+TEST_F(BrokerTlsTest, WhileSomethingTheBrokerNeedsIsNotRightTheListStillGoesOutButTheBrokerIsNotToldItMayStart) {
+    auto o = tlsOptions();
+    const fs::path other = dir_ / "other_ca";
+    ASSERT_TRUE(tls::ensureCa(other).ok());
+    o.trust_root_pem = [other] { return slurp(other / "ca.crt"); };     // no certificate of the operator's yet
+    BrokerTls bt(std::move(o));
+    auto po = options(out_ / "crl.pem");
+    po.ready_path = out_ / "ready";
+    po.prepare = [&bt](bool& changed) { return bt.ensure(changed); };
+    CrlPublisher pub(*db_, std::move(po));
+
+    auto st = pub.publishNow();
+    EXPECT_TRUE(st.last_ok) << "revocation must not wait for a certificate";
+    EXPECT_EQ(st.prepare_error, "broker_certificate_missing");
+    EXPECT_TRUE(fs::exists(out_ / "crl.pem"));
+    EXPECT_FALSE(fs::exists(out_ / "ready"));
+}
+
+TEST_F(BrokerTlsTest, BeforeTheDeviceCaCeremonyNothingIsPreparedAndNothingSaysReady) {
+    BrokerTls bt(tlsOptions());
+    auto po = options(out_ / "crl.pem");
+    po.generations = [] { return std::vector<int>{}; };
+    po.ready_path = out_ / "ready";
+    po.prepare = [&bt](bool& changed) { return bt.ensure(changed); };
+    CrlPublisher pub(*db_, std::move(po));
+    auto st = pub.publishNow();
+    EXPECT_TRUE(st.waiting);
+    EXPECT_FALSE(fs::exists(out_ / "ready"));
+    EXPECT_FALSE(fs::exists(out_ / "cafile.pem"));
+}
 
 TEST_F(BrokerReloadTest, EveryWayThePidFileCanBeWrongIsNamed) {
     using liveqx::mqtt::reloadBrokerFromPidFile;

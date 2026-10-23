@@ -386,9 +386,20 @@ ServerCertResult issueServerCert(const fs::path& dir,
                                  std::string_view common_name,
                                  const SanList& sans,
                                  int validity_days) {
+    return issueServerCertTo(dir, dir / "server.crt", dir / "server.key", common_name, sans, validity_days, 0);
+}
+
+ServerCertResult issueServerCertTo(const fs::path& ca_dir,
+                                   const fs::path& cert_path,
+                                   const fs::path& key_path,
+                                   std::string_view common_name,
+                                   const SanList& sans,
+                                   int validity_days,
+                                   int backdate_s) {
+    const fs::path& dir = ca_dir;
     ServerCertResult r;
-    r.cert_path = dir / "server.crt";
-    r.key_path  = dir / "server.key";
+    r.cert_path = cert_path;
+    r.key_path  = key_path;
 
     if (sans.empty()) {
         r.error = "SAN list is empty — modern TLS clients require at least "
@@ -415,7 +426,7 @@ ServerCertResult issueServerCert(const fs::path& dir,
     setSubjectCN(cert.get(), common_name);
     X509_set_issuer_name(cert.get(), X509_get_subject_name(ca_cert.get()));
 
-    X509_gmtime_adj(X509_getm_notBefore(cert.get()), 0);
+    X509_gmtime_adj(X509_getm_notBefore(cert.get()), -static_cast<long>(backdate_s));
     X509_gmtime_adj(X509_getm_notAfter (cert.get()),
                     static_cast<long>(validity_days) * 86400L);
 

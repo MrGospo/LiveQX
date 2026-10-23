@@ -67,6 +67,9 @@ export interface BrokerCrlStatus {
   revoked?:         number;
   generations?:     number;
   valid_until?:     number;
+  // What the broker needs besides the list (its CA file and its own certificate).
+  prepare_error?:   string;
+  tls?:             { certificate: 'managed' | 'provided' | 'missing'; not_after?: number; error?: string };
 }
 
 export interface BrokerStatus {

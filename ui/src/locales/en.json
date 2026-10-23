@@ -2147,6 +2147,16 @@
         "hint": "If a screen is stolen or retired, its certificate is revoked. The broker keeps such a screen out when it is given this list.",
         "off": "The list is not passed to the broker (the mode is off in the server configuration). A revoked screen loses all rights on the broker and is disconnected, but may connect again and do nothing. For full protection set players.broker.crl.mode = local.",
         "ok": "The list is written",
+        "cert": {
+          "title": "Broker certificate",
+          "managed": "issued and renewed by the server",
+          "provided": "supplied by the administrator",
+          "missing": "not in place"
+        },
+        "filesNotReady": "The broker's files are not ready, so it cannot start",
+        "prepareErrors": {
+          "broker_certificate_missing": "put the broker's certificate and key (broker.crt, broker.key) in the broker directory: the server holds no key of the root the screens trust, so it cannot issue them"
+        },
         "waiting": "Waiting for the device authority: the list will be written after the setup ceremony",
         "notPublished": "The list is not written",
         "error": "Error",

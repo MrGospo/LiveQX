@@ -178,6 +178,7 @@ add_executable(liveqx-tests
     ../src/mqtt/BrokerLink.cpp
     ../src/mqtt/BrokerReload.cpp
     ../src/players/CrlPublisher.cpp
+    ../src/players/BrokerTls.cpp
     test_crl_publisher.cpp
     ../src/players/BrokerSettings.cpp
     test_broker_settings.cpp
@@ -289,6 +290,9 @@ if(MOSQUITTO_FOUND)
 endif()
 include(GoogleTest)
 gtest_discover_tests(liveqx-tests DISCOVERY_MODE PRE_TEST)
+
+# The installation files (units, installer, broker template) agree with each other and with the server.
+add_test(NAME packaging-static COMMAND bash ${CMAKE_SOURCE_DIR}/packaging/check.sh)
 
 # ─── SRT output tests (require libsrt, no FFmpeg) ────────────────────────────
 add_executable(liveqx-srt-tests

@@ -23,6 +23,7 @@
 #include "mqtt/BrokerAdmin.h"
 #include "mqtt/BrokerLink.h"
 #include "mqtt/BrokerReload.h"
+#include "players/BrokerTls.h"
 #include "players/CrlPublisher.h"
 #include "players/PlayersDb.h"
 #include "mqtt/MosquittoClient.h"
@@ -467,6 +468,46 @@ TEST_F(MosquittoBrokerTest, TheLinkIssuesAPlayerAndHearsItsPresenceEndToEnd) {
     link.stop();
 }
 
+TEST_F(MosquittoBrokerTest, AFreshBrokerIsSetUpWithoutCuttingTheServersOwnConnection) {
+    // A fresh broker knows the server only as its administrator. Giving the server its working role
+    // makes the broker drop the connections of that user, so it must happen before the standing
+    // connection exists, not on it.
+    TestBroker bare({"localhost"}, {"127.0.0.1"}, /*with_crl=*/false, /*bare=*/true);
+    ASSERT_TRUE(bare.ok()) << bare.problem();
+    const auto server = bare.serverOptions();
+    mqtt::BrokerLinkOptions o;
+    o.host = server.host;
+    o.port = server.port;
+    o.retry_s = 1;
+    o.reconcile_interval_s = 30;
+    o.identity = [&](mqtt::BrokerIdentityPem& id, std::string&) {
+        id.cert_chain_pem = server.cert_chain_pem;
+        id.key_pem = server.key_pem;
+        id.serial = "s1";
+        return true;
+    };
+    o.trust_pem = [&] { return server.ca_pem; };
+    o.wanted = [] { return std::set<std::string>{}; };
+    o.make_client = [](const mqtt::ClientOptions& co) -> std::unique_ptr<mqtt::IMqttClient> {
+        return std::make_unique<mqtt::MosquittoClient>(co);
+    };
+    mqtt::BrokerLink link(std::move(o));
+    link.start();
+    ASSERT_TRUE(waitFor([&] { return link.status().last_reconcile_ok; }, 20000))
+        << link.status().detail << "\n" << bare.log();
+    std::this_thread::sleep_for(std::chrono::seconds(1));          // a late drop would show by now
+    link.stop();
+
+    const std::string log = bare.log();
+    auto count = [&](const std::string& what) {
+        std::size_t n = 0;
+        for (auto at = log.find(what); at != std::string::npos; at = log.find(what, at + 1)) ++n;
+        return n;
+    };
+    EXPECT_EQ(count("Client liveqx-server been disconnected by administrative action"), 0u) << log;
+    EXPECT_EQ(count("as liveqx-server (p5, c0"), 1u) << "the standing connection was opened once and never had to come back\n" << log;
+}
+
 TEST_F(MosquittoBrokerTest, RemovingAPlayerLeavesNoRetainedPresenceBehindAndStaleOnesAreSwept) {
     AdminRig rig(broker_->serverOptions());
     ASSERT_TRUE(rig.up());
@@ -699,4 +740,112 @@ TEST(MosquittoRevocation, AListThatHasRunOutShutsEveryoneOutAndAFreshOneRepairsI
     ASSERT_TRUE(fresh.publishNow().last_ok);
     std::this_thread::sleep_for(std::chrono::milliseconds(800));
     EXPECT_TRUE(connectsWithin(rig.broker->playerOptions(b), 8000)) << "a new list and the hangup bring everyone back";
+}
+
+// ── The configuration that the installer ships, with the files the server writes ──
+
+TEST(MosquittoShippedConfig, TheBrokerStartsOnTheInstallersTemplateAndOnlyWhatTheServerWrites) {
+    if (auto why = TestBroker::unavailable()) GTEST_SKIP() << *why;
+    namespace fs = std::filesystem;
+    static std::atomic<int> seq{0};
+    const fs::path dir = fs::temp_directory_path() /
+                         ("lqx-shipped-" + std::to_string(::getpid()) + "-" + std::to_string(seq.fetch_add(1)));
+    fs::create_directories(dir);
+    struct Cleanup {
+        fs::path d; pid_t pid{-1};
+        ~Cleanup() {
+            if (pid > 0) { ::kill(pid, SIGKILL); int st = 0; ::waitpid(pid, &st, 0); }
+            std::error_code ec; fs::remove_all(d, ec);
+        }
+    } cleanup{dir};
+
+    // What the server has: a master key, a device CA, the server's TLS CA, the players' database.
+    liveqx::auth::MasterKey mk((dir / "master.key").string());
+    ASSERT_TRUE(mk.load());
+    std::string err;
+    auto device_ca = liveqx::tls::DeviceCa::open(dir / "device_ca", mk, err, /*allow_create=*/true);
+    ASSERT_TRUE(device_ca) << err;
+    ASSERT_TRUE(liveqx::tls::ensureCa(dir / "tls").ok());
+    liveqx::players::PlayersDb db(dir / "players.db");
+    ASSERT_TRUE(db.open());
+
+    // The server writes the broker's files: the list, the CA file, the certificate, then `ready`.
+    const fs::path broker_dir = dir / "state" / "broker";
+    liveqx::players::BrokerTlsOptions bt;
+    bt.dir = broker_dir;
+    bt.generations = [&] { return liveqx::tls::DeviceCa::generations(dir / "device_ca"); };
+    bt.open_generation = [&](int g, std::string& e) { return liveqx::tls::DeviceCa::openGeneration(dir / "device_ca", mk, g, e); };
+    bt.server_ca_dir = dir / "tls";
+    bt.trust_root_pem = [&] { return liveqx::testing::readFileText(dir / "tls" / "ca.crt"); };
+    bt.host = [] { return std::string("127.0.0.1"); };
+    liveqx::players::BrokerTls broker_tls(std::move(bt));
+    liveqx::players::CrlPublisherOptions co;
+    co.path = broker_dir / "crl.pem";
+    co.ready_path = broker_dir / "ready";
+    co.generations = [&] { return liveqx::tls::DeviceCa::generations(dir / "device_ca"); };
+    co.open_generation = [&](int g, std::string& e) { return liveqx::tls::DeviceCa::openGeneration(dir / "device_ca", mk, g, e); };
+    co.prepare = [&](bool& changed) { return broker_tls.ensure(changed); };
+    liveqx::players::CrlPublisher crl(db, std::move(co));
+    const auto published = crl.publishNow();
+    ASSERT_TRUE(published.last_ok) << published.error;
+    ASSERT_EQ(published.prepare_error, "");
+    ASSERT_TRUE(fs::exists(broker_dir / "ready"));
+
+    // The installer: the template with its places filled in, and `dynsec init` for the administrator.
+    const fs::path tmpl = fs::path(__FILE__).parent_path().parent_path() / "packaging" / "mosquitto" / "mosquitto.conf.in";
+    std::string conf = liveqx::testing::readFileText(tmpl);
+    ASSERT_FALSE(conf.empty()) << tmpl;
+    const int port = liveqx::testing::freeLoopbackPort();
+    const fs::path run_dir = dir / "run";
+    fs::create_directories(run_dir);
+    fs::create_directories(broker_dir / "data");
+    auto fill = [&](const std::string& what, const std::string& with) {
+        for (auto at = conf.find(what); at != std::string::npos; at = conf.find(what, at + with.size()))
+            conf.replace(at, what.size(), with);
+    };
+    fill("@BROKER_DIR@", broker_dir.string());
+    fill("@RUN_DIR@", run_dir.string());
+    fill("@PORT@", std::to_string(port));
+    fill("@PLUGIN@", liveqx::testing::findDynsecPlugin()->string());
+    EXPECT_EQ(conf.find('@'), std::string::npos) << "every place in the template was filled in";
+    liveqx::testing::writeFileText(dir / "mosquitto.conf", conf, 0644);
+    const auto init = liveqx::testing::runProcess({"mosquitto_ctrl", "dynsec", "init",
+                                                   (broker_dir / "dynamic-security.json").string(),
+                                                   "liveqx-server", "unused-password"}, dir);
+    ASSERT_EQ(init.code, 0) << init.output;
+
+    // Start the broker the way the service does, and see it come up.
+    std::vector<std::string> argv = {liveqx::testing::brokerBinary()->string(), "-c", (dir / "mosquitto.conf").string()};
+    std::vector<char*> args;
+    for (auto& a : argv) args.push_back(a.data());
+    args.push_back(nullptr);
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_addopen(&fa, 1, (dir / "broker.out").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    posix_spawn_file_actions_adddup2(&fa, 1, 2);
+    ASSERT_EQ(posix_spawn(&cleanup.pid, argv[0].c_str(), &fa, nullptr, args.data(), environ), 0);
+    posix_spawn_file_actions_destroy(&fa);
+    ASSERT_TRUE(waitFor([&] { return liveqx::testing::portAccepts(port); }, 8000)) << liveqx::testing::readFileText(dir / "broker.out");
+
+    // The server connects under its own identity and checks the broker's name against the certificate the server wrote.
+    liveqx::tls::BrokerIdentity identity;
+    ASSERT_TRUE(liveqx::tls::DeviceCa::ensureBrokerIdentity(dir / "device_ca", mk, *device_ca, identity, err)) << err;
+    mqtt::ClientOptions so;
+    so.host = "127.0.0.1";
+    so.port = port;
+    so.client_id = "liveqx-server";
+    so.ca_pem = liveqx::testing::readFileText(dir / "tls" / "ca.crt");
+    so.cert_chain_pem = identity.cert_chain_pem;
+    so.key_pem = identity.key_pem;
+    so.verify_hostname = true;
+    mqtt::MosquittoClient server(so);
+    ASSERT_TRUE(server.start());
+    EXPECT_TRUE(waitFor([&] { return server.connected(); }, 10000)) << server.lastError() << "\n" << liveqx::testing::readFileText(dir / "broker.out");
+
+    // The server's SIGHUP reaches the broker by the pid file the template names, and nothing is lost.
+    EXPECT_EQ(mqtt::reloadBrokerFromPidFile(run_dir / "mosquitto.pid"), "");
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    EXPECT_TRUE(server.connected()) << "a reload does not cut the open connections";
+    server.stop();
 }

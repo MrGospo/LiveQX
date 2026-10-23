@@ -49,6 +49,13 @@ struct CrlPublisherOptions {
     // Empty = there is nobody to tell (the file is written all the same).
     std::function<std::string()> reload;
     std::function<std::int64_t()> now;           // unix seconds; null = real clock
+    // Brings the rest of what the broker needs (its CA file and certificate: BrokerTls) in place
+    // before the list is written. Returns "" or why it could not; `changed` is set when something
+    // was written. Null = nothing to prepare.
+    std::function<std::string(bool& changed)> prepare;
+    // Created once the broker has everything: the list and whatever `prepare` made. A service that
+    // waits for this path can start the broker. The server never removes it. Empty = none.
+    std::filesystem::path ready_path;
     // Called (no lock held) after each attempt, so a page that shows the status can refresh. Keep it short.
     std::function<void()> on_change;
 };
@@ -59,6 +66,7 @@ struct CrlStatus {
     bool         last_ok{false};
     bool         waiting{false};                 // no device CA yet: nothing to publish, and that is not a fault
     std::string  error;                          // why the last attempt failed ("" if it did not)
+    std::string  prepare_error;                  // the list is written but the broker's other files are not right
     std::string  reload_error;                   // the file was written but the broker was not told
     std::size_t  revoked{0};                     // entries in the lists
     std::size_t  generations{0};

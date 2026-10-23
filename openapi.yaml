@@ -5678,16 +5678,30 @@ components:
             Список отозванных сертификатов для брокера (`players.broker.crl.mode`: `off` или `local`).
             При `local` сервер раз в сутки (и при каждом отзыве) пишет файл с отдельным списком на
             каждое поколение центра устройств и сообщает локальному брокеру перечитать его.
-            Просроченный список запирает всех, поэтому `valid_until` должен быть далеко впереди.
+            Просроченный список запирает всех, поэтому `valid_until` должен быть далеко впереди
+            (срок списка по умолчанию 90 дней, обновление не реже трети срока; до первой записи
+            срок читается из файла на диске).
+            Рядом с ним сервер пишет всё остальное, что читает брокер: `cafile.pem` (сертификаты
+            центра устройств всех поколений) и сертификат самого брокера (`broker.crt`, `broker.key`),
+            а после этого файл `ready`, по которому служба брокера запускается.
           properties:
             mode: { type: string, enum: [off, local] }
             last_publish_at: { type: integer, format: int64 }
             last_ok: { type: boolean }
+            waiting: { type: boolean, description: 'Центра устройств ещё нет (церемония не проведена): публиковать нечего, это не сбой.' }
             error: { type: string, description: 'Почему не получилось записать файл; прежний файл остаётся в силе.' }
-            reload_error: { type: string, description: 'Файл записан, но брокеру не удалось сообщить (pid-файл, процесс).' }
+            reload_error: { type: string, description: 'Файл записан, но брокеру не удалось сообщить (pid-файл, процесс; `pid_file_not_configured` — pid-файл не задан в настройках).' }
+            prepare_error: { type: string, description: 'Список записан, но остальные файлы брокера не в порядке (`broker_certificate_missing` и др.); файл `ready` не создаётся, брокер не запустится.' }
             revoked: { type: integer }
             generations: { type: integer }
             valid_until: { type: integer, format: int64 }
+            tls:
+              type: object
+              description: 'Сертификат слушателя брокера. `managed` — выпускает и продлевает сервер (у него есть ключ корня, которому доверяют экраны); `provided` — положил администратор; `missing` — нет или непригоден.'
+              properties:
+                certificate: { type: string, enum: [managed, provided, missing] }
+                not_after: { type: integer, format: int64 }
+                error: { type: string }
         readiness:
           type: object
           properties:

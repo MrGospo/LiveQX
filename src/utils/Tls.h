@@ -111,6 +111,17 @@ ServerCertResult issueServerCert(const std::filesystem::path& dir,
                                  const SanList&               sans,
                                  int                          validity_days = 365);
 
+// As issueServerCert(), but the CA is read from <ca_dir>/ca.{crt,key}, the certificate and its key go
+// to the given paths, and the validity starts `backdate_s` seconds in the past (the clocks of the
+// peers drift; a certificate that is "not yet valid" for them is as good as none).
+ServerCertResult issueServerCertTo(const std::filesystem::path& ca_dir,
+                                   const std::filesystem::path& cert_path,
+                                   const std::filesystem::path& key_path,
+                                   std::string_view             common_name,
+                                   const SanList&               sans,
+                                   int                          validity_days = 365,
+                                   int                          backdate_s = 0);
+
 // Reads a cert PEM and returns metadata. Returns an info struct with
 // empty subject/issuer + days_remaining=0 if the file is missing or
 // malformed (caller checks subject.empty()).

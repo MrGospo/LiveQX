@@ -1,0 +1,44 @@
+# Mosquitto for LiveQX. Written by packaging/install.sh from this template
+# (the placeholders in capital letters between two at-signs are filled in); edit /etc/liveqx/mosquitto.conf, not this file.
+#
+# Everything the broker reads from @BROKER_DIR@ is written by the LiveQX server
+# (the CA file of the devices, the broker's own certificate, the revocation
+# list) and appears there after the device CA ceremony; the broker's service
+# starts when @BROKER_DIR@/ready exists. The broker runs as the liveqx user.
+
+# The server sends SIGHUP here after it has written a new revocation list.
+pid_file @RUN_DIR@/mosquitto.pid
+
+# The journal collects it; do not rotate a log file with a signal.
+log_dest stderr
+log_type error
+log_type warning
+log_type notice
+connection_messages true
+
+# ── Listener: players over mutual TLS ───────────────────────────────────────
+listener @PORT@
+protocol mqtt
+cafile   @BROKER_DIR@/cafile.pem
+certfile @BROKER_DIR@/broker.crt
+keyfile  @BROKER_DIR@/broker.key
+# A certificate that is not on the revocation list is the only way in, and the
+# name in it (the player's id, or "liveqx-server") is the user name for the rights.
+crlfile  @BROKER_DIR@/crl.pem
+require_certificate true
+use_identity_as_username true
+allow_anonymous false
+
+# ── Sessions ────────────────────────────────────────────────────────────────
+# A switched-off screen keeps its session, so a command sent in the meantime
+# waits for it (the command has its own lifetime). Sessions of screens gone for
+# a day are dropped.
+persistence true
+persistence_location @BROKER_DIR@/data/
+persistent_client_expiration 1d
+
+# ── Rights: Dynamic Security ────────────────────────────────────────────────
+# The server administers it over MQTT under its own certificate and gives each
+# player a record and a role of its own.
+plugin @PLUGIN@
+plugin_opt_config_file @BROKER_DIR@/dynamic-security.json

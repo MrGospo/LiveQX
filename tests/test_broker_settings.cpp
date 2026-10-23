@@ -101,6 +101,7 @@ protected:
             f->clients.insert("liveqx-server");
             f->up = reachable_.load() || co.host == "127.0.0.1";        // the first address always works
             std::lock_guard<std::mutex> lk(mu_);
+            if (co.client_id == "liveqx-server-setup") return f;       // the short connection for the server's rights is not what is counted here
             made_.push_back(co);
             return f;
         };

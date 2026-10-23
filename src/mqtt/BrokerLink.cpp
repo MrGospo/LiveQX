@@ -156,6 +156,26 @@ void BrokerLink::wait(int seconds) {
     poke_ = false;
 }
 
+void BrokerLink::prepareServerRights(const ClientOptions& standing) {
+    ClientOptions co = standing;
+    co.client_id        = std::string(BrokerAdmin::kServerClient) + "-setup";
+    co.clean_start      = true;
+    co.session_expiry_s = 0;
+    auto client = opts_.make_client ? opts_.make_client(co) : nullptr;
+    if (!client) return;
+    BrokerAdmin admin(*client, opts_.admin);                   // subscribes to the replies
+    client->setMessageHandler([&admin](const Message& m) { admin.handleMessage(m); });
+    if (!client->start()) return;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, opts_.probe_timeout_s));
+    while (std::chrono::steady_clock::now() < deadline && !client->connected() && !stopping_.load())
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (client->connected()) {
+        const auto r = admin.ensureBaseline();
+        if (!r.ok) LOG_DEBUG("Broker: the server's rights could not be set up in advance: {}", r.error);
+    }
+    client->stop();
+}
+
 bool BrokerLink::bringUp(std::string& why) {
     BrokerIdentityPem id;
     if (!opts_.identity || !opts_.identity(id, why)) {
@@ -173,6 +193,8 @@ bool BrokerLink::bringUp(std::string& why) {
     co.cert_chain_pem  = id.cert_chain_pem;
     co.key_pem         = id.key_pem;
     co.verify_hostname = opts_.verify_hostname;
+
+    prepareServerRights(co);
 
     auto client = opts_.make_client ? opts_.make_client(co) : nullptr;
     if (!client) { why = "the MQTT client is not available in this build"; return false; }

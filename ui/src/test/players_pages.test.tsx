@@ -320,6 +320,24 @@ describe('BrokerPage', () => {
       expect(screen.getByText(/process-id file is not set in the server's settings/)).toBeInTheDocument();
     });
 
+    it('says whose the broker certificate is and until when, and names what is missing when the broker cannot start', () => {
+      brokerState.data = baseBroker({ crl: { mode: 'local', last_ok: true, last_publish_at: nowSec() - 60,
+        valid_until: nowSec() + 80 * 86400, revoked: 0, generations: 1,
+        tls: { certificate: 'managed', not_after: nowSec() + 300 * 86400 } } });
+      const first = renderPage(<BrokerPage />);
+      expect(screen.getByText(/Broker certificate: issued and renewed by the server/)).toBeInTheDocument();
+      expect(screen.queryByText(/files are not ready/)).not.toBeInTheDocument();
+      first.unmount();
+
+      brokerState.data = baseBroker({ crl: { mode: 'local', last_ok: true, last_publish_at: nowSec() - 60,
+        valid_until: nowSec() + 80 * 86400, revoked: 0, generations: 1,
+        tls: { certificate: 'missing', error: 'broker_certificate_missing' }, prepare_error: 'broker_certificate_missing' } });
+      renderPage(<BrokerPage />);
+      expect(screen.getByText(/Broker certificate: not in place/)).toBeInTheDocument();
+      expect(screen.getByText(/The broker's files are not ready, so it cannot start/)).toBeInTheDocument();
+      expect(screen.getByText(/put the broker's certificate and key/)).toBeInTheDocument();
+    });
+
     it('warns loudly when the list is close to running out, since that would lock everyone out', () => {
       brokerState.data = baseBroker({ crl: {
         mode: 'local', last_ok: false, error: 'generation_1: cannot be opened',

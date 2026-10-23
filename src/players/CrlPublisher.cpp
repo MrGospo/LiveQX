@@ -78,6 +78,7 @@ CrlStatus CrlPublisher::publishNow() {
     st.last_ok = false;
     st.waiting = false;
     st.error.clear();
+    st.prepare_error.clear();
     st.reload_error.clear();
     auto finish = [&]() {
         {
@@ -90,6 +91,10 @@ CrlStatus CrlPublisher::publishNow() {
 
     const std::vector<int> gens = opts_.generations ? opts_.generations() : std::vector<int>{};
     if (gens.empty()) { st.waiting = true; return finish(); }      // before the device CA ceremony: normal, not a fault
+
+    // The broker's other files first, so that whoever sees the list sees a broker that can start.
+    [[maybe_unused]] bool prepared_changed = false;      // the list is written and the broker told right after anyway
+    if (opts_.prepare) st.prepare_error = opts_.prepare(prepared_changed);
 
     // Every generation, in one file. If any cannot be signed, nothing is written.
     std::string all;
@@ -142,7 +147,15 @@ CrlStatus CrlPublisher::publishNow() {
     st.generations = gens.size();
     st.revoked = revoked;
     st.valid_until = now + std::int64_t{opts_.next_update_days} * 86400;
-    if (opts_.reload) st.reload_error = opts_.reload();       // the file stands even if the broker could not be told
+    // The broker may start now: the list and everything it needs beside it are there. It could not
+    // have been running before this (it starts on this very file), so there is nobody to tell yet.
+    bool ready_just_made = false;
+    if (!opts_.ready_path.empty() && st.prepare_error.empty() && !fs::exists(opts_.ready_path, ec)) {
+        std::ofstream(opts_.ready_path, std::ios::trunc) << "ready\n";
+        ::chmod(opts_.ready_path.c_str(), 0644);
+        ready_just_made = true;
+    }
+    if (opts_.reload && !ready_just_made) st.reload_error = opts_.reload();   // the file stands even if the broker could not be told
     return finish();
 }
 
@@ -177,6 +190,7 @@ void CrlPublisher::run() {
     std::unique_lock<std::mutex> lk(mu_);
     std::int64_t wait_s = opts_.refresh_interval_s;
     bool was_waiting = false;
+    std::string last_prepare_error;
     while (!stopping_) {
         cv_.wait_for(lk, std::chrono::seconds(wait_s), [&] { return stopping_ || wanted_; });
         if (stopping_) break;
@@ -189,6 +203,11 @@ void CrlPublisher::run() {
             LOG_ERROR("Broker CRL: could not publish — {}", st.error);
         } else {
             if (was_waiting) LOG_INFO("Broker CRL: the device CA is there, the list is published");
+            if (st.prepare_error != last_prepare_error) {
+                if (!st.prepare_error.empty()) LOG_WARN("Broker TLS: the broker's files are not right yet — {}", st.prepare_error);
+                else LOG_INFO("Broker TLS: the broker's files are in place");
+                last_prepare_error = st.prepare_error;
+            }
             if (!st.reload_error.empty())
                 LOG_WARN("Broker CRL: written ({} revoked, {} generation(s)) but the broker was not told: {}",
                          st.revoked, st.generations, st.reload_error);
@@ -197,7 +216,7 @@ void CrlPublisher::run() {
         lk.lock();
         // Soon again while waiting for the CA or after a failure; otherwise the usual refresh, long before any list runs out.
         wait_s = st.waiting ? opts_.waiting_retry_s
-               : (!st.last_ok || !st.reload_error.empty()) ? opts_.retry_s : opts_.refresh_interval_s;
+               : (!st.last_ok || !st.reload_error.empty() || !st.prepare_error.empty()) ? opts_.retry_s : opts_.refresh_interval_s;
     }
 }
 

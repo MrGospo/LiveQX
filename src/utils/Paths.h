@@ -99,7 +99,11 @@ public:
     // the CA key sealed with the master key.
     std::filesystem::path deviceCaDir() const                 { return state_dir_ / "device_ca"; }
     // What the MQTT broker reads from us: the list of revoked player certificates.
-    std::filesystem::path brokerCrlFile() const               { return state_dir_ / "broker" / "crl.pem"; }
+    std::filesystem::path brokerDir() const                   { return state_dir_ / "broker"; }
+    std::filesystem::path brokerCrlFile() const               { return brokerDir() / "crl.pem"; }
+    // Created by the server once the broker has everything it needs to start (the list,
+    // the CA file, its certificate); the broker's service waits for it.
+    std::filesystem::path brokerReadyFile() const             { return brokerDir() / "ready"; }
     // Enterprise audit trail. Separate DB (not auth.db) so retention,
     // backup profile and BEGIN IMMEDIATE contention are independent from
     // the auth path — audit must never be starved by login load and

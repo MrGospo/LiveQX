@@ -9,7 +9,8 @@
 #   migrate-master-key — move an existing master key out of the state directory
 #
 # Usage: sudo ./packaging/install.sh [install|uninstall|check|migrate-master-key] [-y]
-#        [--master-key-store=file|creds|passphrase]
+#        [--master-key-store=file|creds|passphrase] [--broker=local|none] [--broker-port=N]
+#        [--allow-broker-version-mismatch]
 #
 set -euo pipefail
 IFS=$'\n\t'
@@ -40,6 +41,18 @@ DROPIN_DIR="${SYSTEMD_DIR}/liveqx.service.d"
 DROPIN_FILE="${DROPIN_DIR}/master-key.conf"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# MQTT broker for LiveQX-Player screens (packaging/mosquitto/README.md): our own build of
+# Mosquitto, started by liveqx-broker.path once the server has written the files it reads.
+BROKER_MODE="ask"                       # ask | local | none
+BROKER_PORT=8883
+ALLOW_BROKER_MISMATCH=0
+BROKER_BIN_DIR="/usr/local/libexec/liveqx"
+BROKER_BIN="${BROKER_BIN_DIR}/mosquitto"     # the name matters: the server signals only "mosquitto"
+BROKER_CONF="${CONF_DIR}/mosquitto.conf"
+BROKER_STATE_DIR="${STATE_DIR}/state/broker"
+BROKER_RUN_DIR="/run/liveqx-broker"
+BROKER_BUILD_DIR="${REPO_ROOT}/build/mosquitto-patched"
 
 # ── Colored output ──────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -80,11 +93,19 @@ Options:
                                   (needs systemd 250 or newer)
                       passphrase  key wrapped with a passphrase; the service starts
                                   sealed and waits for the passphrase on the web page
+    --broker=local|none
+                    Install the MQTT broker for LiveQX-Player screens on this host (local), or
+                    leave it out (none: an external broker, or no screens). Default: ask.
+    --broker-port=N Port the broker listens on for screens (default $BROKER_PORT)
+    --allow-broker-version-mismatch
+                    Use the patched broker with a Dynamic Security plugin of another version
+                    than the broker (untested; the installer refuses by default)
 
 Before running install, make sure the following are built:
     build/liveqx               — main binary
     build/liveqx-mountd        — share-mount helper
     ui/dist/                   — Web UI
+    build/mosquitto-patched/   — MQTT broker (packaging/mosquitto/build.sh), unless --broker=none
 
 Build command:
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \\
@@ -103,6 +124,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         install|uninstall|check|migrate-master-key) MODE="$1"; shift ;;
         --master-key-store=*) KEY_STORE="${1#*=}"; shift ;;
+        --broker=*) BROKER_MODE="${1#*=}"; shift ;;
+        --broker-port=*) BROKER_PORT="${1#*=}"; shift ;;
+        --allow-broker-version-mismatch) ALLOW_BROKER_MISMATCH=1; shift ;;
         -y|--yes)  ASSUME_YES=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown argument: $1 (see --help)" ;;
@@ -113,6 +137,12 @@ case "$KEY_STORE" in
     file|creds|passphrase) ;;
     *) die "--master-key-store must be file, creds or passphrase (got: $KEY_STORE)" ;;
 esac
+case "$BROKER_MODE" in
+    ask|local|none) ;;
+    *) die "--broker must be local or none (got: $BROKER_MODE)" ;;
+esac
+[[ "$BROKER_PORT" =~ ^[0-9]+$ ]] && (( BROKER_PORT >= 1 && BROKER_PORT <= 65535 )) \
+    || die "--broker-port must be a number between 1 and 65535 (got: $BROKER_PORT)"
 
 # ── Utilities ───────────────────────────────────────────────────────────────
 # Sets string keys in the JSON config:  cfg_set key=value [key=value ...]
@@ -254,6 +284,159 @@ UNIT
 }
 
 # ════════════════════════════════════════════════════════════════════════════
+# MQTT BROKER (for LiveQX-Player screens)
+# ════════════════════════════════════════════════════════════════════════════
+# The broker is our own build of Mosquitto (packaging/mosquitto/README.md says why the
+# stock one is not safe). The distribution's package supplies only the Dynamic Security
+# plugin and mosquitto_ctrl. The server writes everything the broker reads (CA file of
+# the devices, its own certificate, the revocation list) after the device CA ceremony;
+# liveqx-broker.path starts the broker when that is done.
+
+decide_broker() {
+    if [[ "$BROKER_MODE" == "ask" ]]; then
+        if ask_yn "Install the MQTT broker for LiveQX-Player screens on this host?" "y"; then
+            BROKER_MODE="local"
+        else
+            BROKER_MODE="none"
+        fi
+    fi
+    [[ "$BROKER_MODE" == "local" ]] || info "No MQTT broker on this host (--broker=none)"
+}
+
+check_broker_artifacts() {
+    [[ "$BROKER_MODE" == "local" ]] || return 0
+    [[ -x "$BROKER_BUILD_DIR/sbin/mosquitto" ]] \
+        || die "Missing build/mosquitto-patched/sbin/mosquitto — build the broker: packaging/mosquitto/build.sh (or use --broker=none)"
+    local f
+    for f in packaging/liveqx-broker.service packaging/liveqx-broker.path packaging/mosquitto/mosquitto.conf.in \
+             packaging/mosquitto/README.md; do
+        [[ -f "$REPO_ROOT/$f" ]] || die "Missing $f"
+    done
+}
+
+# Stops the broker's units (a running binary cannot be replaced, and the path unit would start it again).
+stop_broker_units() {
+    systemctl stop liveqx-broker.path    2>/dev/null || true
+    systemctl stop liveqx-broker.service 2>/dev/null || true
+}
+
+find_dynsec_plugin() {
+    local p d
+    p=$(dpkg -L mosquitto 2>/dev/null | grep -m1 'mosquitto_dynamic_security\.so$' || true)
+    if [[ -n "$p" && -f "$p" ]]; then echo "$p"; return 0; fi
+    for d in /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/lib /usr/local/lib; do
+        if [[ -f "$d/mosquitto_dynamic_security.so" ]]; then echo "$d/mosquitto_dynamic_security.so"; return 0; fi
+    done
+    return 1
+}
+
+# Adds what the server needs to talk to the broker to config.json; keeps whatever is there.
+configure_broker_in_config() {
+    BROKER_PORT="$BROKER_PORT" BROKER_RUN_DIR="$BROKER_RUN_DIR" python3 - "$CONF_FILE" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+with open(p) as f: cfg = json.load(f)
+players = cfg.setdefault('players', {})
+broker = players.setdefault('broker', {})
+broker.setdefault('enabled', True)
+broker.setdefault('host', '127.0.0.1')
+broker.setdefault('port', int(os.environ['BROKER_PORT']))
+crl = broker.setdefault('crl', {})
+crl.setdefault('mode', 'local')
+crl.setdefault('pid_file', os.environ['BROKER_RUN_DIR'] + '/mosquitto.pid')
+with open(p, 'w') as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    f.write('\n')
+PY
+}
+
+provision_broker() {
+    [[ "$BROKER_MODE" == "local" ]] || return 0
+    step "MQTT broker for screens"
+
+    # Plugin and tools from the distribution. Its own service is not ours to run.
+    local had_package=0
+    dpkg -s mosquitto >/dev/null 2>&1 && had_package=1
+    apt-get install -y --no-install-recommends mosquitto mosquitto-clients \
+        || die "apt-get install mosquitto mosquitto-clients failed"
+    if [[ "$had_package" == "0" ]]; then
+        systemctl disable --now mosquitto.service >/dev/null 2>&1 || true
+        info "The distribution's own mosquitto.service (started by the package) is stopped and disabled: LiveQX runs its own broker"
+    fi
+    local plugin
+    plugin=$(find_dynsec_plugin) || die "The Dynamic Security plugin (mosquitto_dynamic_security.so) was not found after installing mosquitto"
+    command -v mosquitto_ctrl >/dev/null 2>&1 || die "mosquitto_ctrl not found after installing mosquitto-clients"
+
+    # The plugin is the distribution's, the broker is ours: they must be the same release.
+    local distro_ver built_ver
+    distro_ver=$(dpkg-query -W -f='${Version}' mosquitto 2>/dev/null | sed -E 's/^[0-9]+://; s/-.*$//')
+    built_ver=$(cat "$BROKER_BUILD_DIR/VERSION" 2>/dev/null || echo unknown)
+    if [[ "$distro_ver" != "$built_ver" ]]; then
+        if [[ "$ALLOW_BROKER_MISMATCH" == "1" ]]; then
+            warn "Broker $built_ver with the plugin of Mosquitto $distro_ver (--allow-broker-version-mismatch): untested"
+        else
+            die "The broker built here is Mosquitto $built_ver, this distribution's plugin is $distro_ver. Rebuild the broker for $distro_ver (packaging/mosquitto/build.sh needs its checksum) or pass --allow-broker-version-mismatch"
+        fi
+    fi
+    ok "Mosquitto $built_ver, plugin $plugin"
+
+    # The broker binary, under the name the server signals.
+    stop_broker_units
+    install -d -o root -g root -m 0755 "$BROKER_BIN_DIR"
+    install -m 0755 "$BROKER_BUILD_DIR/sbin/mosquitto" "$BROKER_BIN"
+    local missing
+    missing=$(ldd "$BROKER_BIN" 2>/dev/null | awk '/not found/ {print $1}' | sort -u || true)
+    if [[ -n "$missing" ]]; then
+        err "Missing shared libraries for the broker:"; echo "$missing" | sed 's/^/      /'
+        die "Install them with apt-get and run the installer again"
+    fi
+    ok "Broker installed: $BROKER_BIN"
+
+    # Directories: the server writes the broker's files here, the broker keeps its rights and sessions here.
+    install -d -o "$LIVEQX_USER" -g "$LIVEQX_GROUP" -m 0750 "$STATE_DIR/state" "$BROKER_STATE_DIR" "$BROKER_STATE_DIR/data"
+
+    # Configuration from the template. An existing file is the administrator's: left alone.
+    local tmp
+    tmp=$(mktemp)
+    sed -e "s|@BROKER_DIR@|${BROKER_STATE_DIR}|g" -e "s|@RUN_DIR@|${BROKER_RUN_DIR}|g" \
+        -e "s|@PORT@|${BROKER_PORT}|g" -e "s|@PLUGIN@|${plugin}|g" \
+        "$REPO_ROOT/packaging/mosquitto/mosquitto.conf.in" > "$tmp"
+    grep -q '@[A-Z_]*@' "$tmp" && { rm -f "$tmp"; die "A place in packaging/mosquitto/mosquitto.conf.in was not filled in"; }
+    if [[ ! -f "$BROKER_CONF" ]]; then
+        install -m 0644 "$tmp" "$BROKER_CONF"
+        ok "Created $BROKER_CONF (port $BROKER_PORT)"
+    elif cmp -s "$tmp" "$BROKER_CONF"; then
+        ok "$BROKER_CONF is up to date"
+    else
+        install -m 0644 "$tmp" "$BROKER_CONF.dist"
+        warn "$BROKER_CONF exists and differs from the current template — left as it is; the new one is $BROKER_CONF.dist"
+    fi
+    rm -f "$tmp"
+
+    # The broker's administrator is the server's own certificate identity; the password
+    # asked for here is never used and never kept. Never initialised twice: that would drop every right.
+    local dyn="$BROKER_STATE_DIR/dynamic-security.json"
+    if [[ -f "$dyn" ]]; then
+        ok "Dynamic Security: keeping $dyn"
+    else
+        local pw
+        pw=$(head -c 24 /dev/urandom | base64 | tr -d '/+=\n')
+        printf '%s\n%s\n' "$pw" "$pw" \
+            | runuser -u "$LIVEQX_USER" -- mosquitto_ctrl dynsec init "$dyn" liveqx-server >/dev/null 2>&1 \
+            || die "mosquitto_ctrl dynsec init failed"
+        chmod 0600 "$dyn"
+        chown "$LIVEQX_USER:$LIVEQX_GROUP" "$dyn"
+        ok "Dynamic Security initialised: $dyn"
+    fi
+
+    # The server connects to the broker and writes its files.
+    configure_broker_in_config
+    ok "players.broker set in $CONF_FILE (anything already there was kept)"
+
+    install -m 0644 "$REPO_ROOT/packaging/mosquitto/README.md" "$DOC_DIR/BROKER.md"
+}
+
+# ════════════════════════════════════════════════════════════════════════════
 # INSTALL
 # ════════════════════════════════════════════════════════════════════════════
 cmd_install() {
@@ -268,6 +451,8 @@ cmd_install() {
     [[ -f "$REPO_ROOT/config/default.json" ]] || die "Missing config/default.json"
     [[ -f "$REPO_ROOT/packaging/liveqx.service" ]] || die "Missing packaging/liveqx.service"
     ok "All artifacts present"
+    decide_broker
+    check_broker_artifacts
 
     # ── Apt dependencies ──
     # Runtime shared objects that liveqx + liveqx-mountd link against.
@@ -367,6 +552,7 @@ EOF
         systemctl stop liveqx.service        || true
         systemctl stop liveqx-mountd.service || true
     fi
+    if [[ "$BROKER_MODE" == "local" ]]; then stop_broker_units; fi
     install -m 0755 "$REPO_ROOT/build/liveqx"        "$BIN_DIR/liveqx"
     install -m 0755 "$REPO_ROOT/build/liveqx-mountd" "$BIN_DIR/liveqx-mountd"
     ok "Installed /usr/local/bin/liveqx and liveqx-mountd"
@@ -427,11 +613,18 @@ PY
     # ── Master key ──
     provision_master_key
 
+    # ── MQTT broker ──
+    provision_broker
+
     # ── Systemd units ──
     step "Systemd units"
     install -m 0644 "$REPO_ROOT/packaging/liveqx.service"            "$SYSTEMD_DIR/"
     install -m 0644 "$REPO_ROOT/packaging/liveqx-mountd.service"     "$SYSTEMD_DIR/"
     install -m 0644 "$REPO_ROOT/packaging/liveqx-mount-init.service" "$SYSTEMD_DIR/"
+    if [[ "$BROKER_MODE" == "local" ]]; then
+        install -m 0644 "$REPO_ROOT/packaging/liveqx-broker.service" "$SYSTEMD_DIR/"
+        install -m 0644 "$REPO_ROOT/packaging/liveqx-broker.path"    "$SYSTEMD_DIR/"
+    fi
     systemctl daemon-reload
     ok "Units installed"
 
@@ -459,6 +652,16 @@ PY
         err "liveqx.service failed to start"
         echo "    Log:  sudo journalctl -u liveqx -n 80 --no-pager"
         exit 1
+    fi
+
+    # The broker waits for the server's files (liveqx-broker.path), so it can be enabled at once.
+    if [[ "$BROKER_MODE" == "local" ]]; then
+        systemctl enable --now liveqx-broker.path
+        if [[ -e "$BROKER_STATE_DIR/ready" ]]; then
+            ok "liveqx-broker.path: the server's files are in place, the broker is starting"
+        else
+            info "The broker will start by itself when the server has written its files (after the device CA ceremony)"
+        fi
     fi
 
     # A passphrase-protected key makes the service start sealed: it is alive
@@ -549,6 +752,12 @@ PY
         creds)           echo "       sudo systemd-creds decrypt $CRED_FILE - | base64" ;;
     esac
     echo "  3. CIFS shares are added via UI → Settings → Shares"
+    if [[ "$BROKER_MODE" == "local" ]]; then
+        echo "  4. Screens (LiveQX-Player): do the device CA ceremony, then set the three addresses"
+        echo "     in Screens → Settings. The broker listens on port ${BROKER_PORT} (open it in the firewall)"
+        echo "     and starts by itself once the server has written its files. See $DOC_DIR/BROKER.md"
+        echo "     To stop it by hand, stop both: systemctl stop liveqx-broker.path liveqx-broker.service"
+    fi
     echo
 }
 
@@ -560,8 +769,8 @@ cmd_uninstall() {
 
     echo
     warn "EVERYTHING except apt packages will be removed:"
-    echo "    • Services: liveqx, liveqx-mountd, liveqx-mount-init"
-    echo "    • Binary:   $BIN_DIR/liveqx, $BIN_DIR/liveqx-mountd"
+    echo "    • Services: liveqx, liveqx-mountd, liveqx-mount-init, liveqx-broker (+ .path)"
+    echo "    • Binary:   $BIN_DIR/liveqx, $BIN_DIR/liveqx-mountd, $BROKER_BIN_DIR/ (the MQTT broker)"
     echo "    • Config:   $CONF_DIR/  (including config.json and master.key)"
     echo "    • Key:      $CRED_FILE and the unit drop-in, if the key is a systemd credential"
     echo "    • Data:     $STATE_DIR/ (DB, master.key, channel state)"
@@ -572,7 +781,7 @@ cmd_uninstall() {
     echo "    • User:     $LIVEQX_USER, group $LIVEQX_GROUP"
     echo "    • Runtime:  $RUNTIME_DIR/"
     echo
-    echo "    apt packages (cifs-utils, libsrtp2-1, nvidia-driver, ...) are NOT removed."
+    echo "    apt packages (cifs-utils, libsrtp2-1, mosquitto, nvidia-driver, ...) are NOT removed."
     echo
 
     if ! ask_yn "Really remove?" "n"; then
@@ -580,7 +789,10 @@ cmd_uninstall() {
     fi
 
     step "Stopping services"
-    for u in liveqx liveqx-mountd liveqx-mount-init; do
+    # The path unit first: it would start the broker again.
+    systemctl stop    liveqx-broker.path 2>/dev/null || true
+    systemctl disable liveqx-broker.path 2>/dev/null || true
+    for u in liveqx liveqx-broker liveqx-mountd liveqx-mount-init; do
         systemctl stop    "$u.service" 2>/dev/null || true
         systemctl disable "$u.service" 2>/dev/null || true
     done
@@ -605,7 +817,9 @@ cmd_uninstall() {
     step "Removing units"
     rm -f "$SYSTEMD_DIR/liveqx.service" \
           "$SYSTEMD_DIR/liveqx-mountd.service" \
-          "$SYSTEMD_DIR/liveqx-mount-init.service"
+          "$SYSTEMD_DIR/liveqx-mount-init.service" \
+          "$SYSTEMD_DIR/liveqx-broker.service" \
+          "$SYSTEMD_DIR/liveqx-broker.path"
     # Dynamic shares
     rm -f "$SYSTEMD_DIR"/mnt-liveqx-*.mount     2>/dev/null || true
     rm -f "$SYSTEMD_DIR"/mnt-liveqx-*.automount 2>/dev/null || true
@@ -614,6 +828,7 @@ cmd_uninstall() {
 
     step "Removing binaries"
     rm -f "$BIN_DIR/liveqx" "$BIN_DIR/liveqx-mountd"
+    rm -rf "$BROKER_BIN_DIR"
 
     step "Removing data, configs, UI"
     rm -rf "$STATE_DIR" "$CONF_DIR" "$UI_DIR" "$DOC_DIR" "$RUNTIME_DIR"
@@ -682,6 +897,26 @@ cmd_check() {
             err "$u.service: unit not installed"
         fi
     done
+
+    step "MQTT broker"
+    if [[ -f "$SYSTEMD_DIR/liveqx-broker.path" ]]; then
+        [[ -x "$BROKER_BIN" ]]   && ok "$BROKER_BIN"   || err "missing $BROKER_BIN"
+        [[ -f "$BROKER_CONF" ]]  && ok "$BROKER_CONF"  || err "missing $BROKER_CONF"
+        [[ -f "$BROKER_STATE_DIR/dynamic-security.json" ]] && ok "dynamic-security.json" || err "missing $BROKER_STATE_DIR/dynamic-security.json"
+        local path_state broker_state
+        path_state=$(systemctl is-active liveqx-broker.path 2>/dev/null || echo inactive)
+        broker_state=$(systemctl is-active liveqx-broker.service 2>/dev/null || echo inactive)
+        [[ "$path_state" == "active" ]] && ok "liveqx-broker.path: $path_state" || warn "liveqx-broker.path: $path_state"
+        if [[ "$broker_state" == "active" ]]; then
+            ok "liveqx-broker.service: $broker_state"
+        elif [[ -e "$BROKER_STATE_DIR/ready" ]]; then
+            err "liveqx-broker.service: $broker_state although the server's files are in place — journalctl -u liveqx-broker -n 50"
+        else
+            info "liveqx-broker.service: $broker_state — waiting for the server's files (after the device CA ceremony)"
+        fi
+    else
+        info "No MQTT broker installed on this host"
+    fi
 
     step "Mount propagation"
     if mountpoint -q "$MOUNT_ROOT" 2>/dev/null; then
