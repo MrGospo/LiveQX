@@ -12,6 +12,7 @@
     "players": "Screens",
     "playersSettings": "Settings",
     "playersList": "List",
+    "playersJobs": "Jobs",
     "playersObjects": "Objects and groups",
     "playersBroker": "Broker",
     "settingsUsers": "Users",
@@ -1516,6 +1517,126 @@
     }
   },
   "players": {
+    "command": {
+      "button": "Command",
+      "one": "Command",
+      "toGroup": "Command the group",
+      "toObject": "Command the object",
+      "toAll": "Command everyone",
+      "everyone": "every screen",
+      "title": "Command: {{target}}",
+      "titleOne": "Command to screen \"{{name}}\"",
+      "which": "What to do",
+      "check": "Check",
+      "checking": "Checking…",
+      "send": "Send",
+      "sending": "Sending…",
+      "close": "Close",
+      "checkNote": "The server first checks which screens would get the command. Nothing is sent until you confirm.",
+      "hint": {
+        "restart_player": "Restarts the player program. The screen goes dark for a few seconds.",
+        "reboot_screen": "Reboots the screen's computer. Takes a few minutes.",
+        "reload_playlist": "The player loads the playlist again. The screen does not go dark."
+      },
+      "willGet_one": "{{count}} screen that is online now will get the command.",
+      "willGet_other": "{{count}} screens that are online now will get the command.",
+      "willSkip_one": "{{count}} screen is offline: it will not get the command.",
+      "willSkip_other": "{{count}} screens are offline: they will not get the command.",
+      "busy_one": "{{count}} screen is still waiting for the same command, so it cannot be sent:",
+      "busy_other": "{{count}} screens are still waiting for the same command, so it cannot be sent:",
+      "batches": "The command goes out in batches: the next batch when the previous one has confirmed. If too many do not answer, sending stops by itself.",
+      "typePhrase": "To confirm, type the phrase",
+      "offlineOne": "The screen is offline now. The command lives a few minutes and is lost if the screen does not come back.",
+      "sentNow_one": "Sent: {{count}} screen ({{type}}).",
+      "sentNow_other": "Sent: {{count}} screens ({{type}}).",
+      "queued": "{{count}} more are queued (in batches of {{batch}}).",
+      "skipped_one": "Offline, skipped: {{count}} screen.",
+      "skipped_other": "Offline, skipped: {{count}} screens.",
+      "failed_one": "Could not send to {{count}} screen.",
+      "failed_other": "Could not send to {{count}} screens.",
+      "watch": "Follow the progress",
+      "sentOne": "Command sent: {{type}}. Waiting for the screen to confirm.",
+      "errors": {
+        "forbidden": "You have no right to send this command here.",
+        "not_found": "Target not found. It may have been deleted.",
+        "no_targets": "Nobody to send to: no screen is online now.",
+        "screens_busy": "Some screens are still waiting for the same command. Check again.",
+        "expected_count_mismatch": "The screens changed while you were confirming (now {{actual}}). Check again.",
+        "confirm_phrase_mismatch": "The phrase is not right.",
+        "broker_unavailable": "The server is not connected to the command broker; nothing was sent.",
+        "unsupported_type": "There is no such command.",
+        "command_in_progress": "The same command to this screen is still waiting for an answer.",
+        "player_not_active": "The screen is not enrolled yet or is revoked: no commands are sent to it.",
+        "unknown": "Could not send the command."
+      }
+    },
+    "jobs": {
+      "title": "Jobs",
+      "lead": "Commands to a group, an object or everyone go out in batches. Here you see how each one goes. You see your own jobs; an administrator sees all.",
+      "loadFailed": "Could not load the jobs.",
+      "notFound": "Job not found.",
+      "back": "All jobs",
+      "empty": {
+        "title": "No jobs yet",
+        "text": "They appear when you send a command to a group, an object or everyone."
+      },
+      "col": {
+        "started": "When",
+        "command": "Command",
+        "target": "To",
+        "by": "By",
+        "state": "Status",
+        "progress": "Progress"
+      },
+      "state": {
+        "running": "Running",
+        "done": "Done",
+        "stopped": "Stopped",
+        "cancelled": "Cancelled"
+      },
+      "progress": "Confirmed {{done}} of {{expected}}",
+      "startedBy": "Started {{when}} by {{who}}. In batches of {{size}}.",
+      "stoppedTooMany": "Sending stopped: more than {{percent}} % of the last batch did not confirm. The remaining screens did not get the command.",
+      "cancelRest": "Cancel the rest",
+      "cancelled": "The rest is cancelled. What has already gone out is confirmed as usual.",
+      "confirm": {
+        "title": "Cancel the rest?",
+        "text": "A command that has already reached screens stays and will be carried out. Screens not yet sent to will not get it."
+      },
+      "errors": {
+        "not_running": "The job has already ended.",
+        "not_found": "Job not found.",
+        "unknown": "Could not cancel the job."
+      },
+      "summary": {
+        "executed": "Confirmed",
+        "pending": "Waiting for an answer",
+        "queued": "Queued",
+        "unconfirmed": "Unconfirmed",
+        "failed": "Not sent",
+        "skipped_offline": "Offline",
+        "cancelled": "Cancelled"
+      },
+      "item": {
+        "col": {
+          "screen": "Screen",
+          "batch": "Batch",
+          "outcome": "Outcome"
+        },
+        "notConnected": "offline at the start",
+        "queued": "waiting for its turn",
+        "skipped": "offline, skipped",
+        "cancelled": "cancelled",
+        "failed": "not sent: {{reason}}",
+        "reason": {
+          "broker_unavailable": "broker unavailable",
+          "command_in_progress": "already waiting for the same command",
+          "player_not_active": "screen not active",
+          "gone": "screen deleted",
+          "offline": "offline"
+        }
+      }
+    },
     "add": {
       "button": "Add a screen",
       "title": "Add a screen",

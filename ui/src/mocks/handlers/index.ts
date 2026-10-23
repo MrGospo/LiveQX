@@ -6,7 +6,7 @@ import type {
   ProfileSnapshot, WatcherStatus, NetworkInterface, GpuInfo,
 } from '@/api/types';
 import { fix25Handlers } from './fix25';
-import { playersHandlers, playersListHandlers, playerGrantsHandlers } from './players';
+import { playersHandlers, playersListHandlers, playerGrantsHandlers, playerCommandHandlers } from './players';
 
 const D = 200; // simulated network delay ms
 
@@ -576,4 +576,5 @@ export const handlers = [
   ...playersHandlers,
   ...playersListHandlers,
   ...playerGrantsHandlers,
+  ...playerCommandHandlers,
 ];

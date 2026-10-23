@@ -160,6 +160,10 @@ export function EventBusProvider({ children }: { children: React.ReactNode }) {
           case 'player_command':
             qc.invalidateQueries({ queryKey: ['players'] });
             break;
+          // A command job started, sent a batch or finished.
+          case 'player_command_job':
+            qc.invalidateQueries({ queryKey: ['players', 'jobs'] });
+            break;
           // The broker link or the revocation file changed (administrators only).
           case 'players_broker_status':
             qc.invalidateQueries({ queryKey: ['players-admin', 'broker'] });

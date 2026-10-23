@@ -1,7 +1,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { ArrowRightLeft, KeyRound, RefreshCw, ShieldOff, Trash2, X } from 'lucide-react';
+import { ArrowRightLeft, KeyRound, RefreshCw, Send, ShieldOff, Trash2, X } from 'lucide-react';
 import {
   usePlayerActions, usePlayerTree,
   type PairingPackage, type Player,
@@ -12,6 +12,7 @@ import { useEscClose } from '@/hooks/useEscClose';
 import { useToast } from '@/hooks/useToast';
 import { Field, TextField, inputCls } from './fields';
 import { PairingPackageDialog } from './PairingPackageDialog';
+import { ScreenCommandDialog } from './CommandDialogs';
 import { screenStatus } from './status';
 
 // What can be done to one screen, as a row of buttons on its card. Who sees which
@@ -26,7 +27,7 @@ function reasonProblem(raw: string): boolean {
   return /[\u0000-\u001f\u007f]/.test(raw);
 }
 
-type Mode = 'move' | 'token' | 'reenroll' | 'revoke' | 'delete';
+type Mode = 'command' | 'move' | 'token' | 'reenroll' | 'revoke' | 'delete';
 
 function Shell({ title, pending, onClose, onSubmit, submitLabel, danger, submitDisabled, children }: {
   title: string; pending: boolean; onClose: () => void; onSubmit: () => void; submitLabel: string;
@@ -104,6 +105,7 @@ export function PlayerActions({ player }: { player: Player }) {
       groups: o.groups.filter(g => g.id !== player.group_id && (isAdmin || (o.id === player.object_id && g.can?.move === true))),
     }))
     .filter(o => o.groups.length > 0);
+  const showCommand = player.can?.command === true && (status === 'online' || status === 'offline');
   const showMove = canMove && status !== 'revoked' && (isAdmin || player.can?.move === true);
   const showToken = isAdmin && status === 'pending';
   const showReEnroll = isAdmin && (status === 'online' || status === 'offline' || status === 'revoked');
@@ -118,12 +120,17 @@ export function PlayerActions({ player }: { player: Player }) {
   return (
     <>
       <div className="flex flex-wrap gap-2">
+        {showCommand && <ActionButton onClick={() => open('command')} icon={<Send size={14} />} label={t('players.command.one')} />}
         {showMove && <ActionButton onClick={() => open('move')} icon={<ArrowRightLeft size={14} />} label={t('players.actions.move')} />}
         {showToken && <ActionButton onClick={() => open('token')} icon={<KeyRound size={14} />} label={t('players.actions.token')} />}
         {showReEnroll && <ActionButton onClick={() => open('reenroll')} icon={<RefreshCw size={14} />} label={t('players.actions.reenroll')} />}
         {showRevoke && <ActionButton danger onClick={() => open('revoke')} icon={<ShieldOff size={14} />} label={t('players.actions.revoke')} />}
         {isAdmin && <ActionButton danger onClick={() => open('delete')} icon={<Trash2 size={14} />} label={t('players.actions.delete')} />}
       </div>
+
+      {mode === 'command' && (
+        <ScreenCommandDialog player={{ id: player.id, name: player.name }} online={status === 'online'} onClose={close} />
+      )}
 
       {mode === 'move' && (
         <Shell title={t('players.actions.moveTitle', { name: player.name })} pending={move.isPending} onClose={close}

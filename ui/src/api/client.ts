@@ -13,6 +13,8 @@ export class ApiClientError extends Error {
     public readonly status: number,
     public readonly code: string,
     public readonly detail?: string,
+    /** The whole error body, for the fields some errors carry besides the code (a count, a list). */
+    public readonly body?: Record<string, unknown>,
   ) {
     super(detail ?? code);
     this.name = 'ApiClientError';
@@ -37,7 +39,7 @@ export function configureClient(opts: {
 async function parseError(res: Response): Promise<ApiClientError> {
   let body: ApiError = { error: 'unknown_error' };
   try { body = await res.json(); } catch { /* empty */ }
-  return new ApiClientError(res.status, body.error ?? 'unknown_error', body.detail);
+  return new ApiClientError(res.status, body.error ?? 'unknown_error', body.detail, body as unknown as Record<string, unknown>);
 }
 
 async function fetchOnce(url: string, init: RequestInit): Promise<Response> {

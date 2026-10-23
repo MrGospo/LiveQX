@@ -1,7 +1,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { MonitorSmartphone, Building2, Layers, Search, Plus } from 'lucide-react';
+import { MonitorSmartphone, Building2, Layers, Search, Plus, Send } from 'lucide-react';
 import { clsx } from 'clsx';
 import {
   usePlayers, usePlayerTree, PLAYER_PAGE_SIZE,
@@ -16,6 +16,8 @@ import { PLAYERS_NAV } from './nav';
 import { inputCls } from './fields';
 import { relativeFromNow, absoluteTime } from './format';
 import { AddPlayerDialog } from './AddPlayerDialog';
+import { BulkCommandDialog } from './CommandDialogs';
+import { typesForTarget } from './commands';
 import { StatusBadge, screenStatus, type ScreenStatus } from './status';
 
 // The list of screens. On the left the tree "all → object → group" picks the
@@ -76,8 +78,10 @@ export default function PlayersPage() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
-  const isAdmin = useAuthStore(s => s.role) === 'admin';
+  const role = useAuthStore(s => s.role);
+  const isAdmin = role === 'admin';
   const [adding, setAdding] = React.useState(false);
+  const [commanding, setCommanding] = React.useState(false);
 
   const num = (k: string) => { const v = params.get(k); return v && /^\d+$/.test(v) ? Number(v) : undefined; };
   const selection: Selection = { objectId: num('object'), groupId: num('group') };
@@ -110,6 +114,29 @@ export default function PlayersPage() {
   const tree = usePlayerTree();
   const list = usePlayers({ ...selection, status: statusFilter ?? undefined, q: query.trim() || undefined, page });
 
+  // Where a command from this page would go: the group or object picked in the tree, or everyone
+  // (administrators, when nothing is picked), and what this person may send there.
+  const bulk = React.useMemo(() => {
+    const objects = tree.data ?? [];
+    const group = objects.flatMap(o => o.groups.map(g => ({ g, o }))).find(x => x.g.id === selection.groupId);
+    if (group) {
+      const target = { kind: 'group' as const, id: group.g.id };
+      return { target, label: `${group.o.name} / ${group.g.name}`, button: t('players.command.toGroup'),
+               types: typesForTarget(target, role, { commandGroup: group.g.can?.command_group }) };
+    }
+    const object = objects.find(o => o.id === selection.objectId && selection.groupId == null);
+    if (object) {
+      const target = { kind: 'object' as const, id: object.id };
+      return { target, label: object.name, button: t('players.command.toObject'),
+               types: typesForTarget(target, role, { commandObject: object.can?.command_object }) };
+    }
+    if (selection.objectId == null && selection.groupId == null) {
+      const target = { kind: 'all' as const };
+      return { target, label: t('players.command.everyone'), button: t('players.command.toAll'), types: typesForTarget(target, role, {}) };
+    }
+    return null;
+  }, [tree.data, selection.groupId, selection.objectId, role, t]);
+
   const rows = list.data?.players ?? [];
   const total = list.data?.total ?? 0;
   const counts = list.data?.counts ?? { online: 0, offline: 0, pending: 0, revoked: 0 };
@@ -133,9 +160,15 @@ export default function PlayersPage() {
       <div className="flex items-center gap-3">
         <MonitorSmartphone size={20} className="text-[var(--accent)]" />
         <h1 className="text-xl font-semibold text-[var(--text-primary)] m-0">{t('players.list.title')}</h1>
+        {bulk && bulk.types.length > 0 && (
+          <button type="button" onClick={() => setCommanding(true)}
+                  className={'inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded-md border border-[var(--border-subtle)] text-[var(--text-primary)] hover:bg-surface2 ' + 'ml-auto'}>
+            <Send size={14} /> {bulk.button}
+          </button>
+        )}
         {isAdmin && (
           <button type="button" onClick={() => setAdding(true)}
-                  className="ml-auto inline-flex items-center gap-1.5 px-3 py-2 text-sm text-white rounded-md bg-[var(--accent)] hover:bg-[var(--accent-hover)]">
+                  className={(bulk && bulk.types.length > 0 ? '' : 'ml-auto ') + 'inline-flex items-center gap-1.5 px-3 py-2 text-sm text-white rounded-md bg-[var(--accent)] hover:bg-[var(--accent-hover)]'}>
             <Plus size={14} /> {t('players.add.button')}
           </button>
         )}
@@ -238,6 +271,9 @@ export default function PlayersPage() {
         </div>
       </div>
 
+      {commanding && bulk && (
+        <BulkCommandDialog target={bulk.target} targetLabel={bulk.label} types={bulk.types} onClose={() => setCommanding(false)} />
+      )}
       {adding && <AddPlayerDialog objects={tree.data ?? []} initialGroupId={selection.groupId} onClose={() => setAdding(false)} />}
     </div>
   );

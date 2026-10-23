@@ -330,3 +330,92 @@ export const playerGrantsHandlers = [
     return HttpResponse.json({ grants: e.grants.map(named), revision: `r${e.revision}` });
   }),
 ];
+
+// ─── Commands and jobs ────────────────────────────────────────────────────────
+type MockJob = {
+  id: string; type: string; target: { kind: string; id: number; name: string }; state: string; stop_reason: string;
+  batch_size: number; stop_percent: number; created_at: number; created_by_name: string; finished_at?: number;
+  items: { player_id: string; player_name: string; batch: number; state: string; command_state?: string; command_result?: string; error?: string }[];
+};
+const summarize = (j: MockJob) => {
+  const c = (f: (i: MockJob['items'][number]) => boolean) => j.items.filter(f).length;
+  return {
+    total: j.items.length, queued: c(i => i.state === 'queued'), pending: c(i => i.command_state === 'pending'),
+    executed: c(i => i.command_state === 'executed'), unconfirmed: c(i => i.command_state === 'timeout'),
+    failed: c(i => i.state === 'failed'), skipped_offline: c(i => i.state === 'skipped_offline'), cancelled: c(i => i.state === 'cancelled'),
+  };
+};
+const jobView = (j: MockJob, withItems: boolean) => ({
+  ...j, items: withItems ? j.items : undefined, summary: summarize(j),
+});
+let jobs: MockJob[] = [{
+  id: 'job-1', type: 'restart_player', target: { kind: 'group', id: 1, name: 'Торговый зал / Касса' }, state: 'running', stop_reason: '',
+  batch_size: 2, stop_percent: 30, created_at: nowS() - 300, created_by_name: 'admin',
+  items: [
+    { player_id: 'a1', player_name: 'Касса 1', batch: 0, state: 'sent', command_state: 'executed', command_result: 'executed' },
+    { player_id: 'a2', player_name: 'Касса 2', batch: 0, state: 'sent', command_state: 'executed', command_result: 'executed' },
+    { player_id: 'a3', player_name: 'Касса 3', batch: 1, state: 'sent', command_state: 'pending' },
+    { player_id: 'a4', player_name: 'Касса 4', batch: 1, state: 'sent', command_state: 'pending' },
+    { player_id: 'a5', player_name: 'Касса 5', batch: 2, state: 'queued' },
+    { player_id: 'a6', player_name: 'Касса 6', batch: -1, state: 'skipped_offline' },
+  ],
+}, {
+  id: 'job-2', type: 'reboot_screen', target: { kind: 'all', id: 0, name: '' }, state: 'stopped', stop_reason: 'too_many_unconfirmed',
+  batch_size: 2, stop_percent: 30, created_at: nowS() - 86400, finished_at: nowS() - 86000, created_by_name: 'admin',
+  items: [
+    { player_id: 'b1', player_name: 'Витрина слева', batch: 0, state: 'sent', command_state: 'timeout', command_result: 'no_confirmation' },
+    { player_id: 'b2', player_name: 'Витрина справа', batch: 0, state: 'sent', command_state: 'failed', command_result: 'os_not_rebooted' },
+    { player_id: 'b3', player_name: 'Склад 1', batch: 1, state: 'cancelled' },
+  ],
+}];
+
+const targetOf = (kind: 'group' | 'object' | 'all', id: number) => {
+  if (kind === 'all') return { name: 'всем экранам', phrase: 'all' };
+  if (kind === 'group') { const g = groups.find(x => x.id === id); const o = objects.find(x => x.id === g?.object_id); return g ? { name: `${o?.name} / ${g.name}`, phrase: `group ${o?.name} / ${g.name}` } : null; }
+  const o = objects.find(x => x.id === id); return o ? { name: o.name, phrase: `object ${o.name}` } : null;
+};
+const bulk = (kind: 'group' | 'object' | 'all') => async ({ params, request }: { params: Record<string, unknown>; request: Request }) => {
+  await delay(250);
+  const id = Number(params.id ?? 0);
+  const b = await request.json() as { type: string; dry_run?: boolean; confirm_phrase?: string; expected_count?: number };
+  const tg = targetOf(kind, id);
+  if (!tg) return bad('not_found', 404);
+  const phrase = `${b.type} ${tg.phrase}`;
+  const plan = { target_name: tg.name, required_phrase: phrase, expected_count: 6, online: 5, offline: ['x'], busy: [] as unknown[] };
+  if (b.dry_run) return HttpResponse.json(plan);
+  if (b.expected_count !== plan.expected_count) return HttpResponse.json({ error: 'expected_count_mismatch', actual: plan.expected_count }, { status: 409 });
+  if ((b.confirm_phrase ?? '').toLowerCase().replace(/\s+/g, '') !== phrase.toLowerCase().replace(/\s+/g, '')) return bad('confirm_phrase_mismatch', 400);
+  const job: MockJob = {
+    id: `job-${jobs.length + 1}`, type: b.type, target: { kind, id, name: kind === 'all' ? '' : tg.name }, state: 'running', stop_reason: '',
+    batch_size: 2, stop_percent: 30, created_at: nowS(), created_by_name: 'admin',
+    items: [1, 2, 3, 4, 5].map((n, i) => ({ player_id: `n${n}`, player_name: `Экран ${n}`, batch: Math.floor(i / 2), state: i < 2 ? 'sent' : 'queued', command_state: i < 2 ? 'pending' : undefined })),
+  };
+  jobs = [job, ...jobs];
+  return HttpResponse.json({ type: b.type, target: tg.name, sent: [{ player_id: 'n1', command_id: 'c1' }, { player_id: 'n2', command_id: 'c2' }], skipped_offline: ['x'], failed: [], job_id: job.id, queued: 3, batch_size: 2 });
+};
+
+export const playerCommandHandlers = [
+  http.post('/api/player-groups/:id/command', bulk('group')),
+  http.post('/api/player-objects/:id/command', bulk('object')),
+  http.post('/api/players/command-all', bulk('all')),
+  http.post('/api/players/:id/command', async ({ params, request }) => {
+    await delay(250);
+    const b = await request.json() as { type: string };
+    return HttpResponse.json({ id: 'c9', player_id: params.id, type: b.type, state: 'pending', result: '', issued_at: nowS(), ttl_seconds: 300, deadline_at: nowS() + 300, player_online: true }, { status: 202 });
+  }),
+  http.get('/api/command-jobs', async () => { await delay(150); return HttpResponse.json({ jobs: jobs.map(j => jobView(j, false)) }); }),
+  http.get('/api/command-jobs/:id', async ({ params }) => {
+    await delay(150);
+    const j = jobs.find(x => x.id === params.id);
+    return j ? HttpResponse.json(jobView(j, true)) : bad('not_found', 404);
+  }),
+  http.post('/api/command-jobs/:id/cancel', async ({ params }) => {
+    await delay(200);
+    const j = jobs.find(x => x.id === params.id);
+    if (!j) return bad('not_found', 404);
+    if (j.state !== 'running') return bad('not_running', 409);
+    j.state = 'cancelled'; j.stop_reason = 'cancelled_by_user'; j.finished_at = nowS();
+    j.items = j.items.map(i => (i.state === 'queued' ? { ...i, state: 'cancelled' } : i));
+    return HttpResponse.json(jobView(j, true));
+  }),
+];

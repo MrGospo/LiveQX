@@ -25,7 +25,7 @@ const treeState: { data?: PlayerObject[]; isLoading: boolean; isError: boolean }
 
 vi.mock('@/api/queries/players', async (orig) => {
   const real = await orig<typeof import('@/api/queries/players')>();
-  return { ...real, usePlayerActions: () => actions, usePlayerTree: () => treeState };
+  return { ...real, usePlayerActions: () => actions, usePlayerTree: () => treeState, useScreenCommand: () => ({ mutateAsync: vi.fn(), isPending: false }) };
 });
 
 import { AddPlayerDialog } from '@/features/players/AddPlayerDialog';
@@ -204,12 +204,12 @@ describe('PlayerActions', () => {
   it('shows only the move to an operator', () => {
     role = 'operator';
     renderActions(player());
-    expect(buttons()).toEqual(['Move']);
+    expect(buttons()).toEqual(['Command', 'Move']);
   });
 
   it('shows an administrator everything that fits the screen', () => {
     renderActions(player());
-    expect(buttons()).toEqual(['Move', 'Bind again', 'Revoke', 'Delete']);
+    expect(buttons()).toEqual(['Command', 'Move', 'Bind again', 'Revoke', 'Delete']);
   });
 
   it('offers a new token only to a screen that is not enrolled yet', () => {
@@ -278,7 +278,21 @@ describe('PlayerActions', () => {
   it('does not offer the move to an operator the server did not allow, whatever the role', () => {
     role = 'operator';
     renderActions(player({ can: { move: false, command: true } }));
-    expect(buttons()).toEqual([]);
+    expect(buttons()).toEqual(['Command']);
+  });
+
+  it('offers the command only to those the server allowed, and only for an enrolled screen', () => {
+    renderActions(player({ can: { move: true, command: false } }));
+    expect(buttons()).not.toContain('Command');
+    renderActions(player({ id: 'p2', state: 'revoked', status: undefined }));
+    expect(buttons().filter(b => b === 'Command')).toHaveLength(0);
+  });
+
+  it('opens the command window for an enrolled screen', async () => {
+    const user = userEvent.setup();
+    renderActions(player());
+    await user.click(screen.getByRole('button', { name: 'Command' }));
+    expect(screen.getByRole('dialog', { name: 'Command to screen "Till 1"' })).toBeInTheDocument();
   });
 
   it('offers an operator only the groups of the same object where the move mark is held', async () => {

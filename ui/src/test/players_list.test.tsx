@@ -9,8 +9,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ApiClientError } from '@/api/client';
 import type { Player, PlayerObject, PlayerDetails, PlayerCommand, PlayerListQuery, PlayerPage } from '@/api/queries/players';
 
+let role: 'viewer' | 'operator' | 'admin' = 'viewer';
 vi.mock('@/stores/auth', () => ({
-  useAuthStore: vi.fn((selector: (s: object) => unknown) => selector({ role: 'viewer', user: { id: 2, username: 'ann', role: 'viewer' } })),
+  useAuthStore: vi.fn((selector: (s: object) => unknown) => selector({ role, user: { id: 2, username: 'ann', role } })),
 }));
 
 type Q<T> = { data?: T; isLoading: boolean; isError: boolean; error?: unknown };
@@ -29,6 +30,8 @@ vi.mock('@/api/queries/players', async (orig) => {
     usePlayerTree: () => treeState,
     usePlayer: () => oneState,
     usePlayerCommands: () => cmdState,
+    useBulkPlan: () => ({ mutateAsync: vi.fn(), isPending: false }),
+    useBulkSend: () => ({ mutateAsync: vi.fn(), isPending: false }),
     usePlayerActions: () => { const a = { mutateAsync: vi.fn(), reset: vi.fn(), isPending: false }; return { create: a, reissueToken: a, reEnroll: a, move: a, revoke: a, remove: a }; },
   };
 });
@@ -68,6 +71,7 @@ const renderDetail = () =>
   );
 
 beforeEach(() => {
+  role = 'viewer';
   listCalls.length = 0;
   setPage([
     mk('p1', 'Till 1'),
@@ -183,6 +187,45 @@ describe('PlayersPage', () => {
   it('shows no pager when everything fits on one page', () => {
     renderList();
     expect(screen.queryByRole('navigation', { name: 'List pages' })).not.toBeInTheDocument();
+  });
+
+  // ── the command button follows the place picked and what the person may do there ──
+  const markedTree = (cg: boolean, co: boolean): PlayerObject[] => [
+    { id: 1, name: 'Shop', created_at: 1, can: { command_object: co }, groups: [
+      { id: 11, object_id: 1, name: 'Tills', created_at: 1, players: 2, can: { move: false, command_group: cg } },
+    ] },
+  ];
+
+  it('offers an administrator a command to everyone when no place is picked', () => {
+    role = 'admin';
+    renderList();
+    expect(screen.getByRole('button', { name: 'Command everyone' })).toBeInTheDocument();
+  });
+
+  it('offers no command to everyone to an operator, nor anything to a viewer', () => {
+    role = 'operator';
+    renderList();
+    expect(screen.queryByRole('button', { name: /^Command/ })).not.toBeInTheDocument();
+    role = 'viewer';
+    renderList('/players?group=11');
+    expect(screen.queryByRole('button', { name: /^Command/ })).not.toBeInTheDocument();
+  });
+
+  it('offers a command to the picked group, to an operator even without the group mark (the playlist only)', () => {
+    role = 'operator';
+    treeState.data = markedTree(false, false);
+    renderList('/players?group=11');
+    expect(screen.getByRole('button', { name: 'Command the group' })).toBeInTheDocument();
+  });
+
+  it('offers a command to the picked object only with the object mark', () => {
+    role = 'operator';
+    treeState.data = markedTree(true, false);
+    renderList('/players?object=1');
+    expect(screen.queryByRole('button', { name: 'Command the object' })).not.toBeInTheDocument();
+    treeState.data = markedTree(false, true);
+    renderList('/players?object=1');
+    expect(screen.getByRole('button', { name: 'Command the object' })).toBeInTheDocument();
   });
 
   it('shows a plain failure when the list cannot be loaded', () => {

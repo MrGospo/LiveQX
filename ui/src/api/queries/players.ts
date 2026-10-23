@@ -436,3 +436,119 @@ export const useSaveUserPlayerGrants = (uid: number) => {
     onSuccess: (saved) => { qc.setQueryData(grantsKey(uid), saved); },
   });
 };
+
+// ─── Commands to screens, and jobs that send them in batches ───────────────────
+
+export type CommandType = 'restart_player' | 'reboot_screen' | 'reload_playlist';
+export const COMMAND_TYPES: CommandType[] = ['restart_player', 'reboot_screen', 'reload_playlist'];
+
+// Where a command is aimed. A group, an object or everyone is sent as a job in batches and
+// needs a typed confirmation; one screen is sent at once.
+export type BulkTarget = { kind: 'group' | 'object'; id: number } | { kind: 'all' };
+
+export interface BulkPlan {
+  target_name:     string;
+  required_phrase: string;                 // what the person types to confirm
+  expected_count:  number;                 // online + offline screens they were shown; sent back unchanged
+  online:          number;
+  offline:         string[];               // ids of screens that are not connected (they are skipped)
+  busy:            { player_id: string; name: string; command_id: string }[];   // still waiting for the same command
+}
+
+export interface BulkReport {
+  type:             CommandType;
+  target:           string;
+  sent:             { player_id: string; command_id: string }[];
+  skipped_offline:  string[];
+  failed:           { player_id: string; error: string }[];
+  job_id?:          string;
+  queued?:          number;
+  batch_size?:      number;
+}
+
+export type JobState = 'running' | 'done' | 'stopped' | 'cancelled';
+export type JobItemState = 'queued' | 'sent' | 'skipped_offline' | 'failed' | 'cancelled';
+
+export interface CommandJobItem {
+  player_id:       string;
+  player_name?:    string;
+  batch:           number;                 // -1: not connected when the job started
+  state:           JobItemState;
+  command_id?:     string;
+  command_state?:  string;
+  command_result?: string;
+  error?:          string;
+}
+
+export interface CommandJob {
+  id:               string;
+  type:             CommandType;
+  target:           { kind: 'group' | 'object' | 'all'; id: number; name: string };
+  state:            JobState;
+  stop_reason:      string;                // too_many_unconfirmed, cancelled_by_user, broker_unavailable or ''
+  batch_size:       number;
+  stop_percent:     number;
+  created_at:       number;
+  created_by?:      number;
+  created_by_name:  string;
+  finished_at?:     number;
+  summary: {
+    total: number; queued: number; pending: number; executed: number; unconfirmed: number;
+    failed: number; skipped_offline: number; cancelled: number;
+  };
+  items?:           CommandJobItem[];      // only in the answer for one job
+}
+
+const bulkPath = (t: BulkTarget) =>
+  t.kind === 'all' ? '/api/players/command-all' : t.kind === 'group' ? `/api/player-groups/${t.id}/command` : `/api/player-objects/${t.id}/command`;
+
+// "Check first" (dry_run) changes nothing and returns what would happen and the phrase to type.
+export const useBulkPlan = () =>
+  useMutation({
+    mutationFn: (v: { target: BulkTarget; type: CommandType }) =>
+      api.post<BulkPlan>(bulkPath(v.target), { type: v.type, dry_run: true }),
+  });
+
+export const useBulkSend = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { target: BulkTarget; type: CommandType; confirm_phrase: string; expected_count: number }) =>
+      api.post<BulkReport>(bulkPath(v.target), {
+        type: v.type, confirm_phrase: v.confirm_phrase, expected_count: v.expected_count,
+      }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['players'] }); },
+  });
+};
+
+export const useScreenCommand = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { id: string; type: CommandType }) =>
+      api.post<PlayerCommand & { player_online?: boolean }>(`/api/players/${encodeURIComponent(v.id)}/command`, { type: v.type }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['players'] }); },
+  });
+};
+
+// Jobs live under the screens' root: a command settling refreshes them, and so does the
+// server's own "a job changed" event (a job closes after its last command has already reported).
+export const useCommandJobs = () =>
+  useQuery({
+    queryKey: ['players', 'jobs', 'list'],
+    queryFn: async () => (await api.get<{ jobs: CommandJob[] }>('/api/command-jobs')).jobs,
+    staleTime: 5_000,
+  });
+
+export const useCommandJob = (id: string) =>
+  useQuery({
+    queryKey: ['players', 'jobs', id],
+    queryFn: () => api.get<CommandJob>(`/api/command-jobs/${encodeURIComponent(id)}`),
+    staleTime: 5_000,
+  });
+
+export const useCancelCommandJob = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.post<CommandJob>(`/api/command-jobs/${encodeURIComponent(id)}/cancel`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['players', 'jobs'] }); },
+  });
+};
