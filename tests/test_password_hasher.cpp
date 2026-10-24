@@ -2,8 +2,11 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <set>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "auth/PasswordHasher.h"
 
@@ -111,4 +114,27 @@ TEST(PasswordHasher, UnicodePasswordsHandled) {
     ASSERT_TRUE(h.has_value());
     EXPECT_TRUE(sa::PasswordHasher::verify(pw, *h));
     EXPECT_FALSE(sa::PasswordHasher::verify("пароль-с-юникодом",  *h));
+}
+
+// Found under load: a burst of logins held one 64 MiB argon2 buffer per worker thread of the HTTP server
+// at once (a few hundred MB for a couple of dozen, gigabytes for the whole pool). Only a few run together.
+TEST(PasswordHasher, ABurstOfChecksNeverRunsMoreThanTheLimitAtOnceAndAllGetTheirAnswer) {
+    auto h = sa::PasswordHasher::hash("the right one");
+    ASSERT_TRUE(h.has_value());
+    sa::PasswordHasher::resetPeak();
+
+    constexpr int kThreads = 24;
+    std::atomic<int> right{0}, wrong{0};
+    std::vector<std::thread> ts;
+    for (int i = 0; i < kThreads; ++i)
+        ts.emplace_back([&, i] {
+            if (i % 2 == 0) { if (sa::PasswordHasher::verify("the right one", *h)) ++right; }
+            else            { if (!sa::PasswordHasher::verify("a wrong one", *h)) ++wrong; }
+        });
+    for (auto& t : ts) t.join();
+
+    EXPECT_EQ(right.load(), kThreads / 2) << "everyone waiting for a turn still gets the true answer";
+    EXPECT_EQ(wrong.load(), kThreads / 2);
+    EXPECT_LE(sa::PasswordHasher::peakInFlight(), sa::PasswordHasher::kMaxConcurrent);
+    EXPECT_GE(sa::PasswordHasher::peakInFlight(), 2) << "the limit is a ceiling, not a queue of one";
 }

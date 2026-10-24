@@ -24,9 +24,11 @@
 
 #include "auth/PasswordHasher.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <semaphore>
 #include <vector>
 
 #include <sodium.h>
@@ -56,12 +58,37 @@ void ensureSodiumInit() {
     });
 }
 
+// At most kMaxConcurrent argon2id runs at once (see the header): a login burst must not turn into
+// a memory burst, which on a small host ends with the process killed.
+std::counting_semaphore<64> g_gate(PasswordHasher::kMaxConcurrent);
+std::atomic<int> g_in_flight{0};
+std::atomic<int> g_peak{0};
+
+struct HashSlot {
+    HashSlot() {
+        g_gate.acquire();
+        const int now = g_in_flight.fetch_add(1) + 1;
+        int peak = g_peak.load();
+        while (now > peak && !g_peak.compare_exchange_weak(peak, now)) {}
+    }
+    ~HashSlot() {
+        g_in_flight.fetch_sub(1);
+        g_gate.release();
+    }
+    HashSlot(const HashSlot&)            = delete;
+    HashSlot& operator=(const HashSlot&) = delete;
+};
+
 }  // namespace
+
+int  PasswordHasher::peakInFlight() { return g_peak.load(); }
+void PasswordHasher::resetPeak()    { g_peak.store(0); }
 
 std::optional<std::string> PasswordHasher::hash(std::string_view plaintext) {
     ensureSodiumInit();
     if (!g_sodium_ok) return std::nullopt;
     if (plaintext.empty()) return std::nullopt;
+    HashSlot slot;
 
     // crypto_pwhash_STRBYTES — максимальная длина encoded строки
     // (включая trailing '\0'). Для argon2id это 128 байт.
@@ -100,6 +127,7 @@ bool PasswordHasher::verify(std::string_view plaintext,
         return false;
     }
 
+    HashSlot slot;
     const int rc = crypto_pwhash_str_verify(
         encoded_copy.c_str(),
         plaintext.data(),

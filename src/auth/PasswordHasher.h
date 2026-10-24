@@ -24,6 +24,15 @@ public:
     // ~32 chars from 24 random bytes) — used for bootstrap admin and
     // admin-triggered resets.
     static std::string generateRandom();
+
+    // Every hash and every check takes 64 MiB for its short life. A burst of logins (wrong passwords
+    // too: the hash is computed before the answer is known) would hold one such buffer per worker thread
+    // of the HTTP server at once, so only this many run at the same time; the rest wait their turn
+    // (a login takes about a tenth of a second).
+    static constexpr int kMaxConcurrent = 4;
+    // For tests: the most that ran at once since the last reset.
+    static int  peakInFlight();
+    static void resetPeak();
 };
 
 }  // namespace liveqx::auth
