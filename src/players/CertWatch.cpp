@@ -11,9 +11,22 @@
 
 namespace liveqx::players {
 
+namespace {
+// Kept in the module's settings table (an empty value removes the key, and "nothing" means "fine").
+constexpr const char* kAlarmKey            = "watch.renew_alarm";
+constexpr const char* kServerCertKeyPrefix = "watch.server_cert.";
+}  // namespace
+
 CertWatch::CertWatch(PlayersDb& db, CertWatchOptions opts) : db_(db), opts_(std::move(opts)) {
     opts_.interval_s = std::max(1, opts_.interval_s);
     opts_.first_look_after_s = std::max(0, opts_.first_look_after_s);
+
+    // What was announced before the server last stopped, so a fault that is still there is not announced twice.
+    const auto saved = db_.settings();
+    if (auto it = saved.find(kAlarmKey); it != saved.end()) alarm_ = it->second == "1";
+    for (const auto& [key, value] : saved)
+        if (key.rfind(kServerCertKeyPrefix, 0) == 0)
+            if (auto stage = parseCertStage(value)) server_stage_[key.substr(std::string(kServerCertKeyPrefix).size())] = *stage;
 }
 
 CertWatch::~CertWatch() { stop(); }
@@ -100,6 +113,7 @@ std::size_t CertWatch::scan() {
     const ScreenCertSummary fleet = summarizeScreens(db_, now);
     if (fleet.systemic != alarm_) {
         alarm_ = fleet.systemic;
+        db_.setSettings({{kAlarmKey, alarm_ ? "1" : ""}});
         if (opts_.events)
             opts_.events->publish(events::EventType::PlayersRenewAlarm, -1,
                                   {{"active", alarm_}, {"failing", fleet.failing},
@@ -121,6 +135,7 @@ std::size_t CertWatch::scan() {
             (void)fresh;
             if (stage == previous) continue;
             it->second = stage;
+            db_.setSettings({{std::string(kServerCertKeyPrefix) + c.name, stage == CertStage::Ok ? "" : certStageName(stage)}});
             const std::int64_t left = certDaysLeft(c.not_after, now);
             if (opts_.events)
                 opts_.events->publish(events::EventType::PlayersServerCert, -1,

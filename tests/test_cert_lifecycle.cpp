@@ -480,3 +480,43 @@ TEST_F(ServerCertWatchTest, NothingIsWatchedWithoutASource) {
     w->scan();
     EXPECT_TRUE(serverNews().empty());
 }
+
+// ─── what the watch announced survives a restart of the server ───────────────────
+TEST_F(RenewAlarmTest, AFaultThatStillStandsAfterARestartIsNotAnnouncedAgainAndItsEndIs) {
+    std::vector<std::string> ids;
+    for (int i = 0; i < 4; ++i) ids.push_back(boundScreen("s" + std::to_string(i), 40));
+    for (int i = 0; i < 4; ++i) report(ids[i], i < 3);
+    {
+        auto w = watch();
+        w->scan();
+        ASSERT_EQ(alarms().size(), 1u);                              // announced: the alarm begins
+    }
+    auto after_restart = watch();                                    // the server was restarted; the fault is still there
+    after_restart->scan();
+    EXPECT_TRUE(alarms().empty()) << "the same fault is not announced a second time";
+
+    for (const auto& id : ids) report(id, false);                    // and when it ends, that is announced after all
+    after_restart->scan();
+    auto ended = alarms();
+    ASSERT_EQ(ended.size(), 1u);
+    EXPECT_EQ(ended[0].payload["active"], false);
+}
+
+TEST_F(ServerCertWatchTest, AStepOfAServerCertificateIsNotAnnouncedAgainAfterARestartButItsRenewalIs) {
+    certs_ = {{"crl", kT0 + 20 * kDay, ""}};
+    {
+        auto w = serverWatch();
+        w->scan();
+        ASSERT_EQ(serverNews().size(), 1u);                          // soon30
+    }
+    auto after_restart = serverWatch();
+    after_restart->scan();
+    EXPECT_TRUE(serverNews().empty()) << "the step that still stands is not announced again";
+
+    certs_[0].not_after = kT0 + 120 * kDay;                          // the list is rewritten
+    after_restart->scan();
+    auto news = serverNews();
+    ASSERT_EQ(news.size(), 1u);
+    EXPECT_EQ(news[0].payload["stage"], "ok");
+    EXPECT_EQ(news[0].payload["previous"], "soon30");
+}

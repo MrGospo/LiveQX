@@ -11,12 +11,12 @@
 // The same look tells whether certificate renewal is failing across the fleet (see
 // renewAlarm in CertSummary.h) and speaks once when that begins and once when it ends:
 // an event for the administrators' pages, a line in the log, and a callback for the audit trail.
-// (The state is kept in memory: after a restart a fault that is still there is announced once more.)
+// (Remembered across restarts, in the module's settings table: a fault that still stands is not announced again.)
 //
 // The server's own certificates (the API's TLS, the device authority, the broker's certificate,
 // the revocation list's end) are watched the same way, in the same steps: a step reached is
 // announced once to the administrators, in the audit trail and in the log, and "fine" once
-// when it is renewed. (Kept in memory: after a restart a step that still stands is announced once more.)
+// when it is renewed. (Remembered across restarts, like the above.)
 //
 // It looks once an hour. The steps are measured in days, so an hour's delay is
 // nothing; what the API shows is computed afresh on every request.
@@ -73,6 +73,7 @@ private:
     bool             stopping_{false};
     bool             alarm_{false};                      // renewal is failing across the fleet, as last announced
     std::map<std::string, CertStage> server_stage_;      // the step of each server certificate, as last announced
+                                                         // (this and alarm_ are saved: see the constructor)
 };
 
 }  // namespace liveqx::players
