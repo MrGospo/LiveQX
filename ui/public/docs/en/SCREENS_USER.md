@@ -33,11 +33,21 @@ Above the table are buttons with the number in each state. The server counts the
 Click a screen in the list. The card shows:
 
 - **Now** — where it stands, the player version, the time of the last signal and what the screen reported about itself: health, what is playing, how long it has been running. If the screen is offline, what it reported last is shown.
-- **Certificates** — each screen has its own certificate, valid for a year. The player renews it by itself. "Ends soon" means less than 60 days.
+- **Certificates** — each screen has its own certificate, valid for a year. A screen that is on renews it by itself 60 days before the end. "Ends soon" means less than 30 days: no renewal in a month (more in "Certificate dates"). If a screen's certificate has ended or is close to it, a notice above "Now" says what to do.
 - **Commands** — what was sent to this screen and how it ended.
 - **Event journal** — when the screen came online, dropped out, changed version.
 
 The buttons depend on your rights: **Command**, **Move** (to another group) and, for an administrator, **Bind again**, **New token** (only while the screen is not enrolled), **Revoke** and **Delete**.
+
+## Certificate dates
+
+A screen connects to the server with its own certificate. A screen that is on renews it by itself, so you usually do not think about it. The server watches the ones that did not renew and says so in steps: **under 30 days**, **under 14**, **under 3** and **ended**.
+
+- The list of screens has a "Certificate" column (how long is left) and the buttons **Ends soon** and **Ended** with the number of screens; they show only when there is something to show. The main page says the same in a line of the "Screens" card.
+- If a screen is **off**, switch it on before the date: it renews the certificate by itself. If a screen is **on** and the certificate did not renew, the reason is usually in the "Certificate renewal error" line of the card; most often the clock of the screen's computer is wrong.
+- If the certificate has **ended**, the screen can no longer renew it: **Bind again** is needed (the button an administrator has). The name, group and history are kept.
+- If renewal fails on many screens that are on at once, the main page shows one common line, "Certificate renewal is failing on N of M": look for the common cause rather than mending screens one by one.
+- An administrator sees the block **Server certificates** on **Screens → Broker**: web interface and API, device authority, broker, revocation list. When one of them ends, not one screen stops working but all of them; the main page warns well before. The same numbers are in the Prometheus metrics (`liveqx_players_cert_*`, `liveqx_server_cert_days_remaining`).
 
 ## Enrol a new screen (administrator)
 
@@ -55,7 +65,7 @@ Until it is enrolled the screen is "Awaiting enrolment" in the list. When the pl
 For a screen that is already enrolled or revoked. Use it when:
 
 - the screen's computer was replaced;
-- the screen was off so long that its certificate ran out (a year without renewal);
+- the screen was off so long that its certificate ran out (a year without renewal, see "Certificate dates");
 - the device was lost or stolen and a new one takes its place.
 
 What happens: **the old device stops working at once**, the screen goes back to "Awaiting enrolment" and you get a package with a new token (also shown once). The name, group and the whole history stay, the identifier is the same. The new device enrols with the package as usual.

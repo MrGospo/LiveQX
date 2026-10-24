@@ -339,7 +339,7 @@ describe('PlayerDetailPage', () => {
 
   it('marks a certificate that ends soon, one that has ended and a revoked one', () => {
     oneState.data = details({ certificates: [
-      { serial: 'soon', generation: 1, issued_at: 1, not_before: 1, not_after: nowSec() + 30 * 86400 },
+      { serial: 'soon', generation: 1, issued_at: 1, not_before: 1, not_after: nowSec() + 25 * 86400 },
       { serial: 'gone', generation: 1, issued_at: 1, not_before: 1, not_after: nowSec() - 86400 },
       { serial: 'rev',  generation: 1, issued_at: 1, not_before: 1, not_after: nowSec() + 999 * 86400, revoked_at: 5, revoke_reason: 'revoked_by_admin' },
     ] });

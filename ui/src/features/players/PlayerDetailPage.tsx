@@ -22,7 +22,7 @@ import { CertCell } from './cert';
 // its journal; the buttons above them (move, new token, revoke, delete) are
 // PlayerActions, shown to those who may use them.
 
-const CERT_SOON_DAYS = 60;           // the player renews itself 60–90 days before the end
+const CERT_SOON_DAYS = 30;           // the same edge as the first step in the list: a screen that is on has renewed by itself long before (at 60 days)
 
 type CertState = 'revoked' | 'expired' | 'soon' | 'valid';
 
