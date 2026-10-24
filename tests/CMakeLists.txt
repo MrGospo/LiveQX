@@ -173,7 +173,10 @@ add_executable(liveqx-tests
     ../src/players/PlayersDb.cpp
     ../src/players/PlayersService.cpp
     ../src/players/CommandService.cpp
+    ../src/players/CertLifecycle.cpp
+    ../src/players/CertWatch.cpp
     test_command_service.cpp
+    test_cert_lifecycle.cpp
     ../src/mqtt/BrokerAdmin.cpp
     ../src/mqtt/BrokerLink.cpp
     ../src/mqtt/BrokerReload.cpp
@@ -363,6 +366,7 @@ add_executable(liveqx-itests
     test_control_api_tls.cpp
     test_control_api_mounts.cpp
     test_control_api_players.cpp
+    test_control_api_cert.cpp
     test_stream_cap.cpp
     test_player_scope_rest.cpp
     test_player_command_rest.cpp
@@ -482,6 +486,8 @@ add_executable(liveqx-itests
     ../src/players/PlayersDb.cpp
     ../src/players/PlayersService.cpp
     ../src/players/CommandService.cpp
+    ../src/players/CertLifecycle.cpp
+    ../src/players/CertWatch.cpp
     ../src/mqtt/BrokerAdmin.cpp
     ../src/players/EnrollService.cpp
     ../src/players/PlayerAccess.cpp

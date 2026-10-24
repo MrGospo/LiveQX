@@ -6439,6 +6439,13 @@ export interface paths {
                      */
                     status?: "online" | "offline" | "pending" | "revoked";
                     /**
+                     * @description Ступень срока сертификата (только у привязанных экранов; остальные из выборки
+                     *     уходят). `soon` — любая из ступеней «скоро» (30, 14, 3 дня), `expired` — срок
+                     *     вышел, `attention` — то и другое; остальные значения — одна ступень. Сужает
+                     *     список, но не счётчики.
+                     */
+                    cert?: "soon" | "expired" | "attention" | "ok" | "soon30" | "soon14" | "soon3";
+                    /**
                      * @description Поиск по названию экрана, группы и объекта, без учёта регистра для латиницы и
                      *     кириллицы (остальные алфавиты — точно). Сужает и список, и счётчики.
                      */
@@ -6473,10 +6480,21 @@ export interface paths {
                                 pending: number;
                                 revoked: number;
                             };
+                            /**
+                             * @description Привязанные экраны по ступеням срока сертификата — по тому же набору, что и
+                             *     `counts` (место и поиск учтены, фильтры `status` и `cert` — нет).
+                             */
+                            cert_counts?: {
+                                ok: number;
+                                soon30: number;
+                                soon14: number;
+                                soon3: number;
+                                expired: number;
+                            };
                         };
                     };
                 };
-                /** @description `invalid_state`, `invalid_status`, `invalid_query` или `invalid_paging`. */
+                /** @description `invalid_state`, `invalid_status`, `invalid_cert`, `invalid_query` или `invalid_paging`. */
                 400: {
                     headers: {
                         [name: string]: unknown;
@@ -9123,6 +9141,27 @@ export interface components {
             revoked_at?: number;
             revoke_reason?: string;
             status?: components["schemas"]["PlayerStatus"];
+            cert?: components["schemas"]["PlayerCertStage"];
+        };
+        /**
+         * @description Где сертификат экрана относительно конца срока. Есть только у привязанных
+         *     экранов. Включённый экран продлевает сертификат сам за 60 дней до конца, поэтому
+         *     ступень «30 дней» означает, что за месяц продления не было: экран выключен или
+         *     продление не проходит. Экран без действующего сертификата — `expired`.
+         */
+        PlayerCertStage: {
+            /** @enum {string} */
+            stage: "ok" | "soon30" | "soon14" | "soon3" | "expired";
+            /**
+             * Format: int64
+             * @description Конец самого позднего действующего сертификата; нет, если действующих нет.
+             */
+            not_after?: number;
+            /**
+             * Format: int64
+             * @description Целых дней осталось, вниз; ниже нуля, когда срок вышел.
+             */
+            days_left?: number;
         };
         PlayerCertificate: {
             serial: string;

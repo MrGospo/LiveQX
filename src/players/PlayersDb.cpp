@@ -888,6 +888,30 @@ std::vector<CertRow> PlayersDb::certsOf(const std::string& player_id) {
     return out;
 }
 
+std::map<std::string, std::int64_t> PlayersDb::liveCertEnds() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::map<std::string, std::int64_t> out;
+    if (!db_) return out;
+    Stmt s(db_, "SELECT player_id, MAX(not_after) FROM player_certs WHERE revoked_at IS NULL GROUP BY player_id");
+    while (s.step() == SQLITE_ROW) out[s.str(0)] = s.num(1);
+    return out;
+}
+
+std::map<std::string, std::string> PlayersDb::lastCertStages() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::map<std::string, std::string> out;
+    if (!db_) return out;
+    Stmt s(db_, "SELECT e.player_id, e.details FROM player_events e "
+                "JOIN (SELECT player_id, MAX(id) AS mid FROM player_events WHERE kind='cert_stage' GROUP BY player_id) m "
+                "ON e.id = m.mid");
+    while (s.step() == SQLITE_ROW) {
+        const auto j = nlohmann::json::parse(s.str(1), nullptr, false);
+        if (j.is_object() && j.contains("stage") && j["stage"].is_string())
+            out[s.str(0)] = j["stage"].get<std::string>();
+    }
+    return out;
+}
+
 bool PlayersDb::revokeCert(int generation, const std::string& serial_hex,
                            const std::string& reason, std::int64_t now) {
     std::lock_guard<std::mutex> lk(mu_);
@@ -1560,7 +1584,13 @@ std::vector<CommandRow> PlayersDb::timeoutCommands(std::int64_t now) {
 std::size_t PlayersDb::purgeEventsOlderThan(std::int64_t ts) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!db_) return 0;
-    Stmt s(db_, "DELETE FROM player_events WHERE ts < ?");
+    // The last "cert_stage" line of each screen stays however old it is: it is what the
+    // watch remembers, and without it a screen that has been off for months would be
+    // announced as expired again every time the journal is trimmed.
+    // (Only for screens that still exist; a deleted screen's lines age out like any other.)
+    Stmt s(db_, "DELETE FROM player_events WHERE ts < ? AND NOT (kind='cert_stage' "
+                "AND player_id IN (SELECT id FROM players) AND id IN "
+                "(SELECT MAX(id) FROM player_events WHERE kind='cert_stage' GROUP BY player_id))");
     s.i64(1, ts);
     return s.exec() ? static_cast<std::size_t>(s.changes()) : 0;
 }

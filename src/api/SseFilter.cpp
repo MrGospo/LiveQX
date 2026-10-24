@@ -84,6 +84,7 @@ bool sseEventVisibleTo(const liveqx::auth::RequestContext& ctx,
         case EventType::PlayerHeartbeat:
         case EventType::PlayerVersionChanged:
         case EventType::PlayerCommand:
+        case EventType::PlayerCertStage:
             // A person sees the events of the players they have been given (B13).
             // The event names the player's group and object, so no lookup is
             // needed; one that does not, or names them oddly, is for

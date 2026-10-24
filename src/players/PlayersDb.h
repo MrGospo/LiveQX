@@ -314,6 +314,12 @@ public:
 
     // ── certificates and CRLs ────────────────────────────────────────────
     std::vector<CertRow> certsOf(const std::string& player_id);
+    // The end of the latest certificate of each player that still has one that is not revoked
+    // (a player missing from the map has none). One query, for the whole park.
+    std::map<std::string, std::int64_t> liveCertEnds();
+    // The certificate step last written to the journal for each player (kind `cert_stage`): the word
+    // of the step (see CertLifecycle.h). Players without such a record are not in the map.
+    std::map<std::string, std::string> lastCertStages();
     bool                 revokeCert(int generation, const std::string& serial_hex,
                                     const std::string& reason, std::int64_t now = 0);
     // Revoked certificates of one CA generation that have not expired yet.
@@ -374,6 +380,7 @@ public:
     bool                  addEvent(const std::string& player_id, const std::string& kind,
                                    const std::string& details, std::int64_t now = 0);
     std::vector<EventRow> events(const std::string& player_id, std::size_t limit);
+    // Removes lines older than `ts`, except the latest "cert_stage" line of each screen.
     std::size_t           purgeEventsOlderThan(std::int64_t ts);
 
 private:

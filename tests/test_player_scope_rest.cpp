@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <set>
 #include <thread>
@@ -747,4 +748,42 @@ TEST(PlayerAuditRest, AMoveIsOneRowThatBothTheLosingAndTheReceivingSideCanRead) 
     // The grants update (about a person, not a place) is not for them.
     EXPECT_EQ(eventsOf(f, got, "action=player.grants_update")["total"], 0);
     EXPECT_GE(eventsOf(f, admin, "action=player.grants_update")["total"].get<int>(), 1);
+}
+
+// ─── The certificate steps follow the same rights as the list ───────────────
+TEST(PlayerScopeRest, TheCertificateStepsCountOnlyWhatThePersonIsAllowedToSee) {
+    ScopeFixture f(kBasePort + 28);
+    const std::int64_t now = std::time(nullptr);
+    // P11 is over, P12 ends in 10 days, P21 is fine; all three are bound.
+    int n = 0;
+    for (const auto& [id, left] : {std::pair{f.P11, -3 * 86400}, std::pair{f.P12, 10 * 86400 + 3600},
+                                   std::pair{f.P21, 300 * 86400}}) {
+        auto claim = f.pdb->reissueToken(id, 3600);
+        ASSERT_TRUE(claim.has_value());
+        auto c = f.pdb->claimToken(id, claim->token);
+        ASSERT_TRUE(c.ok);
+        CertRow cert;
+        cert.serial_hex = "E" + std::to_string(++n);
+        cert.generation = 1;
+        cert.player_id  = id;
+        cert.issued_at  = now - 400 * 86400;
+        cert.not_before = now - 400 * 86400;
+        cert.not_after  = now + left;
+        ASSERT_TRUE(f.pdb->finishEnrollment(c.token_id, cert));
+    }
+    auto admin = f.person("root", sa::Role::Admin);
+    auto op    = f.person("op", sa::Role::Operator);
+    ASSERT_EQ(f.putGrants(admin, op.id, json::array({ScopeFixture::grant("group", f.G12)}))->status, 200);
+
+    auto cli = f.client();
+    auto seen = json::parse(cli.Get("/api/players", bearer(op.token))->body);
+    EXPECT_EQ(seen["cert_counts"]["soon14"], 1);
+    EXPECT_EQ(seen["cert_counts"]["expired"], 0) << "the expired screen is in a group they do not see";
+    EXPECT_EQ(seen["cert_counts"]["ok"], 0);
+    EXPECT_EQ(json::parse(cli.Get("/api/players?cert=expired", bearer(op.token))->body)["total"], 0);
+
+    auto all = json::parse(cli.Get("/api/players", bearer(admin.token))->body);
+    EXPECT_EQ(all["cert_counts"]["expired"], 1);
+    EXPECT_EQ(all["cert_counts"]["soon14"], 1);
+    EXPECT_EQ(all["cert_counts"]["ok"], 1);
 }

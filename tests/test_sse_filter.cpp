@@ -244,12 +244,13 @@ TEST(SseFilter, HeartbeatsAreNotInTheDefaultSubscription) {
     EXPECT_TRUE(liveqx::api::sseEventInDefaultSubscription(EventType::PlayerOnline));
     EXPECT_TRUE(liveqx::api::sseEventInDefaultSubscription(EventType::PlayerOffline));
     EXPECT_TRUE(liveqx::api::sseEventInDefaultSubscription(EventType::PlayerVersionChanged));
+    EXPECT_TRUE(liveqx::api::sseEventInDefaultSubscription(EventType::PlayerCertStage));
 }
 
 TEST(SseFilter, PlayerEventNamesRoundTrip) {
     for (EventType t : {EventType::PlayerRegistered, EventType::PlayerOnline,
                         EventType::PlayerOffline, EventType::PlayerHeartbeat,
-                        EventType::PlayerVersionChanged}) {
+                        EventType::PlayerVersionChanged, EventType::PlayerCertStage}) {
         const std::string name = liveqx::events::eventTypeName(t);
         EXPECT_EQ(name.rfind("player_", 0), 0u) << name;
         auto back = liveqx::events::parseEventType(name);

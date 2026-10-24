@@ -1,5 +1,6 @@
 #include "api/ControlApi.h"
 #include "api/StreamLimiter.h"
+#include "players/CertLifecycle.h"
 
 #include <algorithm>
 #include <ctime>
@@ -3270,6 +3271,14 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         for (auto& o : db.listObjects()) h.objects.emplace(o.id, o);
         return h;
     };
+    auto certJson = [](liveqx::players::CertStage stage, std::optional<std::int64_t> end, std::int64_t now_s) {
+        json o = {{"stage", liveqx::players::certStageName(stage)}};
+        if (end) {
+            o["not_after"] = *end;
+            o["days_left"] = liveqx::players::certDaysLeft(*end, now_s);
+        }
+        return o;
+    };
     auto playerJson = [](const liveqx::players::PlayerRow& p,
                          const std::optional<liveqx::players::StatusRow>& st,
                          const Hierarchy& h) {
@@ -4137,7 +4146,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Get("/api/players",
-          [pls, players_unavailable, playerJson, loadHierarchy, accessFor, placeOf]
+          [pls, players_unavailable, playerJson, certJson, loadHierarchy, accessFor, placeOf]
           (const httplib::Request& req, httplib::Response& res) {
         if (!pls) { players_unavailable(res); return; }
         auto access = accessFor(req);
@@ -4187,10 +4196,22 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
                 return;
             }
         }
+        // The step of the certificate: `soon` (any of the three), `expired`, `attention` (both), or one step by name.
+        std::string cert_filter;
+        if (req.has_param("cert")) {
+            cert_filter = req.get_param_value("cert");
+            if (cert_filter != "soon" && cert_filter != "expired" && cert_filter != "attention" &&
+                !liveqx::players::parseCertStage(cert_filter)) {
+                writeJson(res, 400, {{"error", "invalid_cert"}});
+                return;
+            }
+        }
         const std::string query = req.has_param("q") ? req.get_param_value("q") : std::string();
         if (query.size() > 200) { writeJson(res, 400, {{"error", "invalid_query"}}); return; }
         const std::string needle = liveqx::text::foldForSearch(query);
 
+        const std::int64_t now_s = static_cast<std::int64_t>(std::time(nullptr));
+        const auto cert_ends = pls->db().liveCertEnds();
         std::map<std::string, liveqx::players::StatusRow> statuses;
         for (auto& st : pls->db().allStatuses()) statuses.emplace(st.player_id, st);
         const auto hier = loadHierarchy(pls->db());
@@ -4201,10 +4222,13 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             std::optional<liveqx::players::StatusRow>    status;
             const char*                                  display;
             std::string                                  sort_key;
+            std::optional<liveqx::players::CertStage>    stage;       // bound screens only
+            std::optional<std::int64_t>                  cert_end;
         };
         std::vector<Item> items;
         items.reserve(rows.size());
         std::map<std::string, std::int64_t> counts{{"online", 0}, {"offline", 0}, {"pending", 0}, {"revoked", 0}};
+        std::map<std::string, std::int64_t> cert_counts{{"ok", 0}, {"soon30", 0}, {"soon14", 0}, {"soon3", 0}, {"expired", 0}};
         const bool restricted = !access->isAdmin();
         for (auto& p : rows) {
             if (restricted && !access->canView(placeOf(p, hier))) continue;
@@ -4225,8 +4249,22 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
                 }
                 if (hay.find(needle) == std::string::npos) continue;
             }
+            if (p.state == liveqx::players::PlayerState::Active) {
+                if (auto ce = cert_ends.find(p.id); ce != cert_ends.end()) it.cert_end = ce->second;
+                it.stage = liveqx::players::certStageOf(it.cert_end, now_s);
+                ++cert_counts[liveqx::players::certStageName(*it.stage)];
+            }
             ++counts[it.display];
             if (!display_filter.empty() && display_filter != it.display) continue;
+            if (!cert_filter.empty()) {
+                if (!it.stage) continue;
+                const auto st = *it.stage;
+                const bool keep = cert_filter == "soon"      ? liveqx::players::certIsSoon(st)
+                                : cert_filter == "expired"   ? st == liveqx::players::CertStage::Expired
+                                : cert_filter == "attention" ? liveqx::players::certNeedsAttention(st)
+                                :                              st == *liveqx::players::parseCertStage(cert_filter);
+                if (!keep) continue;
+            }
             it.player = std::move(p);
             items.push_back(std::move(it));
         }
@@ -4237,12 +4275,17 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         const std::size_t from  = std::min<std::size_t>(static_cast<std::size_t>(*offset), total);
         const std::size_t to    = std::min<std::size_t>(from + static_cast<std::size_t>(*limit), total);
         json arr = json::array();
-        for (std::size_t i = from; i < to; ++i) arr.push_back(playerJson(items[i].player, items[i].status, hier));
-        writeJson(res, 200, json{{"players", std::move(arr)}, {"total", total}, {"counts", counts}});
+        for (std::size_t i = from; i < to; ++i) {
+            json pj = playerJson(items[i].player, items[i].status, hier);
+            if (items[i].stage) pj["cert"] = certJson(*items[i].stage, items[i].cert_end, now_s);
+            arr.push_back(std::move(pj));
+        }
+        writeJson(res, 200, json{{"players", std::move(arr)}, {"total", total}, {"counts", counts},
+                                 {"cert_counts", cert_counts}});
     });
 
     s.Get(R"(/api/players/([^/]+))",
-          [pls, players_unavailable, playerJson, loadHierarchy, accessFor, placeOf]
+          [pls, players_unavailable, playerJson, certJson, loadHierarchy, accessFor, placeOf]
           (const httplib::Request& req, httplib::Response& res) {
         if (!pls) { players_unavailable(res); return; }
         auto access = accessFor(req);
@@ -4256,7 +4299,15 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         j["can"] = {{"move", access->canMoveFrom(placeOf(*p, hier))},
                     {"command", access->canCommandPlayer(placeOf(*p, hier))}};
         json certs = json::array();
-        for (const auto& c : pls->db().certsOf(id)) {
+        const auto cert_list = pls->db().certsOf(id);
+        if (p->state == liveqx::players::PlayerState::Active) {
+            std::optional<std::int64_t> end;
+            for (const auto& c : cert_list)
+                if (!c.revoked_at && (!end || c.not_after > *end)) end = c.not_after;
+            const std::int64_t now_s = static_cast<std::int64_t>(std::time(nullptr));
+            j["cert"] = certJson(liveqx::players::certStageOf(end, now_s), end, now_s);
+        }
+        for (const auto& c : cert_list) {
             json cj = {{"serial", c.serial_hex}, {"generation", c.generation},
                        {"issued_at", c.issued_at}, {"not_before", c.not_before},
                        {"not_after", c.not_after}};

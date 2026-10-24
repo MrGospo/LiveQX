@@ -55,6 +55,7 @@
 #endif
 #include "players/AuditScope.h"
 #include "players/BrokerSettings.h"
+#include "players/CertWatch.h"
 #include "players/CommandService.h"
 #include "players/BrokerTls.h"
 #include "players/CrlPublisher.h"
@@ -994,6 +995,7 @@ int main(int argc, char* argv[]) {
         std::unique_ptr<liveqx::players::CrlPublisher> crl_publisher;   // the revocation list for the broker
         std::unique_ptr<liveqx::players::CommandService> command_service;
         std::jthread command_sweeper;       // settles commands nobody confirmed in time
+        std::unique_ptr<liveqx::players::CertWatch> cert_watch;     // announces screens whose certificate nears its end
         std::jthread players_retention;     // removes old closed records once a day
         struct BrokerHookDetach {
             std::shared_ptr<BrokerHook> h;
@@ -1160,6 +1162,13 @@ int main(int argc, char* argv[]) {
                         std::this_thread::sleep_for(std::chrono::seconds(1));
                 }
             });
+
+            {
+                liveqx::players::CertWatchOptions cw;
+                cw.events = &event_bus;
+                cert_watch = std::make_unique<liveqx::players::CertWatch>(players_db, std::move(cw));
+                cert_watch->start();
+            }
 
             // Retention of the players' own journals: once a day, a minute after start
             // (so a long-neglected database is cleaned soon, but not during boot).

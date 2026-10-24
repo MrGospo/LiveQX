@@ -260,6 +260,8 @@ set(SOURCES
     src/players/PlayersDb.cpp
     src/players/PlayersService.cpp
     src/players/CommandService.cpp
+    src/players/CertLifecycle.cpp
+    src/players/CertWatch.cpp
     src/mqtt/BrokerAdmin.cpp
     src/mqtt/BrokerLink.cpp
     src/mqtt/BrokerReload.cpp

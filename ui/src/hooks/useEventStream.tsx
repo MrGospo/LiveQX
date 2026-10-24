@@ -150,13 +150,14 @@ export function EventBusProvider({ children }: { children: React.ReactNode }) {
             qc.invalidateQueries({ queryKey: ['audit-trail'] });
             break;
           // Screens (players): a screen came or went, changed version, got a command or
-          // settled one. Only the lists of screens are refetched; the settings and broker
+          // settled one, or a certificate moved to another step. Only the lists of screens are refetched; the settings and broker
           // pages sit under their own query root and are not touched by a screen's comings
           // and goings.
           case 'player_registered':
           case 'player_online':
           case 'player_offline':
           case 'player_version_changed':
+          case 'player_cert_stage':
           case 'player_command':
             qc.invalidateQueries({ queryKey: ['players'] });
             break;

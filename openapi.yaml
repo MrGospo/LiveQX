@@ -4252,6 +4252,14 @@ paths:
             Состояние словами, как его видит человек: `online`/`offline` — только у
             привязанных (`active`), `pending`, `revoked` — как есть. Сужает список, но не счётчики.
         - in: query
+          name: cert
+          schema: { type: string, enum: [soon, expired, attention, ok, soon30, soon14, soon3] }
+          description: |
+            Ступень срока сертификата (только у привязанных экранов; остальные из выборки
+            уходят). `soon` — любая из ступеней «скоро» (30, 14, 3 дня), `expired` — срок
+            вышел, `attention` — то и другое; остальные значения — одна ступень. Сужает
+            список, но не счётчики.
+        - in: query
           name: q
           schema: { type: string, maxLength: 200 }
           description: |
@@ -4288,8 +4296,20 @@ paths:
                       offline: { type: integer }
                       pending: { type: integer }
                       revoked: { type: integer }
+                  cert_counts:
+                    type: object
+                    description: |
+                      Привязанные экраны по ступеням срока сертификата — по тому же набору, что и
+                      `counts` (место и поиск учтены, фильтры `status` и `cert` — нет).
+                    required: [ok, soon30, soon14, soon3, expired]
+                    properties:
+                      ok: { type: integer }
+                      soon30: { type: integer }
+                      soon14: { type: integer }
+                      soon3: { type: integer }
+                      expired: { type: integer }
         '400':
-          description: '`invalid_state`, `invalid_status`, `invalid_query` или `invalid_paging`.'
+          description: '`invalid_state`, `invalid_status`, `invalid_cert`, `invalid_query` или `invalid_paging`.'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -5909,6 +5929,20 @@ components:
         revoked_at: { type: integer, format: int64 }
         revoke_reason: { type: string }
         status: { $ref: '#/components/schemas/PlayerStatus' }
+        cert: { $ref: '#/components/schemas/PlayerCertStage' }
+
+    PlayerCertStage:
+      type: object
+      description: |
+        Где сертификат экрана относительно конца срока. Есть только у привязанных
+        экранов. Включённый экран продлевает сертификат сам за 60 дней до конца, поэтому
+        ступень «30 дней» означает, что за месяц продления не было: экран выключен или
+        продление не проходит. Экран без действующего сертификата — `expired`.
+      required: [stage]
+      properties:
+        stage: { type: string, enum: [ok, soon30, soon14, soon3, expired] }
+        not_after: { type: integer, format: int64, description: 'Конец самого позднего действующего сертификата; нет, если действующих нет.' }
+        days_left: { type: integer, format: int64, description: 'Целых дней осталось, вниз; ниже нуля, когда срок вышел.' }
 
     PlayerCertificate:
       type: object
