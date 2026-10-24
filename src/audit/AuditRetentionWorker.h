@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <thread>
 
@@ -31,8 +32,13 @@ public:
     // until the DB becomes available. run_interval controls how often
     // we scan (default 1h — retention windows are day-scale, so hourly
     // is fine and keeps the per-tick cost bounded).
+    //
+    // `extra_sweep` is run at the start of every sweep, before the audit database is looked at (and
+    // whether or not it is available); it returns how many things it removed. It lets other stores that
+    // are kept for the same reasons share this thread and this schedule.
     AuditRetentionWorker(AuditDb* db,
-                         std::chrono::minutes run_interval = std::chrono::minutes{60});
+                         std::chrono::minutes run_interval = std::chrono::minutes{60},
+                         std::function<int()> extra_sweep = {});
     ~AuditRetentionWorker();
 
     AuditRetentionWorker(const AuditRetentionWorker&)            = delete;
@@ -50,6 +56,7 @@ private:
 
     AuditDb*                  db_{nullptr};
     std::chrono::minutes      interval_;
+    std::function<int()>      extra_sweep_;
     std::atomic<bool>         running_{false};
     std::atomic<bool>         stopping_{false};
     std::mutex                mu_;

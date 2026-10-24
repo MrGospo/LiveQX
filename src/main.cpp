@@ -905,8 +905,31 @@ int main(int argc, char* argv[]) {
             if (mins > 0)
                 audit_retention_interval = std::chrono::minutes{mins};
         }
-        sad::AuditRetentionWorker audit_retention(&audit_db,
-                                                  audit_retention_interval);
+        // The old login history kept by the v8 upgrade of auth.db goes the same way: once the newest of it is
+        // older than the audit trail's own retention of logins, it is no longer worth keeping. Said in the log
+        // and in the audit trail (what was removed, how many rows, up to when).
+        sad::AuditRetentionWorker audit_retention(
+            &audit_db, audit_retention_interval,
+            [&auth_db, &audit_logger]() {
+                const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                const auto dropped = auth_db.dropExpiredAuditArchives(
+                    now, sad::defaultRetentionDays(sad::Category::Auth));
+                for (const auto& d : dropped) {
+                    LOG_WARN("AuthDb: the old login history {} ({} rows, the newest from {}) is older than the audit retention and was removed",
+                             d.table, d.rows, d.newest_ts);
+                    sad::AuditEvent ev;
+                    ev.category       = sad::Category::System;
+                    ev.action         = "auth.archive_expired";
+                    ev.actor_username = "system";
+                    ev.target_type    = "auth_db";
+                    ev.target_id      = d.table;
+                    ev.summary        = "old login history removed: " + d.table;
+                    ev.details_json   = json{{"table", d.table}, {"rows", d.rows}, {"newest_ts", d.newest_ts}}.dump();
+                    audit_logger.log(std::move(ev));
+                }
+                return static_cast<int>(dropped.size());
+            });
         audit_retention.start();
 
         // fix23 — process-wide event bus for SSE fan-out and per-channel

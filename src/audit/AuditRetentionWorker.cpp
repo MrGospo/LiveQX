@@ -17,8 +17,9 @@ std::int64_t nowUnixMs() {
 }  // namespace
 
 AuditRetentionWorker::AuditRetentionWorker(AuditDb* db,
-                                           std::chrono::minutes run_interval)
-    : db_(db), interval_(run_interval) {}
+                                           std::chrono::minutes run_interval,
+                                           std::function<int()> extra_sweep)
+    : db_(db), interval_(run_interval), extra_sweep_(std::move(extra_sweep)) {}
 
 AuditRetentionWorker::~AuditRetentionWorker() { stop(); }
 
@@ -38,9 +39,16 @@ void AuditRetentionWorker::stop() {
 }
 
 int AuditRetentionWorker::runOnce() {
-    if (!db_ || !db_->ok()) return 0;
-    const std::int64_t now_ms = nowUnixMs();
     int total = 0;
+    if (extra_sweep_) {
+        try {
+            total += extra_sweep_();
+        } catch (const std::exception& e) {
+            LOG_ERROR("AuditRetentionWorker: the extra sweep failed: {}", e.what());
+        }
+    }
+    if (!db_ || !db_->ok()) return total;
+    const std::int64_t now_ms = nowUnixMs();
     for (auto cat : kAllCategories) {
         const int days = defaultRetentionDays(cat);
         if (days <= 0) continue;   // 0 = keep forever

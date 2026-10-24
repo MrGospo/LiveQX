@@ -403,6 +403,47 @@ bool AuthDb::runMigrations() {
     return true;
 }
 
+std::vector<AuthDb::DroppedArchive> AuthDb::dropExpiredAuditArchives(std::int64_t now_unix, int retention_days) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    std::vector<DroppedArchive> dropped;
+    if (!db_ || retention_days <= 0) return dropped;          // 0 = the audit trail keeps logins for ever: so does this
+
+    std::vector<std::string> names;
+    {
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "SELECT name FROM sqlite_master WHERE type='table' AND "
+                "(name='auth_audit_archived' OR name GLOB 'auth_audit_archived_[0-9]*');",
+                -1, &st, nullptr) != SQLITE_OK) return dropped;
+        while (sqlite3_step(st) == SQLITE_ROW) names.push_back(colText(st, 0));
+        sqlite3_finalize(st);
+    }
+    const std::int64_t cutoff = now_unix - static_cast<std::int64_t>(retention_days) * 86400;
+    for (const auto& name : names) {
+        // The name came from sqlite_master and matched the pattern above; still, only plain
+        // identifier characters go into the statements below.
+        if (name.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_") != std::string::npos) continue;
+        std::int64_t rows = 0, newest = 0;
+        {
+            sqlite3_stmt* st = nullptr;
+            const std::string q = "SELECT count(*), COALESCE(MAX(ts), 0) FROM " + name + ";";
+            if (sqlite3_prepare_v2(db_, q.c_str(), -1, &st, nullptr) != SQLITE_OK) {
+                LOG_WARN("AuthDb: {} has no usable ts column, left alone", name);
+                continue;
+            }
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                rows   = sqlite3_column_int64(st, 0);
+                newest = sqlite3_column_int64(st, 1);
+            }
+            sqlite3_finalize(st);
+        }
+        if (rows > 0 && newest >= cutoff) continue;           // still within the retention
+        if (!exec(("DROP TABLE " + name + ";").c_str())) continue;
+        dropped.push_back({name, rows, newest});
+    }
+    return dropped;
+}
+
 bool AuthDb::tableExists(const std::string& name) {
     sqlite3_stmt* st = nullptr;
     if (sqlite3_prepare_v2(db_,

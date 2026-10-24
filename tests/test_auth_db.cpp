@@ -9,6 +9,7 @@
 #include <sqlite3.h>
 
 #include "auth/AuthDb.h"
+#include "audit/AuditRetentionWorker.h"
 #include "auth/AuthTypes.h"
 
 namespace fs = std::filesystem;
@@ -733,3 +734,87 @@ TEST_F(AuthDbTest, RightsGoWhenTheUserGoes) {
     EXPECT_EQ(rawScalar(dbPath(), "SELECT count(*) FROM user_player_grants"), 0);
 }
 
+
+// ─── the old login history is removed once the audit trail would have removed it too ───
+namespace {
+constexpr std::int64_t kNow  = 1'800'000'000;
+constexpr std::int64_t kDay  = 86400;
+}  // namespace
+
+TEST_F(AuthDbTest, TheOldLoginHistoryStaysWhileItsNewestRowIsWithinTheRetention) {
+    { sa::AuthDb db(dbPath()); ASSERT_TRUE(db.open()); }
+    rawExec(dbPath(), (std::string(
+        "CREATE TABLE auth_audit_archived (id INTEGER PRIMARY KEY, ts INTEGER);"
+        "INSERT INTO auth_audit_archived(ts) VALUES (1000), (") + std::to_string(kNow - 364 * kDay) + ");").c_str());
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    EXPECT_TRUE(db.dropExpiredAuditArchives(kNow, 365).empty());
+    EXPECT_EQ(rawScalar(dbPath(), "SELECT count(*) FROM auth_audit_archived"), 2);
+}
+
+TEST_F(AuthDbTest, TheOldLoginHistoryGoesWhenEvenItsNewestRowIsOlderThanTheRetentionAndNothingElseIsTouched) {
+    { sa::AuthDb db(dbPath()); ASSERT_TRUE(db.open()); ASSERT_TRUE(db.insertUser(makeAdmin("keeper")).has_value()); }
+    rawExec(dbPath(), (std::string(
+        "CREATE TABLE auth_audit_archived (id INTEGER PRIMARY KEY, ts INTEGER);"
+        "INSERT INTO auth_audit_archived(ts) VALUES (1000), (") + std::to_string(kNow - 366 * kDay) + ");").c_str());
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    const auto gone = db.dropExpiredAuditArchives(kNow, 365);
+    ASSERT_EQ(gone.size(), 1u);
+    EXPECT_EQ(gone[0].table, "auth_audit_archived");
+    EXPECT_EQ(gone[0].rows, 2);
+    EXPECT_EQ(gone[0].newest_ts, kNow - 366 * kDay);
+    EXPECT_EQ(rawScalar(dbPath(), "SELECT count(*) FROM sqlite_master WHERE name LIKE 'auth_audit_archived%'"), 0);
+    EXPECT_TRUE(db.findUserByUsername("keeper").has_value()) << "the accounts are not touched";
+    EXPECT_TRUE(db.dropExpiredAuditArchives(kNow, 365).empty()) << "nothing left to do the second time";
+}
+
+TEST_F(AuthDbTest, AnEmptyArchiveAndAnArchiveKeptUnderAnotherNameAreJudgedOnTheirOwn) {
+    { sa::AuthDb db(dbPath()); ASSERT_TRUE(db.open()); }
+    rawExec(dbPath(), (std::string(
+        "CREATE TABLE auth_audit_archived (id INTEGER PRIMARY KEY, ts INTEGER);"
+        "CREATE TABLE auth_audit_archived_1790000000 (id INTEGER PRIMARY KEY, ts INTEGER);"
+        "INSERT INTO auth_audit_archived_1790000000(ts) VALUES (") + std::to_string(kNow - 10 * kDay) + ");").c_str());
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    const auto gone = db.dropExpiredAuditArchives(kNow, 365);
+    ASSERT_EQ(gone.size(), 1u);
+    EXPECT_EQ(gone[0].table, "auth_audit_archived") << "an empty table has nothing worth keeping";
+    EXPECT_EQ(gone[0].rows, 0);
+    EXPECT_EQ(rawScalar(dbPath(), "SELECT count(*) FROM auth_audit_archived_1790000000"), 1) << "the recent one stays";
+}
+
+TEST_F(AuthDbTest, AnArchiveWithoutATimestampColumnCannotBeJudgedSoItIsLeftAlone) {
+    { sa::AuthDb db(dbPath()); ASSERT_TRUE(db.open()); }
+    rawExec(dbPath(),
+        "CREATE TABLE auth_audit_archived (id INTEGER PRIMARY KEY, what TEXT);"
+        "INSERT INTO auth_audit_archived(what) VALUES ('x');");
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    EXPECT_TRUE(db.dropExpiredAuditArchives(kNow, 365).empty());
+    EXPECT_EQ(rawScalar(dbPath(), "SELECT count(*) FROM auth_audit_archived"), 1);
+}
+
+TEST_F(AuthDbTest, ARetentionOfZeroMeansTheAuditTrailKeepsLoginsForeverAndSoDoesTheArchive) {
+    { sa::AuthDb db(dbPath()); ASSERT_TRUE(db.open()); }
+    rawExec(dbPath(),
+        "CREATE TABLE auth_audit_archived (id INTEGER PRIMARY KEY, ts INTEGER);"
+        "INSERT INTO auth_audit_archived(ts) VALUES (1);");
+    sa::AuthDb db(dbPath());
+    ASSERT_TRUE(db.open());
+    EXPECT_TRUE(db.dropExpiredAuditArchives(kNow, 0).empty());
+    EXPECT_EQ(rawScalar(dbPath(), "SELECT count(*) FROM auth_audit_archived"), 1);
+}
+
+TEST(AuditRetentionExtraSweep, TheExtraSweepRunsInEverySweepEvenWithoutAnAuditDatabaseAndItsCountIsReported) {
+    int calls = 0;
+    liveqx::audit::AuditRetentionWorker w(nullptr, std::chrono::minutes{60}, [&calls] { return ++calls * 10; });
+    EXPECT_EQ(w.runOnce(), 10);
+    EXPECT_EQ(w.runOnce(), 20);
+    EXPECT_EQ(calls, 2);
+}
+
+TEST(AuditRetentionExtraSweep, AnExceptionOfTheExtraSweepDoesNotStopTheSweep) {
+    liveqx::audit::AuditRetentionWorker w(nullptr, std::chrono::minutes{60}, []() -> int { throw std::runtime_error("boom"); });
+    EXPECT_EQ(w.runOnce(), 0);
+}

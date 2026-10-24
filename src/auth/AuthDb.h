@@ -309,6 +309,19 @@ public:
     std::optional<SmtpConfigRow> readSmtpConfigRow();
     bool writeSmtpConfigRow(const SmtpConfigRow& row);
 
+    // The old login history that schema v8 kept as `auth_audit_archived` (or `auth_audit_archived_<time>`
+    // when that name was taken). Nothing reads it; it is kept only until the newest row in it is older
+    // than the retention of the audit trail's own login events — then it is of no more use than rows
+    // the audit trail would already have removed. Removes every such table (an empty one too) and says
+    // which. A table without a `ts` column is left alone: it cannot be judged. `now_unix` and the
+    // timestamps in the table are unix seconds.
+    struct DroppedArchive {
+        std::string  table;
+        std::int64_t rows{0};
+        std::int64_t newest_ts{0};      // 0 when the table was empty
+    };
+    std::vector<DroppedArchive> dropExpiredAuditArchives(std::int64_t now_unix, int retention_days);
+
 private:
     std::filesystem::path path_;
     std::mutex mutex_;
