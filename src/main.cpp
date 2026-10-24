@@ -1675,6 +1675,18 @@ int main(int argc, char* argv[]) {
                     out.audit  = r.audit.dump();
                     return out;
                 });
+            // The pool of workers of the HTTP server and the cap on open streams (config: api_worker_threads,
+            // api_max_streams, api_max_streams_per_user). A stream holds a worker for as long as it is open.
+            {
+                auto num = [&](const char* key, int dflt) {
+                    return cfg.contains(key) && cfg[key].is_number_integer() ? cfg[key].get<int>() : dflt;
+                };
+                ControlApi::Limits lim;
+                lim.worker_threads        = num("api_worker_threads", lim.worker_threads);
+                lim.max_streams           = num("api_max_streams", lim.max_streams);
+                lim.max_streams_per_user  = num("api_max_streams_per_user", lim.max_streams_per_user);
+                api.setLimits(lim);
+            }
             api.mountUi(paths.uiDir());
             api.start();
             const bool tls_on = !tls_bindings.cert_path.empty() &&

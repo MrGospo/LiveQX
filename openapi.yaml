@@ -4062,6 +4062,23 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '429':
+          description: |
+            `too_many_streams` — открытых потоков (события, журнал канала, показатели хоста) уже
+            столько, сколько разрешено всего (`api_max_streams`, по умолчанию 24) или этому
+            пользователю (`api_max_streams_per_user`, по умолчанию 6). Каждый открытый поток держит
+            рабочий поток сервера, поэтому их число ограничено, чтобы остальной API всегда был
+            свободен. Заголовок `Retry-After: 5`; закрытый поток освобождает место. То же у
+            `/api/channels/{id}/logs/stream` и `/api/system/host_metrics/stream`.
+          headers:
+            Retry-After:
+              schema:
+                type: string
+                example: '5'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '503':
           description: EventBus not wired.
           content:

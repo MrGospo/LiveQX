@@ -150,6 +150,18 @@ public:
     void setBrokerHooks(std::function<std::string()> status, std::function<void()> sync,
                         std::function<BrokerUpdate(const std::string& body)> update = {});
 
+    // The size of the pool of worker threads of the HTTP server, and how many long-lived responses
+    // (event, log and host-metrics streams) may be open at once, in all and per user. A stream holds
+    // a worker for as long as it is open, so the streams are capped well below the pool: the rest of
+    // the API must always find a free worker. Streams over the cap are refused with 429.
+    // Call before start().
+    struct Limits {
+        int worker_threads{64};
+        int max_streams{24};
+        int max_streams_per_user{6};
+    };
+    void setLimits(const Limits& limits);
+
     void start();
     void stop();
 

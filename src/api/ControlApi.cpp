@@ -1,4 +1,5 @@
 #include "api/ControlApi.h"
+#include "api/StreamLimiter.h"
 
 #include <algorithm>
 #include <ctime>
@@ -112,6 +113,7 @@ struct ControlApi::Impl {
     std::function<void()>                          broker_sync;
     std::function<ControlApi::BrokerUpdate(const std::string&)> broker_update;
     std::mutex                                     metrics_token_mu;
+    std::shared_ptr<liveqx::api::StreamLimiter>    streams{std::make_shared<liveqx::api::StreamLimiter>(24, 6)};
 
     Impl(ChannelManager& m, MetricsCollector* mc, LivezOptions lz,
          liveqx::gateway::GatewayManager* gw,
@@ -164,6 +166,9 @@ struct ControlApi::Impl {
         } else {
             server = std::make_unique<httplib::Server>();
         }
+        // The library's own pool is as large as the machine has cores (at least 8), and every open stream
+        // holds one of its workers. Larger from the start, so that code which never calls setLimits() is safe too.
+        server->new_task_queue = [] { return new httplib::ThreadPool(64); };
     }
 };
 
@@ -172,6 +177,12 @@ namespace {
 void writeJson(httplib::Response& res, int status, const json& body) {
     res.status = status;
     res.set_content(body.dump(), "application/json");
+}
+
+// A stream over the cap: refused at once, the client tries again.
+void refuseStream(httplib::Response& res) {
+    res.set_header("Retry-After", "5");
+    writeJson(res, 429, {{"error", "too_many_streams"}});
 }
 
 int statusFor(R r) {
@@ -599,6 +610,15 @@ std::string extractBearerToken(const httplib::Request& req) {
         return v.substr(pfx.size());
     }
     return {};
+}
+
+// Who a stream belongs to, for the per-user cap: the pre-handler has let the request in, so asking
+// again only recovers the user id. 0 when there is no RBAC (test builds) or the token is gone.
+std::int64_t streamUserOf(liveqx::auth::RbacMiddleware* rb, const httplib::Request& req) {
+    if (!rb) return 0;
+    liveqx::auth::RequestContext ctx;
+    const auto d = rb->authorize(req.method, req.path, extractBearerToken(req), /*channel_id=*/-1, &ctx);
+    return d == liveqx::auth::RbacMiddleware::Decision::Allow ? static_cast<std::int64_t>(ctx.user_id) : 0;
 }
 
 // Per-request scratch for the audit middleware. Populated in the
@@ -1073,6 +1093,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     auto* pls  = impl_->players;
     auto* enr  = impl_->enroll;
     auto* cmds = impl_->commands;
+    auto  streams = impl_->streams;               // caps long-lived responses (see StreamLimiter.h)
     auto* tr   = impl_->time_repo;
     auto* ts   = impl_->time_src;
     auto* sn   = impl_->sntp;
@@ -1306,7 +1327,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     // false и httplib закрывает chunked stream.
     auto* rb = impl_->rbac;
     s.Get("/api/events/stream",
-          [ev, rb, au](const httplib::Request& req, httplib::Response& res) {
+          [ev, rb, au, streams](const httplib::Request& req, httplib::Response& res) {
         if (!ev) {
             writeJson(res, 503, {{"error", "events_bus_not_configured"}});
             return;
@@ -1329,6 +1350,10 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
             // RBAC disabled (test build) → admin-equivalent.
             ctx.role = liveqx::auth::Role::Admin;
         }
+
+        // A place among the open streams, or a plain refusal: a stream holds a worker thread.
+        auto slot = streams->acquire(static_cast<std::int64_t>(ctx.user_id));
+        if (!slot) { refuseStream(res); return; }
 
         // ── parse ?types= ────────────────────────────────────────────────
         std::vector<liveqx::events::EventType> filter;
@@ -1373,7 +1398,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         res.set_header("X-Accel-Buffering",   "no"); // disable nginx buffering
         res.set_chunked_content_provider(
             "text/event-stream",
-            [sub, matches, ctx, au](size_t, httplib::DataSink& sink) mutable -> bool {
+            [sub, matches, ctx, au, slot](size_t, httplib::DataSink& sink) mutable -> bool {
                 using namespace std::chrono_literals;
                 auto evs = sub->drain(15s);
                 // Rights on players are read afresh on every beat of the stream, so
@@ -2195,10 +2220,12 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     //   truncated us out) we reset to offset 0 and emit a `rotated`
     //   comment so the client can clear its buffer.
     s.Get(R"(/api/channels/(\d+)/logs/stream)",
-          [channelLogPathOf](const httplib::Request& req, httplib::Response& res) {
+          [channelLogPathOf, streams, rb](const httplib::Request& req, httplib::Response& res) {
         int id = 0; if (!parseId(req, res, id)) return;
         const auto path = channelLogPathOf(id);
         if (path.empty()) { writeError(res, R::NotFound); return; }
+        auto slot = streams->acquire(streamUserOf(rb, req));
+        if (!slot) { refuseStream(res); return; }
 
         struct StreamState {
             std::filesystem::path path;
@@ -2221,7 +2248,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         res.set_header("X-Accel-Buffering", "no");
         res.set_chunked_content_provider(
             "text/event-stream",
-            [state](std::size_t, httplib::DataSink& sink) -> bool {
+            [state, slot](std::size_t, httplib::DataSink& sink) -> bool {
                 using namespace std::chrono_literals;
                 std::error_code ec2;
                 if (!std::filesystem::exists(state->path, ec2) || ec2) {
@@ -2667,7 +2694,9 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
     });
 
     s.Get("/api/system/host_metrics/stream",
-          [](const httplib::Request&, httplib::Response& res) {
+          [streams, rb](const httplib::Request& req, httplib::Response& res) {
+        auto slot = streams->acquire(streamUserOf(rb, req));
+        if (!slot) { refuseStream(res); return; }
         res.set_header("Cache-Control",     "no-cache");
         res.set_header("X-Accel-Buffering", "no");  // disable nginx buffering
 
@@ -2679,7 +2708,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
 
         res.set_chunked_content_provider(
             "text/event-stream",
-            [state](std::size_t, httplib::DataSink& sink) -> bool {
+            [state, slot](std::size_t, httplib::DataSink& sink) -> bool {
                 using namespace std::chrono_literals;
                 auto curr = liveqx::metrics::HostMetricsReader::sample();
                 nlohmann::json payload = state->have_prev
@@ -6588,6 +6617,18 @@ void ControlApi::setBrokerHooks(std::function<std::string()> status, std::functi
     impl_->broker_status = std::move(status);
     impl_->broker_sync   = std::move(sync);
     impl_->broker_update = std::move(update);
+}
+
+void ControlApi::setLimits(const Limits& limits) {
+    // The default pool is as many workers as the machine has cores (at least 8): a dozen open
+    // streams and the API stands still. Larger, and the streams capped to leave most of it free.
+    const int workers = std::clamp(limits.worker_threads, 16, 1024);
+    const int streams = std::clamp(limits.max_streams, 1, workers - 8);
+    const int per_user = std::clamp(limits.max_streams_per_user, 1, streams);
+    if (impl_->server)
+        impl_->server->new_task_queue = [workers] { return new httplib::ThreadPool(static_cast<size_t>(workers)); };
+    impl_->streams->configure(streams, per_user);
+    LOG_INFO("ControlApi: {} worker threads, at most {} open streams ({} per user)", workers, streams, per_user);
 }
 
 void ControlApi::setOnTlsReload(std::function<void()> cb) {

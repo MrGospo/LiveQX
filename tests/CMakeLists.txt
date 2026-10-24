@@ -363,6 +363,7 @@ add_executable(liveqx-itests
     test_control_api_tls.cpp
     test_control_api_mounts.cpp
     test_control_api_players.cpp
+    test_stream_cap.cpp
     test_player_scope_rest.cpp
     test_player_command_rest.cpp
     test_metrics_mounts.cpp
