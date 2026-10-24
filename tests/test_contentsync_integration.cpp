@@ -17,6 +17,7 @@
 #include "core/FramePool.h"
 #include "core/Timeline.h"
 #include "metrics/ChannelMetrics.h"
+#include "test_media.h"
 
 namespace fs = std::filesystem;
 
@@ -39,10 +40,9 @@ protected:
         fs::remove_all(root_, ec);
     }
 
-    // tests/test_media is reachable because the itests target sets
-    // WORKING_DIRECTORY=${CMAKE_SOURCE_DIR}.
+    // The sample files are tracked in tests/data/media (see test_media.h).
     fs::path copyToShare(const std::string& filename, const std::string& as = {}) {
-        const fs::path src = fs::path("test_media") / filename;
+        const fs::path src = fs::path(testMedia(filename));
         const fs::path dst = share_ / (as.empty() ? filename : as);
         fs::copy_file(src, dst, fs::copy_options::overwrite_existing);
         // Backdate so the next two scans see identical mtime → ShareScanner

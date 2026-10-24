@@ -18,6 +18,7 @@
 #include "core/Timeline.h"
 #include "metrics/ChannelHealth.h"
 #include "utils/Log.h"
+#include "test_media.h"
 
 using nlohmann::json;
 
@@ -183,15 +184,15 @@ TEST(ChannelInstancePlaylist, EmptyOnFreshBuild) {
 TEST(ChannelInstancePlaylist, ReplaceWithImagesPopulatesPlaylist) {
     auto ch = ChannelInstance::build(minimalCfg());
     json items = json::array({
-        item("test_media/photo1.png", 3.0),
-        item("test_media/photo2.png", 2.0),
+        item(testMedia("photo1.png"), 3.0),
+        item(testMedia("photo2.png"), 2.0),
     });
     EXPECT_EQ(ch->replacePlaylist(items), PR::Ok);
 
     auto pl = ch->playlistJson();
     ASSERT_EQ(pl.size(), 2u);
-    EXPECT_EQ(pl[0]["path"], "test_media/photo1.png");
-    EXPECT_EQ(pl[1]["path"], "test_media/photo2.png");
+    EXPECT_EQ(pl[0]["path"], testMedia("photo1.png"));
+    EXPECT_EQ(pl[1]["path"], testMedia("photo2.png"));
     EXPECT_FALSE(pl[0]["pending_remove"]);
 }
 
@@ -210,11 +211,11 @@ TEST(ChannelInstancePlaylist, ReplaceWithBadPathFails) {
 
 TEST(ChannelInstancePlaylist, AppendExtendsAndReportsFirstIdx) {
     auto ch = ChannelInstance::build(minimalCfg());
-    ASSERT_EQ(ch->replacePlaylist(json::array({ item("test_media/photo1.png", 2.0) })),
+    ASSERT_EQ(ch->replacePlaylist(json::array({ item(testMedia("photo1.png"), 2.0) })),
               PR::Ok);
 
     int first = -1;
-    EXPECT_EQ(ch->appendPlaylist(json::array({ item("test_media/photo2.png", 2.0) }),
+    EXPECT_EQ(ch->appendPlaylist(json::array({ item(testMedia("photo2.png"), 2.0) }),
                                  &first),
               PR::Ok);
     EXPECT_EQ(first, 1);
@@ -226,9 +227,9 @@ TEST(ChannelInstancePlaylist, RemoveAtNonAnchoredIsPhysical) {
     // is a physical removal regardless of run state.
     auto ch = ChannelInstance::build(minimalCfg());
     ASSERT_EQ(ch->replacePlaylist(json::array({
-                  item("test_media/photo1.png", 2.0),
-                  item("test_media/photo2.png", 2.0),
-                  item("test_media/photo1.png", 2.0),
+                  item(testMedia("photo1.png"), 2.0),
+                  item(testMedia("photo2.png"), 2.0),
+                  item(testMedia("photo1.png"), 2.0),
               })), PR::Ok);
 
     bool was_active = true;
@@ -237,8 +238,8 @@ TEST(ChannelInstancePlaylist, RemoveAtNonAnchoredIsPhysical) {
 
     auto pl = ch->playlistJson();
     ASSERT_EQ(pl.size(), 2u);
-    EXPECT_EQ(pl[0]["path"], "test_media/photo1.png");
-    EXPECT_EQ(pl[1]["path"], "test_media/photo1.png");
+    EXPECT_EQ(pl[0]["path"], testMedia("photo1.png"));
+    EXPECT_EQ(pl[1]["path"], testMedia("photo1.png"));
 }
 
 TEST(ChannelInstancePlaylist, RemoveAtAnchoredMarksPending) {
@@ -246,8 +247,8 @@ TEST(ChannelInstancePlaylist, RemoveAtAnchoredMarksPending) {
     // is deferred to slot wrap; pending_remove flag is exposed via JSON.
     auto ch = ChannelInstance::build(minimalCfg());
     ASSERT_EQ(ch->replacePlaylist(json::array({
-                  item("test_media/photo1.png", 2.0),
-                  item("test_media/photo2.png", 2.0),
+                  item(testMedia("photo1.png"), 2.0),
+                  item(testMedia("photo2.png"), 2.0),
               })), PR::Ok);
 
     bool was_active = false;
@@ -262,7 +263,7 @@ TEST(ChannelInstancePlaylist, RemoveAtAnchoredMarksPending) {
 
 TEST(ChannelInstancePlaylist, RemoveAtOutOfRange) {
     auto ch = ChannelInstance::build(minimalCfg());
-    ASSERT_EQ(ch->replacePlaylist(json::array({ item("test_media/photo1.png", 2.0) })),
+    ASSERT_EQ(ch->replacePlaylist(json::array({ item(testMedia("photo1.png"), 2.0) })),
               PR::Ok);
     EXPECT_EQ(ch->removeAt(99), PR::IndexOutOfRange);
     EXPECT_EQ(ch->removeAt(-1), PR::IndexOutOfRange);
@@ -271,8 +272,8 @@ TEST(ChannelInstancePlaylist, RemoveAtOutOfRange) {
 TEST(ChannelInstancePlaylist, ClearEmptiesPlaylist) {
     auto ch = ChannelInstance::build(minimalCfg());
     ASSERT_EQ(ch->replacePlaylist(json::array({
-                  item("test_media/photo1.png", 2.0),
-                  item("test_media/photo2.png", 2.0),
+                  item(testMedia("photo1.png"), 2.0),
+                  item(testMedia("photo2.png"), 2.0),
               })), PR::Ok);
     EXPECT_EQ(ch->clearPlaylist(), PR::Ok);
     EXPECT_EQ(ch->playlistJson().size(), 0u);
@@ -281,19 +282,19 @@ TEST(ChannelInstancePlaylist, ClearEmptiesPlaylist) {
 TEST(ChannelInstancePlaylist, NotifyDeletedRemovesByPath) {
     auto ch = ChannelInstance::build(minimalCfg());
     ASSERT_EQ(ch->replacePlaylist(json::array({
-                  item("test_media/photo1.png", 2.0),
-                  item("test_media/photo2.png", 2.0),
+                  item(testMedia("photo1.png"), 2.0),
+                  item(testMedia("photo2.png"), 2.0),
               })), PR::Ok);
 
-    EXPECT_EQ(ch->notifyDeleted("test_media/photo2.png"), PR::Ok);
+    EXPECT_EQ(ch->notifyDeleted(testMedia("photo2.png")), PR::Ok);
     auto pl = ch->playlistJson();
     ASSERT_EQ(pl.size(), 1u);
-    EXPECT_EQ(pl[0]["path"], "test_media/photo1.png");
+    EXPECT_EQ(pl[0]["path"], testMedia("photo1.png"));
 }
 
 TEST(ChannelInstancePlaylist, NotifyDeletedUnknownPath) {
     auto ch = ChannelInstance::build(minimalCfg());
-    ASSERT_EQ(ch->replacePlaylist(json::array({ item("test_media/photo1.png", 2.0) })),
+    ASSERT_EQ(ch->replacePlaylist(json::array({ item(testMedia("photo1.png"), 2.0) })),
               PR::Ok);
     EXPECT_EQ(ch->notifyDeleted("not/in/playlist.png"), PR::NotFound);
     EXPECT_EQ(ch->notifyDeleted(""), PR::BadJson);
@@ -306,7 +307,7 @@ TEST(ChannelInstancePlaylist, ManagedByContentSyncRefusesMutations) {
         {"cache_path", "/tmp/some-cache"},
     };
     auto ch = ChannelInstance::build(cfg);
-    json items = json::array({ item("test_media/photo1.png", 2.0) });
+    json items = json::array({ item(testMedia("photo1.png"), 2.0) });
 
     EXPECT_EQ(ch->replacePlaylist(items),  PR::ManagedByContentSync);
     EXPECT_EQ(ch->appendPlaylist(items),   PR::ManagedByContentSync);
@@ -1472,8 +1473,8 @@ TEST(ChannelInstanceLiveStatus, EmptyForFileOnlyPlaylist) {
     auto cfg = minimalCfg();
     auto ch = ChannelInstance::build(cfg);
     json items = json::array({
-        item("test_media/photo1.png", 3.0),
-        item("test_media/photo2.png", 2.0),
+        item(testMedia("photo1.png"), 3.0),
+        item(testMedia("photo2.png"), 2.0),
     });
     ASSERT_EQ(ch->replacePlaylist(items), ChannelInstance::PlaylistResult::Ok);
     auto j = ch->liveStatusJson();
@@ -1525,9 +1526,9 @@ TEST(ChannelInstanceLive, ReplacePlaylistWithLiveEntryBuildsLiveClip) {
 TEST(ChannelInstanceLive, MixedFileAndLivePlaylistKeepsBothInOrder) {
     auto ch = ChannelInstance::build(minimalCfg());
     json items = json::array({
-        item("test_media/photo1.png", 3.0),
+        item(testMedia("photo1.png"), 3.0),
         liveMulticastItem("cam-2", "233.252.0.11", 49510),
-        item("test_media/photo2.png", 2.0),
+        item(testMedia("photo2.png"), 2.0),
     });
     ASSERT_EQ(ch->replacePlaylist(items), PR::Ok);
 
@@ -1560,7 +1561,7 @@ TEST(ChannelInstanceLive, ReplacePlaylistRejectsLiveWithoutId) {
 
 TEST(ChannelInstanceLive, AppendPlaylistAcceptsLiveEntry) {
     auto ch = ChannelInstance::build(minimalCfg());
-    json initial = json::array({ item("test_media/photo1.png", 3.0) });
+    json initial = json::array({ item(testMedia("photo1.png"), 3.0) });
     ASSERT_EQ(ch->replacePlaylist(initial), PR::Ok);
 
     int first_idx = -1;

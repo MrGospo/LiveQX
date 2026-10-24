@@ -17,6 +17,7 @@
 #include <fstream>
 
 #include "content/CacheManager.h"
+#include "test_media.h"
 
 namespace fs = std::filesystem;
 
@@ -36,10 +37,9 @@ protected:
         fs::remove_all(root_, ec);
     }
 
-    // Copy bytes from the project test_media to our tmp share dir.
+    // Copy bytes from the tracked sample files (see test_media.h) to our tmp share dir.
     fs::path copyFromTestMedia(const std::string& filename) {
-        // Tests run with WORKING_DIRECTORY=${CMAKE_SOURCE_DIR}, so test_media/* is reachable.
-        const fs::path src = fs::path("test_media") / filename;
+        const fs::path src = fs::path(testMedia(filename));
         const fs::path dst = share_ / filename;
         fs::copy_file(src, dst, fs::copy_options::overwrite_existing);
         return dst;

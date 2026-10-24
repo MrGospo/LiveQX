@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <stdexcept>
 #include "clips/ClipFactory.h"
+#include "test_media.h"
 
 // Image clips: файлы не открываются при create(), prepare() вызывается отдельно.
 TEST(ClipFactoryTest, ImageExtensionsProduceNonNull) {
@@ -23,7 +24,7 @@ TEST(ClipFactoryTest, NonExistentVideoReturnsNull) {
 
 // Реальный тестовый файл → не nullptr.
 TEST(ClipFactoryTest, RealVideoFileProducesNonNull) {
-    PlaylistItem item{ "test_media/clip.mp4", 0.0, {} };
+    PlaylistItem item{ testMedia("clip.mp4"), 0.0, {} };
     auto clip = ClipFactory::create(item, 1280, 720);
     EXPECT_NE(clip, nullptr);
 }

@@ -569,7 +569,8 @@ set_target_properties(mock_ndi PROPERTIES
     PREFIX ""
     OUTPUT_NAME "mock_ndi")
 target_compile_definitions(liveqx-itests PRIVATE
-    MOCK_NDI_PATH="$<TARGET_FILE:mock_ndi>")
+    MOCK_NDI_PATH="$<TARGET_FILE:mock_ndi>"
+    LIVEQX_TEST_MEDIA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/media")
 add_dependencies(liveqx-itests mock_ndi)
 
 # ─── SIMD micro-bench (manual run only) ──────────────────────────────────────
