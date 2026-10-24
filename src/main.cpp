@@ -1595,6 +1595,46 @@ int main(int argc, char* argv[]) {
         }
 
         std::atomic<bool> tls_reload_pending{false};
+
+        // The server's own certificate (tls.mode auto) is renewed while the server runs, not only at start:
+        // a server that is not restarted for a year would otherwise be left with one that has ended. When a
+        // new one has been issued the listener is rebuilt exactly as after "regenerate" in the interface, and
+        // the device port follows the files by itself. A failed attempt changes nothing: the old certificate
+        // keeps serving and the next look tries again. The first look is an hour after start (the start has
+        // just checked), then every six hours.
+        std::jthread server_cert_renewal;
+        if (tls_bindings.mode == "auto" && !tls_bindings.tls_dir.empty()) {
+            server_cert_renewal = std::jthread(
+                [&, tls_dir = tls_bindings.tls_dir, san_extra = tls_bindings.san_extra](std::stop_token st) {
+                    auto nap = [&](std::chrono::seconds total) {
+                        for (std::int64_t i = 0; i < total.count() && !st.stop_requested(); ++i)
+                            std::this_thread::sleep_for(std::chrono::seconds(1));
+                    };
+                    nap(std::chrono::hours(1));
+                    while (!st.stop_requested()) {
+                        std::string err;
+                        const auto r = renewServerCertIfDue(tls_dir, san_extra, err);
+                        if (r == ServerCertRenewal::Renewed) {
+                            LOG_INFO("tls: the server certificate was close to its end and has been renewed");
+                            sad::AuditEvent ev;
+                            ev.category       = sad::Category::System;
+                            ev.action         = "tls.auto_renew";
+                            ev.actor_username = "system";
+                            ev.target_type    = "tls";
+                            ev.summary        = "server certificate renewed on its own";
+                            audit_logger.log(std::move(ev));
+                            if (g_running.load(std::memory_order_acquire)) {
+                                tls_reload_pending.store(true, std::memory_order_release);
+                                g_running.store(false, std::memory_order_release);
+                            }
+                        } else if (r == ServerCertRenewal::Failed) {
+                            LOG_ERROR("tls: the server certificate is close to its end and could not be renewed: {}", err);
+                        }
+                        nap(r == ServerCertRenewal::Failed ? std::chrono::hours(1) : std::chrono::hours(6));
+                    }
+                });
+        }
+
         do {
             ControlApi api(api_port, manager, &metrics, livez_opts, &gateways,
                            &auth_svc, &ldap_repo, &smtp_repo, &rbac,

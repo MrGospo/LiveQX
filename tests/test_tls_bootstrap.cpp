@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 
 #include "utils/Paths.h"
 #include "utils/Tls.h"
@@ -139,4 +140,65 @@ TEST_F(TlsBootstrapTest, InvalidTlsSectionFails) {
     bool failed = false;
     resolveTlsBindings({{"tls", {{"mode", "bogus"}}}}, makePaths(), "0.0.0.0", failed);
     EXPECT_TRUE(failed);
+}
+
+// ─── The certificate is renewed while the server runs, not only at start ────
+namespace {
+std::int64_t realNow() {
+    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+}  // namespace
+
+TEST_F(TlsBootstrapTest, ACertificateIsDueOnlyWithinTheLastThirtyDays) {
+    bool failed = false;
+    const auto b = resolveTlsBindings(json::object(), makePaths(), "0.0.0.0", failed);
+    ASSERT_FALSE(failed);
+    const auto end = liveqx::tls::readCertInfo(b.cert_path).not_after_unix;
+    const std::int64_t day = 86400;
+    EXPECT_FALSE(serverCertDue(b.cert_path));
+    EXPECT_FALSE(serverCertDue(b.cert_path, end - 31 * day));
+    EXPECT_TRUE(serverCertDue(b.cert_path, end - 30 * day + 1));
+    EXPECT_TRUE(serverCertDue(b.cert_path, end + day)) << "one that has ended is due, not skipped";
+    EXPECT_TRUE(serverCertDue(b.tls_dir / "missing.crt")) << "none at all is due";
+}
+
+TEST_F(TlsBootstrapTest, AnUnreadableCertificateIsDue) {
+    bool failed = false;
+    const auto b = resolveTlsBindings(json::object(), makePaths(), "0.0.0.0", failed);
+    ASSERT_FALSE(failed);
+    { std::ofstream(b.cert_path, std::ios::trunc) << "not a certificate"; }
+    EXPECT_TRUE(serverCertDue(b.cert_path));
+}
+
+TEST_F(TlsBootstrapTest, TheTimerLeavesAGoodCertificateAloneAndRenewsOneThatIsDue) {
+    bool failed = false;
+    const auto b = resolveTlsBindings(json::object(), makePaths(), "0.0.0.0", failed);
+    ASSERT_FALSE(failed);
+    const auto before = liveqx::tls::readCertInfo(b.cert_path);
+    std::string err;
+
+    EXPECT_EQ(renewServerCertIfDue(b.tls_dir, {}, err), ServerCertRenewal::NotDue);
+    EXPECT_EQ(liveqx::tls::readCertInfo(b.cert_path).fingerprint_sha256, before.fingerprint_sha256);
+
+    // A year and a bit later, as the clock sees it: due. The certificate is replaced, key and all.
+    const auto later = before.not_after_unix - 5 * 86400;
+    ASSERT_EQ(renewServerCertIfDue(b.tls_dir, {}, err, later), ServerCertRenewal::Renewed) << err;
+    const auto after = liveqx::tls::readCertInfo(b.cert_path);
+    EXPECT_NE(after.fingerprint_sha256, before.fingerprint_sha256);
+    EXPECT_GE(after.not_after_unix, before.not_after_unix) << "issued from the real clock, so not earlier than the old one";
+    EXPECT_TRUE(liveqx::tls::verifyKeyPair(b.cert_path, b.key_path).ok) << "the new certificate matches the new key";
+    EXPECT_FALSE(serverCertDue(b.cert_path, realNow())) << "and it is good for a year again";
+}
+
+TEST_F(TlsBootstrapTest, AFailedRenewalLeavesTheOldCertificateServing) {
+    bool failed = false;
+    const auto b = resolveTlsBindings(json::object(), makePaths(), "0.0.0.0", failed);
+    ASSERT_FALSE(failed);
+    const auto before = liveqx::tls::readCertInfo(b.cert_path);
+    // The CA key is gone: nothing can be signed.
+    fs::remove(b.tls_dir / "ca.key");
+    std::string err;
+    EXPECT_EQ(renewServerCertIfDue(b.tls_dir, {}, err, before.not_after_unix - 5 * 86400), ServerCertRenewal::Failed);
+    EXPECT_FALSE(err.empty());
+    EXPECT_EQ(liveqx::tls::readCertInfo(b.cert_path).fingerprint_sha256, before.fingerprint_sha256);
 }
