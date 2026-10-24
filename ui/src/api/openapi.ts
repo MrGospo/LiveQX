@@ -6154,6 +6154,23 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /**
+                 * @description `too_many_streams` — открытых потоков (события, журнал канала, показатели хоста) уже
+                 *     столько, сколько разрешено всего (`api_max_streams`, по умолчанию 24) или этому
+                 *     пользователю (`api_max_streams_per_user`, по умолчанию 6). Каждый открытый поток держит
+                 *     рабочий поток сервера, поэтому их число ограничено, чтобы остальной API всегда был
+                 *     свободен. Заголовок `Retry-After: 5`; закрытый поток освобождает место. То же у
+                 *     `/api/channels/{id}/logs/stream` и `/api/system/host_metrics/stream`.
+                 */
+                429: {
+                    headers: {
+                        "Retry-After"?: string;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
                 /** @description EventBus not wired. */
                 503: {
                     headers: {
@@ -6392,10 +6409,2755 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/players": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List players
+         * @description Viewer+. Токены привязки здесь не отдаются никогда. `status`
+         *     присутствует, если от плеера уже приходило состояние.
+         *     Не-администратор видит только плееры в группах и объектах, которые ему
+         *     выдал администратор (`PUT /api/auth/users/{uid}/player-grants`); без
+         *     выданных прав — пустой список. Права читаются при каждом запросе, снятие
+         *     действует сразу.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    state?: "pending" | "active" | "revoked";
+                    /** @description Только плееры этой группы. */
+                    group_id?: number;
+                    /** @description Плееры всех групп этого объекта. */
+                    object_id?: number;
+                    /**
+                     * @description Состояние словами, как его видит человек: `online`/`offline` — только у
+                     *     привязанных (`active`), `pending`, `revoked` — как есть. Сужает список, но не счётчики.
+                     */
+                    status?: "online" | "offline" | "pending" | "revoked";
+                    /**
+                     * @description Поиск по названию экрана, группы и объекта, без учёта регистра для латиницы и
+                     *     кириллицы (остальные алфавиты — точно). Сужает и список, и счётчики.
+                     */
+                    q?: string;
+                    limit?: number;
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /**
+                 * @description Страница списка. Порядок: по названию без учёта регистра (латиница, затем
+                 *     кириллица), затем по идентификатору. Права и фильтры применяются ко всему
+                 *     набору до среза, поэтому `total` и `counts` верны для всего парка.
+                 */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            players: components["schemas"]["Player"][];
+                            /** @description Сколько экранов подходит под все фильтры (до среза). */
+                            total: number;
+                            /** @description По состояниям, с учётом места и поиска, но без фильтра `status`. */
+                            counts: {
+                                online: number;
+                                offline: number;
+                                pending: number;
+                                revoked: number;
+                            };
+                        };
+                    };
+                };
+                /** @description `invalid_state`, `invalid_status`, `invalid_query` или `invalid_paging`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Модуль плееров не подключён (`players_not_configured`). */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Create a player and get its pairing package
+         * @description Admin. Создаёт плеер в состоянии `pending` и возвращает пакет
+         *     привязки (A3). `bootstrap_token` показывается ТОЛЬКО в этом ответе.
+         *     Пока не заданы адреса сервера, порта устройств и брокера
+         *     (`PUT /api/players/settings`) — `409 not_configured`; если нет
+         *     корневого сертификата серверного TLS — `409 ca_unavailable`.
+         *     Audit event: `player.register`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        /**
+                         * Format: int64
+                         * @description Группа, в которой будет плеер. Плеер всегда состоит ровно в одной группе.
+                         */
+                        group_id: number;
+                        /**
+                         * @description По умолчанию — из настроек модуля.
+                         * @enum {string}
+                         */
+                        clock_policy?: "strict" | "relaxed";
+                    };
+                };
+            };
+            responses: {
+                /** @description Created. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PairingPackage"];
+                    };
+                };
+                /** @description `invalid_json`, `invalid_body`, `invalid_name`, `invalid_clock_policy`, `group_required`, `invalid_group`, `group_not_found`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_configured` или `ca_unavailable`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Модуль плееров не подключён. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/players/enroll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pair a player (exchange a one-time token + CSR for a certificate)
+         * @description Открытый endpoint: у привязываемого плеера ещё нет учётной записи,
+         *     только одноразовый `bootstrap_token` из пакета привязки. Плеер сам
+         *     создаёт ключ и CSR (ECDSA P-256 / SHA-256, не более 4096 байт);
+         *     сервер ключ не видит. CN сертификата всегда равен `player_id`, CN из
+         *     CSR игнорируется. Токен сгорает при первой успешной выдаче; CSR,
+         *     который не удалось подписать, токен не сжигает.
+         *
+         *     Все причины отказа по токену (неверный, просрочен, использован,
+         *     плеера нет или он отозван) намеренно неразличимы: `401 invalid_token`.
+         *     Попытки подбора ограничиваются по адресу клиента (`429`, заголовок
+         *     `Retry-After`); по `player_id` не ограничиваются: он не секрет, и
+         *     постороннему нельзя дать возможность блокировать чужую привязку. Каждый ответ, включая ошибки,
+         *     содержит `X-Server-Time` (RFC 3339 UTC).
+         *
+         *     Центр устройств создаётся только церемонией (`--device-ca-*`), сам
+         *     сервер его не создаёт: до её завершения — `503 ca_unavailable`.
+         *     Если у сервера настроен NTP и его часы заметно расходятся с ним —
+         *     `503 server_clock_unsynced`.
+         *     Audit: `player.enroll` и `player.enroll_failed` — категория `player`;
+         *     `player.enroll_denied` (неверный токен, лимит, негодный CSR) —
+         *     категория `access`. Причина — в details; токен и CSR не пишутся.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @example 1 */
+                        schema?: number;
+                        /** Format: uuid */
+                        player_id: string;
+                        bootstrap_token: string;
+                        csr_pem: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Certificate issued. */
+                200: {
+                    headers: {
+                        "X-Server-Time"?: string;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example 1 */
+                            schema: number;
+                            client_cert_pem: string;
+                            /** @description Промежуточный сертификат центра устройств; поля нет при одноуровневом центре. */
+                            client_chain_pem?: string;
+                        };
+                    };
+                };
+                /** @description `invalid_json` или `invalid_csr`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `invalid_token` (причины не различаются). */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `rate_limited`; см. `Retry-After`. */
+                429: {
+                    headers: {
+                        "Retry-After"?: number;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `ca_unavailable`, `server_clock_unsynced` или модуль плееров не подключён. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/users/{uid}/player-grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: number;
+            };
+            cookie?: never;
+        };
+        /**
+         * Rights of a user on players, by object and group
+         * @description Admin. Что администратор выдал этому пользователю. Запись, чья группа или
+         *     объект уже удалены, помечается `missing` (при удалении такие права
+         *     снимаются сами).
+         *     `revision` — отпечаток текущего списка: тот же набор прав даёт тот же отпечаток
+         *     в любом порядке. Его возвращают в `PUT`, чтобы не затереть чужую правку.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    uid: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description ok */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            grants: components["schemas"]["PlayerGrant"][];
+                            /** @description Отпечаток списка (для PUT). */
+                            revision: string;
+                        };
+                    };
+                };
+                /** @description `user_not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        /**
+         * Replace a user's rights on players
+         * @description Admin. Заменяет весь список одним запросом (все или ничего). Права
+         *     читаются при каждом запросе, а не из токена: выданное и снятое действует
+         *     сразу. Ошибки содержат `index` записи.
+         *
+         *     Правила: `scope` — `object` или `group`; объект/группа должны существовать
+         *     (`unknown_scope`); `can_command_object` только для `object`
+         *     (`invalid_flag`); у Viewer не бывает `can_command_*` и `can_move`
+         *     (`flag_not_allowed_for_role`); повтор одной области — `duplicate_grant`;
+         *     не более 500 записей. Необязательное `revision` из `GET`: если права с тех
+         *     пор изменил кто-то другой, замены не будет (`409 grants_changed`) — редактор
+         *     читает список заново. Без `revision` список заменяется без этой проверки.
+         *     Право на объект действует на все его группы,
+         *     в том числе будущие. Команды на группу/объект и «всем» — этапы команд;
+         *     «всем» только администратору.
+         *     Audit event: `player.grants_update` (категория player).
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    uid: number;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        grants: components["schemas"]["PlayerGrantInput"][];
+                    };
+                };
+            };
+            responses: {
+                /** @description The new list and its revision. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            grants: components["schemas"]["PlayerGrant"][];
+                            revision: string;
+                        };
+                    };
+                };
+                /** @description `invalid_body`, `invalid_scope`, `invalid_id`, `invalid_flag`, `unknown_scope`, `flag_not_allowed_for_role`, `duplicate_grant`, `too_many_grants`, `invalid_revision`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `user_not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `grants_changed` — права изменил кто-то другой, прочитайте список заново. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/player-objects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The tree of objects and groups with player counts
+         * @description Viewer+. Иерархия: все → объект → группа; у группы — число плееров.
+         *     Администратор видит всё. Остальные — только выданный объект и группы:
+         *     право на объект показывает его целиком, право на группу — эту группу и
+         *     имя её объекта как вместилища; остальное скрыто. В `can` у группы и объекта —
+         *     что ЭТОМУ человеку здесь можно (для кнопок интерфейса; решение по каждому
+         *     действию сервер всё равно принимает сам).
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description ok */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            objects: components["schemas"]["PlayerObject"][];
+                        };
+                    };
+                };
+                /** @description Модуль плееров не подключён. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Create an object
+         * @description Admin. Имя объекта уникально. Audit event: `player.object_create`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlayerObjectBrief"];
+                    };
+                };
+                /** @description `invalid_name`, `invalid_json`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `name_taken`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/player-objects/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Rename an object
+         * @description Admin. Audit event: `player.object_rename`.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Renamed. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlayerObjectBrief"];
+                    };
+                };
+                /** @description `invalid_name`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `name_taken`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        /**
+         * Remove an empty object
+         * @description Admin. Объект, в котором остались группы, удалить нельзя (`409 not_empty`).
+         *     Идентификаторы удалённых объектов не используются повторно.
+         *     Audit event: `player.object_delete`.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description `not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_empty`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/player-objects/{id}/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a group inside an object
+         * @description Admin. Имя группы уникально в пределах объекта.
+         *     Audit event: `player.group_create`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlayerGroup"];
+                    };
+                };
+                /** @description `invalid_name`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Нет такого объекта. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `name_taken`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/player-groups/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Rename a group
+         * @description Admin. Audit event: `player.group_rename`.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Renamed. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description `invalid_name`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `name_taken`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        /**
+         * Remove an empty group
+         * @description Admin. Группу, в которой есть плееры, удалить нельзя (`409 not_empty`).
+         *     Audit event: `player.group_delete`.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description `not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_empty`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/players/{id}/group": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Move a player to another group
+         * @description Operator+ с правом «переносить экраны» на обе группы (откуда и куда) либо
+         *     на их общий объект; между объектами переносит только администратор.
+         *     Администратор — всегда. Не-администратору неизвестная группа и группа без
+         *     прав отвечают одинаково (`403 forbidden`); плеер вне прав — `404`.
+         *     Перенос действует сразу и пишется в журнал плеера (`moved`) и в аудит
+         *     (`player.move`).
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** Format: int64 */
+                        group_id: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description The player with its new place. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Player"];
+                    };
+                };
+                /** @description `group_required`, `invalid_group`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_found` (плеер) или `group_not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/players/{id}/command": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a command to one screen
+         * @description Operator+ с доступом к группе экрана. Команда уходит по MQTT
+         *     (`liveqx/v1/players/<id>/commands`, QoS 1, не retained, срок жизни в брокере
+         *     `command_ttl_s`); подтверждение плеер присылает в heartbeat
+         *     (`last_command_result`). Пока экран не подтвердил команду, такую же
+         *     команду ему отправить нельзя (`409 command_in_progress`, в ответе id той,
+         *     что держит блокировку). Блокировку снимают подтверждение, отказ плеера,
+         *     таймаут по типу команды или администратор. Плеер вне прав — `404`.
+         *     Аудит: `player.command_sent`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        type: "restart_player" | "reboot_screen" | "reload_playlist";
+                    };
+                };
+            };
+            responses: {
+                /** @description Accepted by the broker; the screen has not confirmed yet. */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlayerCommand"] & {
+                            player_online?: boolean;
+                        };
+                    };
+                };
+                /** @description `invalid_type`, `unsupported_type`, `invalid_json`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `forbidden` — нет права командовать этим экраном. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `command_in_progress` (с `command_id`) или `player_not_active`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `broker_unavailable` — брокер не принял команду; блокировки нет. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/players/{id}/commands": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Recent commands of one screen
+         * @description Последние 50 команд, новые первыми. Видны тем, кто видит экран.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The log. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            commands?: components["schemas"]["PlayerCommand"][];
+                        };
+                    };
+                };
+                /** @description `not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/players/{id}/commands/{cid}/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                cid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Lift the block of a command by hand
+         * @description Только администратор. Нужна, когда экран не подтвердил команду, а ждать
+         *     таймаута не хочется. Команда получает состояние `released`. Аудит:
+         *     `player.command_release`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    cid: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The released command. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlayerCommand"];
+                    };
+                };
+                /** @description `command_not_found` (нет такой команды у этого экрана). */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_pending` — команда уже закрыта. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/player-groups/{id}/command": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a command to every screen of a group
+         * @description Operator+ с отметкой «команда группе» на этой группе или её объекте. `reload_playlist` — любому
+         *     оператору с доступом к группе. Чужая группа — `404`.
+         *     Подтверждение: `confirm_phrase` — фраза вида «<команда> <group|object> <название>» (для
+         *     группы название — «объект / группа»; для «всех» — «<команда> all»; регистр и пробелы не
+         *     важны) и `expected_count` — число подключённых и неподключённых экранов цели, которое
+         *     показал интерфейс. `dry_run: true` ничего не отправляет и возвращает нужную фразу и
+         *     число. Если состав изменился (`409 expected_count_mismatch`, в ответе `actual`) или
+         *     какой-то экран ещё ждёт такую же команду (`409 screens_busy`, список `busy`) —
+         *     не уходит ничего. Экраны не в сети пропускаются и перечисляются в `skipped_offline`.
+         *     Аудит: сводная строка `player.command_group|object|all` и строка `player.command_sent`
+         *     на каждого получателя.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["BulkCommandRequest"];
+                };
+            };
+            responses: {
+                /** @description Отчёт (или план при `dry_run`). */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BulkCommandReport"];
+                    };
+                };
+                /** @description `invalid_type`, `unsupported_type`, `invalid_expected_count`, `confirm_phrase_mismatch`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `forbidden` — нет нужной отметки. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_found` — цели нет или она вне прав. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `expected_count_mismatch`, `screens_busy`, `no_targets`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `broker_unavailable`. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/player-objects/{id}/command": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a command to every screen of an object
+         * @description Operator+ с отметкой «команда объекту». Отметка «команда группе» её не заменяет.
+         *     Подтверждение: `confirm_phrase` — фраза вида «<команда> <group|object> <название>» (для
+         *     группы название — «объект / группа»; для «всех» — «<команда> all»; регистр и пробелы не
+         *     важны) и `expected_count` — число подключённых и неподключённых экранов цели, которое
+         *     показал интерфейс. `dry_run: true` ничего не отправляет и возвращает нужную фразу и
+         *     число. Если состав изменился (`409 expected_count_mismatch`, в ответе `actual`) или
+         *     какой-то экран ещё ждёт такую же команду (`409 screens_busy`, список `busy`) —
+         *     не уходит ничего. Экраны не в сети пропускаются и перечисляются в `skipped_offline`.
+         *     Аудит: сводная строка `player.command_group|object|all` и строка `player.command_sent`
+         *     на каждого получателя.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["BulkCommandRequest"];
+                };
+            };
+            responses: {
+                /** @description Отчёт (или план при `dry_run`). */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BulkCommandReport"];
+                    };
+                };
+                /** @description `invalid_type`, `unsupported_type`, `invalid_expected_count`, `confirm_phrase_mismatch`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `forbidden` — нет нужной отметки. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_found` — цели нет или она вне прав. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `expected_count_mismatch`, `screens_busy`, `no_targets`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `broker_unavailable`. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/players/command-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a command to every screen
+         * @description Только администратор.
+         *     Подтверждение: `confirm_phrase` — фраза вида «<команда> <group|object> <название>» (для
+         *     группы название — «объект / группа»; для «всех» — «<команда> all»; регистр и пробелы не
+         *     важны) и `expected_count` — число подключённых и неподключённых экранов цели, которое
+         *     показал интерфейс. `dry_run: true` ничего не отправляет и возвращает нужную фразу и
+         *     число. Если состав изменился (`409 expected_count_mismatch`, в ответе `actual`) или
+         *     какой-то экран ещё ждёт такую же команду (`409 screens_busy`, список `busy`) —
+         *     не уходит ничего. Экраны не в сети пропускаются и перечисляются в `skipped_offline`.
+         *     Аудит: сводная строка `player.command_group|object|all` и строка `player.command_sent`
+         *     на каждого получателя.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["BulkCommandRequest"];
+                };
+            };
+            responses: {
+                /** @description Отчёт (или план при `dry_run`). */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BulkCommandReport"];
+                    };
+                };
+                /** @description `invalid_type`, `unsupported_type`, `invalid_expected_count`, `confirm_phrase_mismatch`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `forbidden` — нет нужной отметки. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_found` — цели нет или она вне прав. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `expected_count_mismatch`, `screens_busy`, `no_targets`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `broker_unavailable`. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/command-jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Jobs that send a command in batches
+         * @description Operator+. Администратор видит все задания, остальные — только свои. Последние 50, новые первыми.
+         *     Задание создаёт любая групповая, объектная или общая команда: подключённые экраны делятся на
+         *     пачки (`command_batch_size`, по умолчанию 10); следующая пачка уходит, когда все команды
+         *     предыдущей закрыты (подтверждены, отклонены, по таймауту или вручную). Если в закрытой пачке
+         *     не вернулось больше `command_batch_stop_percent` (30) процентов — задание останавливается
+         *     (`stopped`, `stop_reason: too_many_unconfirmed`), остаток отменяется. Если, когда подошла
+         *     очередь пачки, сервер не соединён с брокером (только что перезапустился или брокер
+         *     перезапускается), пачка не проваливается, а ждёт брокера до пяти минут; не вернулся —
+         *     `stopped`, `stop_reason: broker_unavailable`. Задание хранится в базе и переживает
+         *     перезапуск сервера.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The jobs, without their screens. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            jobs?: components["schemas"]["CommandJob"][];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/command-jobs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * One job with its screens
+         * @description Тому, кто запустил, и администратору; чужое задание — `404`.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The job and every screen of it, by batch (-1 = not connected at the start). */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CommandJob"];
+                    };
+                };
+                /** @description `not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/command-jobs/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stop the rest of a job
+         * @description Тому, кто запустил, и администратору. Что уже ушло — остаётся и подтверждается как обычно;
+         *     неотправленное отменяется. Аудит: `player.command_job_cancel`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The cancelled job. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CommandJob"];
+                    };
+                };
+                /** @description `not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_running` — задание уже закончилось. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/players/broker": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * State of the MQTT broker link
+         * @description Только администратор. Ссылка на брокер включается в конфигурации сервера
+         *     (`players.broker.enabled`; хост, порт, проверка имени, период сверки — там же,
+         *     после правки нужен перезапуск). Здесь — её состояние и то, чего ей не хватает:
+         *     `readiness` показывает, есть ли центр устройств, корень для проверки сертификата
+         *     брокера, адрес брокера в настройках модуля и поддержка MQTT в сборке. Состояния:
+         *     `disabled`, `waiting` (нечем подключаться — причина в `detail`), `connecting`,
+         *     `connected`, `stopped`.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The state. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BrokerStatus"];
+                    };
+                };
+            };
+        };
+        /**
+         * Change how the server connects to the broker
+         * @description Только администратор. Любые из полей `host`, `port`, `verify_hostname`,
+         *     `reconcile_interval_s`; отсутствующее не меняется. Значения сохраняются в базе
+         *     (переживают перезапуск и сильнее файла конфигурации), работающая ссылка
+         *     переподключается сама. Ссылка должна быть включена в конфигурации
+         *     (`players.broker.enabled`), иначе `409 broker_disabled`.
+         *
+         *     Если меняется куда или как строго подключается сервер (адрес, порт, проверка имени),
+         *     сначала делается пробное подключение под удостоверением сервера (с другим MQTT
+         *     client id, рабочее соединение не трогается); применяется только если брокер ответил,
+         *     иначе `502 probe_failed` и ничего не меняется. `check_only: true` только проверяет;
+         *     `skip_check: true` применяет без проверки (брокер ещё не поднят) и это видно в аудите.
+         *     Смена одного периода сверки проверки не требует. Отключение `verify_hostname`
+         *     возвращает `warning: verify_hostname_disabled`. Аудит: `player.broker_update`.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        host?: string;
+                        port?: number;
+                        verify_hostname?: boolean;
+                        reconcile_interval_s?: number;
+                        check_only?: boolean;
+                        skip_check?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description Применено (`applied`), без изменений (`unchanged`) или результат проверки (`checked`, `ok`, `detail`). */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": Record<string, never>;
+                    };
+                };
+                /** @description `invalid_host`, `invalid_port`, `invalid_verify_hostname`, `invalid_reconcile_interval_s`, `unknown_field`, `check_only_and_skip_check`, `invalid_body`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `broker_disabled`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `probe_failed` — брокер не ответил; `detail` — что сказало соединение. Ничего не изменено. */
+                502: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/players/broker/reconcile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reconcile the broker with the players now
+         * @description Только администратор. Просит ссылку сверить брокер с базой плееров сейчас, не
+         *     дожидаясь периода. Ничего не ждёт: результат виден в `last_reconcile_*`
+         *     состояния. Аудит: `player.broker_reconcile`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Requested. */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            requested?: boolean;
+                        };
+                    };
+                };
+                /** @description `broker_disabled` — ссылка не включена. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/audit/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the audit trail
+         * @description Администратор читает всё. Остальные (в том числе наблюдатель) читают только события
+         *     категории `player` тех объектов и групп, аудит которых им выдал администратор
+         *     (отметка `can_view_audit` в правах на плееров); системный аудит им недоступен, а запрос
+         *     без выданного аудита — `403 forbidden`. Ограничение входит в сам запрос: счётчик
+         *     `total` и страницы считаются по разрешённому. Запрос другой области сужает до пустого,
+         *     шире разрешённого не выходит.
+         *
+         *     Каждая строка несёт область (`object_id`, `group_id`) — где находился экран на момент
+         *     события; для удалённого экрана, группы — место до удаления. Перенос экрана — одна строка
+         *     с двумя областями: куда (`object_id`, `group_id`) и откуда (`from_object_id`,
+         *     `from_group_id`). Её видят и те, у кого аудит старой группы, и те, у кого новой;
+         *     фильтры `object_id`/`group_id` находят её по любому концу, счётчик считает её один раз.
+         *     Обе области входят в подпись строки; строки, записанные прежними версиями формата
+         *     (без области, с одной областью), проверяются по тем правилам, по которым были записаны.
+         *     События, не относящиеся к месту (настройки, права), области не имеют и
+         *     не-администраторам не видны.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    from_ts?: number;
+                    to_ts?: number;
+                    category?: string;
+                    action?: string;
+                    actor_user_id?: number;
+                    actor_username?: string;
+                    target_type?: string;
+                    target_id?: string;
+                    request_id?: string;
+                    /** @description События объекта (всех его групп); перенос находится по любому концу. */
+                    object_id?: number;
+                    /** @description События группы; перенос находится по любому концу. */
+                    group_id?: number;
+                    limit?: number;
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The events, newest first. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            total?: number;
+                            limit?: number;
+                            offset?: number;
+                            events?: {
+                                /** Format: int64 */
+                                id?: number;
+                                /** Format: int64 */
+                                ts_ms?: number;
+                                category?: string;
+                                action?: string;
+                                target_type?: string;
+                                target_id?: string;
+                                /**
+                                 * Format: int64
+                                 * @description Только у строк с областью.
+                                 */
+                                object_id?: number;
+                                /**
+                                 * Format: int64
+                                 * @description Только у строк с областью.
+                                 */
+                                group_id?: number;
+                                /**
+                                 * Format: int64
+                                 * @description Только у переноса: откуда.
+                                 */
+                                from_object_id?: number;
+                                /**
+                                 * Format: int64
+                                 * @description Только у переноса: откуда.
+                                 */
+                                from_group_id?: number;
+                            }[];
+                        };
+                    };
+                };
+                /** @description `forbidden` — не администратор и аудит ни одной области не выдан. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/players/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Players module settings
+         * @description Admin.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description ok */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlayersSettings"];
+                    };
+                };
+                /** @description Модуль плееров не подключён. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        /**
+         * Change players module settings
+         * @description Admin. Частичное обновление: ключ со строкой или целым меняет
+         *     значение, `null` или пустая строка сбрасывает к умолчанию.
+         *     Всё или ничего. `server_url` и `device_api_url` — только `https://`,
+         *     `mqtt_broker_url` — только `mqtts://`; без логина/пароля, пути и
+         *     query. `ca_cert_pem` — необязательная подмена корня серверного TLS.
+         *     Audit event: `player.settings_update` (только имена ключей).
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        server_url?: string;
+                        device_api_url?: string;
+                        mqtt_broker_url?: string;
+                        ca_cert_pem?: string;
+                        token_ttl_days?: number;
+                        /** @enum {string} */
+                        clock_policy?: "strict" | "relaxed";
+                        command_ttl_s?: number;
+                        confirm_timeout_restart_s?: number;
+                        confirm_timeout_reboot_s?: number;
+                        confirm_timeout_reload_s?: number;
+                        command_batch_size?: number;
+                        command_batch_stop_percent?: number;
+                        events_retention_days?: number;
+                        commands_retention_days?: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description Updated settings. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlayersSettings"];
+                    };
+                };
+                /** @description `unknown_setting`, `invalid_server_url`, `invalid_device_api_url`, `invalid_mqtt_broker_url`, `invalid_ca_cert_pem`, `invalid_token_ttl_days`, `invalid_clock_policy`, `invalid_value`, `invalid_body`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Модуль плееров не подключён. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/players/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Идентификатор плеера (UUID v4, нижний регистр). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Player details with certificates and recent events
+         * @description Viewer+. Последние 50 событий смены состояния. Плеер вне выданных прав —
+         *     `404 not_found` (существование не раскрывается).
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Идентификатор плеера (UUID v4, нижний регистр). */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description ok */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlayerDetails"];
+                    };
+                };
+                /** @description `not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Модуль плееров не подключён. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        /**
+         * Delete a player
+         * @description Admin. Сначала отзывает действующие сертификаты (они остаются в CRL
+         *     до естественного истечения), затем удаляет плеера и его токены.
+         *     Причина — необязательный параметр `reason` (до 200 байт).
+         *     Audit event: `player.delete`.
+         */
+        delete: {
+            parameters: {
+                query?: {
+                    reason?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description Идентификатор плеера (UUID v4, нижний регистр). */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deleted. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RevokeResult"];
+                    };
+                };
+                /** @description `invalid_reason`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Модуль плееров не подключён. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/players/{id}/revoke-cert": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Идентификатор плеера (UUID v4, нижний регистр). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revoke the player's certificates
+         * @description Admin. Плеер переходит в `revoked`; действующие сертификаты уходят в
+         *     CRL. Повторный вызов безопасен (`revoked_certs` = 0).
+         *     Audit event: `player.revoke`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Идентификатор плеера (UUID v4, нижний регистр). */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        reason?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Revoked. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RevokeResult"];
+                    };
+                };
+                /** @description `invalid_json`, `invalid_body`, `invalid_reason`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Модуль плееров не подключён. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/players/{id}/reissue-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Идентификатор плеера (UUID v4, нижний регистр). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue a new pairing token
+         * @description Admin. Только для плеера в состоянии `pending`; прежние токены
+         *     перестают работать. Возвращает новый пакет привязки (токен — один раз).
+         *     Для уже привязанного или отозванного плеера — `POST …/re-enroll`.
+         *     Audit event: `player.token_reissue`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Идентификатор плеера (UUID v4, нижний регистр). */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description New pairing package. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PairingPackage"];
+                    };
+                };
+                /** @description `not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_pending`, `not_configured` или `ca_unavailable`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Модуль плееров не подключён. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/players/{id}/re-enroll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Идентификатор плеера (UUID v4, нижний регистр). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bind an enrolled or revoked player again
+         * @description Admin. Повторная привязка под тем же идентификатором — для плеера в
+         *     состоянии `active` (заменили компьютер, истёк сертификат, нужен новый
+         *     ключ) или `revoked`. В одной транзакции: все живые сертификаты
+         *     отзываются, плеер возвращается в `pending`, его последнее состояние и
+         *     ждущие команды сбрасываются, выдаётся новый токен. Название, группа
+         *     и история остаются. Старое устройство перестаёт работать сразу (список
+         *     отзыва, запись на брокере пересоздаётся и открытое соединение
+         *     обрывается); новое привязывается по возвращённому пакету, как при
+         *     создании.
+         *
+         *     Ничего не меняется, если пакет собрать нельзя (`not_configured`,
+         *     `ca_unavailable`): рабочий экран не отключается впустую. Для плеера
+         *     в состоянии `pending` — `409 already_pending` (ему нужен
+         *     `reissue-token`). Тело необязательно: `{"reason": "…"}` (до 200 байт,
+         *     без управляющих символов; по умолчанию `re_enrolled_by_admin`).
+         *     Audit event: `player.re_enroll` (причина, прежнее состояние, число
+         *     отозванных сертификатов; токен в журнал не попадает).
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Идентификатор плеера (UUID v4, нижний регистр). */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        reason?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description New pairing package (the token is shown once). */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PairingPackage"];
+                    };
+                };
+                /** @description `invalid_body` или `invalid_reason`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `not_found`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `already_pending`, `not_configured` или `ca_unavailable`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Модуль плееров не подключён. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        PlayerGrantInput: {
+            /** @enum {string} */
+            scope: "object" | "group";
+            /** Format: int64 */
+            id: number;
+            /**
+             * @description Команда всей группе (на объекте — любой группе объекта).
+             * @default false
+             */
+            can_command_group?: boolean;
+            /**
+             * @description Команда всему объекту; только для scope=object; подразумевает команды группам объекта.
+             * @default false
+             */
+            can_command_object?: boolean;
+            /**
+             * @description Переносить экраны между группами (нужно на обе).
+             * @default false
+             */
+            can_move?: boolean;
+            /**
+             * @description Смотреть аудит этой области.
+             * @default false
+             */
+            can_view_audit?: boolean;
+        };
+        PlayerGrant: components["schemas"]["PlayerGrantInput"] & {
+            name?: string;
+            /** Format: int64 */
+            object_id?: number;
+            object_name?: string;
+            missing?: boolean;
+        };
+        PlayerGroup: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            object_id: number;
+            name: string;
+            /** Format: int64 */
+            created_at: number;
+            /** @description Сколько плееров в группе (в дереве). */
+            players?: number;
+            /** @description Что можно текущему пользователю в этой группе (только в дереве). */
+            can?: {
+                /** @description Можно переносить отсюда экраны (отметка переноса у оператора, всё у администратора). */
+                move?: boolean;
+                /** @description Можно слать команду всей группе. */
+                command_group?: boolean;
+                /** @description Можно читать журнал действий по этой группе. */
+                view_audit?: boolean;
+            };
+        };
+        PlayerObjectBrief: {
+            /** Format: int64 */
+            id: number;
+            name: string;
+            /** Format: int64 */
+            created_at?: number;
+        };
+        PlayerObject: components["schemas"]["PlayerObjectBrief"] & {
+            can?: {
+                /** @description Можно слать команду всему объекту. */
+                command_object?: boolean;
+                /** @description Можно читать журнал действий по всему объекту (отметка на самом объекте). */
+                view_audit?: boolean;
+            };
+            groups: components["schemas"]["PlayerGroup"][];
+        };
+        BrokerStatus: {
+            enabled?: boolean;
+            /** @enum {string} */
+            state?: "disabled" | "waiting" | "connecting" | "connected" | "stopped";
+            detail?: string;
+            host?: string;
+            port?: number;
+            verify_hostname?: boolean;
+            reconcile_interval_s?: number;
+            /**
+             * Format: int64
+             * @description 0 — ещё не было.
+             */
+            last_reconcile_at?: number;
+            last_reconcile_ok?: boolean;
+            last_report?: {
+                issued?: number;
+                removed?: number;
+                failed?: number;
+                error?: string;
+            };
+            /**
+             * @description Список отозванных сертификатов для брокера (`players.broker.crl.mode`: `off` или `local`).
+             *     При `local` сервер раз в сутки (и при каждом отзыве) пишет файл с отдельным списком на
+             *     каждое поколение центра устройств и сообщает локальному брокеру перечитать его.
+             *     Просроченный список запирает всех, поэтому `valid_until` должен быть далеко впереди
+             *     (срок списка по умолчанию 90 дней, обновление не реже трети срока; до первой записи
+             *     срок читается из файла на диске).
+             *     Рядом с ним сервер пишет всё остальное, что читает брокер: `cafile.pem` (сертификаты
+             *     центра устройств всех поколений) и сертификат самого брокера (`broker.crt`, `broker.key`),
+             *     а после этого файл `ready`, по которому служба брокера запускается.
+             */
+            crl?: {
+                /** @enum {string} */
+                mode?: "off" | "local";
+                /** Format: int64 */
+                last_publish_at?: number;
+                last_ok?: boolean;
+                /** @description Центра устройств ещё нет (церемония не проведена): публиковать нечего, это не сбой. */
+                waiting?: boolean;
+                /** @description Почему не получилось записать файл; прежний файл остаётся в силе. */
+                error?: string;
+                /** @description Файл записан, но брокеру не удалось сообщить (pid-файл, процесс; `pid_file_not_configured` — pid-файл не задан в настройках). */
+                reload_error?: string;
+                /** @description Список записан, но остальные файлы брокера не в порядке (`broker_certificate_missing` и др.); файл `ready` не создаётся, брокер не запустится. */
+                prepare_error?: string;
+                revoked?: number;
+                generations?: number;
+                /** Format: int64 */
+                valid_until?: number;
+                /** @description Сертификат слушателя брокера. `managed` — выпускает и продлевает сервер (у него есть ключ корня, которому доверяют экраны); `provided` — положил администратор; `missing` — нет или непригоден. */
+                tls?: {
+                    /** @enum {string} */
+                    certificate?: "managed" | "provided" | "missing";
+                    /** Format: int64 */
+                    not_after?: number;
+                    error?: string;
+                };
+            };
+            readiness?: {
+                mosquitto_in_build?: boolean;
+                device_ca?: boolean;
+                trust_root?: boolean;
+                broker_url_configured?: boolean;
+            };
+        };
+        CommandJob: {
+            /** Format: uuid */
+            id?: string;
+            type?: string;
+            target?: {
+                /** @enum {string} */
+                kind?: "group" | "object" | "all";
+                /** Format: int64 */
+                id?: number;
+                name?: string;
+            };
+            /** @enum {string} */
+            state?: "running" | "done" | "stopped" | "cancelled";
+            /** @description `too_many_unconfirmed`, `broker_unavailable` (брокер команд не вернулся за отведённое время, пока задание ждало очередную пачку), `cancelled_by_user` или пусто. */
+            stop_reason?: string;
+            batch_size?: number;
+            stop_percent?: number;
+            /** Format: int64 */
+            created_at?: number;
+            /** Format: int64 */
+            created_by?: number;
+            created_by_name?: string;
+            /** Format: int64 */
+            finished_at?: number;
+            summary?: {
+                total?: number;
+                queued?: number;
+                pending?: number;
+                executed?: number;
+                unconfirmed?: number;
+                failed?: number;
+                skipped_offline?: number;
+                cancelled?: number;
+            };
+            /** @description Только в ответе на одно задание. */
+            items?: {
+                /** Format: uuid */
+                player_id?: string;
+                /** @description Нет, если экран уже удалён. */
+                player_name?: string;
+                batch?: number;
+                /** @enum {string} */
+                state?: "queued" | "sent" | "skipped_offline" | "failed" | "cancelled";
+                /** Format: uuid */
+                command_id?: string;
+                command_state?: string;
+                command_result?: string;
+                error?: string;
+            }[];
+        };
+        BulkCommandRequest: {
+            /** @enum {string} */
+            type: "restart_player" | "reboot_screen" | "reload_playlist";
+            dry_run?: boolean;
+            confirm_phrase?: string;
+            expected_count?: number;
+        };
+        /** @description При `dry_run`: `target_name`, `required_phrase`, `expected_count`, `online`, `offline`, `busy`. После отправки: `type`, `target`, `sent`, `skipped_offline`, `failed`. */
+        BulkCommandReport: {
+            type?: string;
+            target?: Record<string, never>;
+            target_name?: string;
+            required_phrase?: string;
+            expected_count?: number;
+            online?: number;
+            offline?: string[];
+            busy?: {
+                /** Format: uuid */
+                player_id?: string;
+                /** @description Название экрана, который ещё ждёт такую же команду. */
+                name?: string;
+                /** Format: uuid */
+                command_id?: string;
+            }[];
+            sent?: {
+                /** Format: uuid */
+                player_id?: string;
+                /** Format: uuid */
+                command_id?: string;
+            }[];
+            skipped_offline?: string[];
+            /**
+             * Format: uuid
+             * @description Задание; из первой пачки отправлено `sent`, остальное в очереди (`queued`).
+             */
+            job_id?: string;
+            queued?: number;
+            batch_size?: number;
+            failed?: {
+                /** Format: uuid */
+                player_id?: string;
+                error?: string;
+            }[];
+        };
+        PlayerCommand: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            player_id: string;
+            /** @enum {string} */
+            type: "restart_player" | "reboot_screen" | "reload_playlist";
+            /**
+             * @description pending — ждёт подтверждения (держит блокировку); executed — плеер выполнил;
+             *     failed — плеер отказал или экран не перезагрузился; timeout — нет подтверждения
+             *     в срок; released — блокировку снял администратор; not_sent — брокер не принял.
+             * @enum {string}
+             */
+            state: "pending" | "executed" | "failed" | "timeout" | "released" | "not_sent";
+            /** @description Статус плеера (`executed`, `expired`, `duplicate`, `unsupported`, `failed`) или причина (`no_confirmation`, `os_not_rebooted`, `released_by_admin`, `broker_not_connected`). */
+            result: string;
+            /** Format: int64 */
+            issued_at: number;
+            ttl_seconds: number;
+            /**
+             * Format: int64
+             * @description Когда pending станет timeout.
+             */
+            deadline_at: number;
+            /** Format: int64 */
+            issued_by?: number;
+            /** Format: int64 */
+            finished_at?: number;
+        };
+        PlayersSettings: {
+            /** @description Админский HTTPS и enroll; пусто = не задан. */
+            server_url: string;
+            /** @description Порт устройств (heartbeat, renew), mTLS. */
+            device_api_url: string;
+            /** @description mqtts://host:port. */
+            mqtt_broker_url: string;
+            /** @description Подмена корня серверного TLS; пусто = брать из state/tls/ca.crt. */
+            ca_cert_pem: string;
+            token_ttl_days: number;
+            /** @enum {string} */
+            clock_policy: "strict" | "relaxed";
+            /** @description Срок жизни команды в брокере, с (по умолчанию 300). */
+            command_ttl_s?: number;
+            /** @description Сколько ждать подтверждения restart_player, с (300). */
+            confirm_timeout_restart_s?: number;
+            /** @description Сколько ждать подтверждения reboot_screen, с (1200). */
+            confirm_timeout_reboot_s?: number;
+            /** @description Сколько ждать подтверждения reload_playlist, с (120). */
+            confirm_timeout_reload_s?: number;
+            /** @description Размер пачки при команде многим экранам (10). */
+            command_batch_size?: number;
+            /** @description Доля невернувшихся в пачке, выше которой задание останавливается, % (30). */
+            command_batch_stop_percent?: number;
+            /** @description Сколько дней хранить события плееров (вход и выход из сети, смена версии, команды) (90). Старше — удаляется раз в сутки. */
+            events_retention_days?: number;
+            /** @description Сколько дней хранить закрытые команды и задания (365). Неподтверждённая команда и идущее задание не удаляются никогда. */
+            commands_retention_days?: number;
+        };
+        PairingPackage: {
+            /** @example 1 */
+            schema: number;
+            /** Format: uuid */
+            player_id: string;
+            server_url: string;
+            ca_cert_pem: string;
+            device_api_url: string;
+            mqtt_broker_url: string;
+            /** @description Одноразовый; показывается один раз. */
+            bootstrap_token: string;
+            /** Format: date-time */
+            token_expires_at: string;
+            /** @enum {string} */
+            clock_policy: "strict" | "relaxed";
+            /** @description host[:port] NTP-серверов сервера; поля нет, если NTP не настроен. */
+            ntp_hint?: string[];
+        };
+        PlayerStatus: {
+            online: boolean;
+            version: string;
+            /** Format: int64 */
+            updated_at: number;
+            state?: {
+                [key: string]: unknown;
+            };
+        };
+        Player: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** @enum {string} */
+            state: "pending" | "active" | "revoked";
+            /** @enum {string} */
+            clock_policy: "strict" | "relaxed";
+            /** Format: int64 */
+            created_at: number;
+            /**
+             * Format: int64
+             * @description Группа плеера.
+             */
+            group_id?: number;
+            group_name?: string;
+            /**
+             * Format: int64
+             * @description Объект, которому принадлежит группа.
+             */
+            object_id?: number;
+            object_name?: string;
+            /** Format: int64 */
+            created_by?: number;
+            /** Format: int64 */
+            activated_at?: number;
+            /** Format: int64 */
+            revoked_at?: number;
+            revoke_reason?: string;
+            status?: components["schemas"]["PlayerStatus"];
+        };
+        PlayerCertificate: {
+            serial: string;
+            generation: number;
+            /** Format: int64 */
+            issued_at: number;
+            /** Format: int64 */
+            not_before: number;
+            /** Format: int64 */
+            not_after: number;
+            /** Format: int64 */
+            revoked_at?: number;
+            revoke_reason?: string;
+        };
+        PlayerEvent: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            ts: number;
+            kind: string;
+            details: string;
+        };
+        PlayerDetails: components["schemas"]["Player"] & {
+            certificates: components["schemas"]["PlayerCertificate"][];
+            events: components["schemas"]["PlayerEvent"][];
+            /** @description Что можно текущему пользователю с этим экраном (для кнопок интерфейса). */
+            can?: {
+                move?: boolean;
+                command?: boolean;
+            };
+        };
+        RevokeResult: {
+            /** @description Сколько сертификатов отозвано ЭТИМ вызовом. */
+            revoked_certs: number;
+        };
         Error: {
             /**
              * @description Стабильный snake_case-код. Канонический список (extensible —
