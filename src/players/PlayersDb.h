@@ -295,6 +295,10 @@ public:
     // Newest first; `created_by` limits to one person's jobs.
     std::vector<JobRow>    listJobs(std::optional<std::int64_t> created_by, std::size_t limit);
     std::vector<JobItem>   jobItems(const std::string& job_id);
+    // How many items of a job are in each state, with the state of their command (empty when the
+    // item has none, `has_command` false when it names one that is gone). One query for the whole job.
+    struct JobItemCount { std::string item_state, command_state; bool has_command{false}; std::int64_t n{0}; };
+    std::vector<JobItemCount> jobItemCounts(const std::string& job_id);
     bool                   updateJobItem(const std::string& job_id, const std::string& player_id,
                                          const std::string& state, const std::string& command_id,
                                          const std::string& error);

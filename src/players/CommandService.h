@@ -158,6 +158,9 @@ public:
     std::optional<JobRow> cancelJob(const std::string& job_id, std::int64_t now = 0);
 
     std::optional<JobView> jobView(const std::string& job_id);
+    // The counts of jobView() without reading a single item: what a list of jobs needs.
+    // The numbers are the same as jobView(job_id)->summary.
+    std::optional<JobView> jobOverview(const std::string& job_id);
 
     // The player's report on a command, taken from a heartbeat. Only the
     // player the command was sent to can settle it; anything else is ignored.

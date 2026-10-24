@@ -1417,6 +1417,22 @@ std::vector<JobItem> PlayersDb::jobItems(const std::string& job_id) {
     return out;
 }
 
+std::vector<PlayersDb::JobItemCount> PlayersDb::jobItemCounts(const std::string& job_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<JobItemCount> out;
+    if (!db_) return out;
+    Stmt s(db_, "SELECT ji.state, COALESCE(pc.state,''), pc.id IS NOT NULL, COUNT(*) "
+                "FROM command_job_items ji LEFT JOIN player_commands pc ON pc.id = ji.command_id AND ji.command_id <> '' "
+                "WHERE ji.job_id=? GROUP BY ji.state, pc.state, pc.id IS NOT NULL");
+    s.text(1, job_id);
+    while (s.step() == SQLITE_ROW) {
+        JobItemCount c;
+        c.item_state = s.str(0); c.command_state = s.str(1); c.has_command = s.num(2) != 0; c.n = s.num(3);
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
 bool PlayersDb::updateJobItem(const std::string& job_id, const std::string& player_id,
                               const std::string& state, const std::string& command_id,
                               const std::string& error) {

@@ -832,6 +832,39 @@ TEST_F(BatchTest, ABrokerThatDropsOutInTheMiddleOfABatchLetsTheRestOfTheBatchFol
     EXPECT_EQ(v->summary.failed, 0u);
 }
 
+TEST_F(BatchTest, TheOverviewOfAJobGivesTheSameCountsAsItsFullViewWithoutReadingItsItems) {
+    // The list of jobs needs only the counts; summing them in the database is what keeps that list quick.
+    ASSERT_EQ(players_->updateSettings({{"command_batch_size", "4"}}), "");
+    connected(9);
+    auto offline = screen("Away");                                    // not connected: skipped at the start
+    (void)offline;
+    auto out = startGroup(10);                                        // nine connected and the one away
+    ASSERT_EQ(out.sent.size(), 4u);
+
+    auto same = [&](const char* when) {
+        const auto full = batcher_->jobView(out.job_id);
+        const auto over = batcher_->jobOverview(out.job_id);
+        ASSERT_TRUE(full && over) << when;
+        EXPECT_EQ(over->summary.total, full->summary.total) << when;
+        EXPECT_EQ(over->summary.queued, full->summary.queued) << when;
+        EXPECT_EQ(over->summary.pending, full->summary.pending) << when;
+        EXPECT_EQ(over->summary.executed, full->summary.executed) << when;
+        EXPECT_EQ(over->summary.unconfirmed, full->summary.unconfirmed) << when;
+        EXPECT_EQ(over->summary.failed, full->summary.failed) << when;
+        EXPECT_EQ(over->summary.skipped_offline, full->summary.skipped_offline) << when;
+        EXPECT_EQ(over->summary.cancelled, full->summary.cancelled) << when;
+        EXPECT_EQ(over->job.id, full->job.id) << when;
+        EXPECT_TRUE(over->items.empty()) << "no items read for a list";
+    };
+    same("batch out, nothing answered");
+    confirm(out.sent[0].player_id, out.sent[0].command_id);
+    confirm(out.sent[1].player_id, out.sent[1].command_id, "failed");           // answered, but refused: unconfirmed
+    same("two answered, two pending");
+    batcher_->cancelJob(out.job_id, kT0 + 10);
+    same("cancelled with a batch still pending");
+    EXPECT_FALSE(batcher_->jobOverview("no-such-job"));
+}
+
 TEST_F(BatchTest, TheBatchSizeAndTheThresholdAreSettingsWithLimits) {
     EXPECT_EQ(players_->updateSettings({{"command_batch_size", "0"}}), "invalid_command_batch_size");
     EXPECT_EQ(players_->updateSettings({{"command_batch_size", "101"}}), "invalid_command_batch_size");

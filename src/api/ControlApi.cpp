@@ -3862,7 +3862,7 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
         }
         json arr = json::array();
         for (const auto& j : pls->db().listJobs(only, 50))
-            if (auto v = cmds->jobView(j.id)) arr.push_back(jobJson(*v, false, nullptr));
+            if (auto v = cmds->jobOverview(j.id)) arr.push_back(jobJson(*v, false, nullptr));      // counts only, no items
         writeJson(res, 200, json{{"jobs", std::move(arr)}});
     });
 

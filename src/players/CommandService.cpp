@@ -417,4 +417,25 @@ std::optional<JobView> CommandService::jobView(const std::string& job_id) {
     return v;
 }
 
+std::optional<JobView> CommandService::jobOverview(const std::string& job_id) {
+    auto job = db_.findJob(job_id);
+    if (!job) return std::nullopt;
+    JobView v;
+    v.job = *job;
+    for (const auto& c : db_.jobItemCounts(job_id)) {
+        const auto n = static_cast<std::size_t>(c.n);
+        v.summary.total += n;
+        if (c.item_state == "queued") v.summary.queued += n;
+        else if (c.item_state == "skipped_offline") v.summary.skipped_offline += n;
+        else if (c.item_state == "failed") v.summary.failed += n;
+        else if (c.item_state == "cancelled") v.summary.cancelled += n;
+        else if (c.item_state == "sent" && c.has_command) {
+            if (c.command_state == "pending") v.summary.pending += n;
+            else if (c.command_state == "executed") v.summary.executed += n;
+            else v.summary.unconfirmed += n;
+        }
+    }
+    return v;
+}
+
 }  // namespace liveqx::players
