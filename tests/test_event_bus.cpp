@@ -142,6 +142,10 @@ TEST(EventBus, EventTypeNameAndParse) {
     EXPECT_FALSE(sce::parseEventType("nope").has_value());
     EXPECT_STREQ(sce::eventTypeName(sce::EventType::PlayersBrokerStatus), "players_broker_status");
     EXPECT_EQ(sce::parseEventType("players_broker_status").value(), sce::EventType::PlayersBrokerStatus);
+    EXPECT_STREQ(sce::eventTypeName(sce::EventType::PlayersRenewAlarm), "players_renew_alarm");
+    EXPECT_EQ(sce::parseEventType("players_renew_alarm").value(), sce::EventType::PlayersRenewAlarm);
+    EXPECT_STREQ(sce::eventTypeName(sce::EventType::PlayersServerCert), "players_server_cert");
+    EXPECT_EQ(sce::parseEventType("players_server_cert").value(), sce::EventType::PlayersServerCert);
     EXPECT_STREQ(sce::eventTypeName(sce::EventType::PlayerCommandJob), "player_command_job");
     EXPECT_EQ(sce::parseEventType("player_command_job").value(), sce::EventType::PlayerCommandJob);
 }

@@ -25,6 +25,8 @@ const char* eventTypeName(EventType t) noexcept {
         case EventType::PlayerCertStage:     return "player_cert_stage";
         case EventType::PlayerCommandJob:    return "player_command_job";
         case EventType::PlayersBrokerStatus: return "players_broker_status";
+        case EventType::PlayersServerCert:   return "players_server_cert";
+        case EventType::PlayersRenewAlarm:   return "players_renew_alarm";
         case EventType::AuditEvent:          return "audit_event";
     }
     return "unknown";
@@ -49,6 +51,8 @@ std::optional<EventType> parseEventType(const std::string& s) noexcept {
     if (s == "player_cert_stage")     return EventType::PlayerCertStage;
     if (s == "player_command_job")    return EventType::PlayerCommandJob;
     if (s == "players_broker_status") return EventType::PlayersBrokerStatus;
+    if (s == "players_server_cert")   return EventType::PlayersServerCert;
+    if (s == "players_renew_alarm")   return EventType::PlayersRenewAlarm;
     if (s == "audit_event")           return EventType::AuditEvent;
     return std::nullopt;
 }

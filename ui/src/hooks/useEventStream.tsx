@@ -165,6 +165,12 @@ export function EventBusProvider({ children }: { children: React.ReactNode }) {
             qc.invalidateQueries({ queryKey: ['players'] });
             qc.invalidateQueries({ queryKey: ['players-cert'] });
             break;
+          // Certificate renewal began / stopped failing across the fleet, or a certificate of the server moved to
+          // another step (administrators): the summary changes.
+          case 'players_server_cert':
+          case 'players_renew_alarm':
+            qc.invalidateQueries({ queryKey: ['players-cert'] });
+            break;
           // A command job started, sent a batch or finished.
           case 'player_command_job':
             qc.invalidateQueries({ queryKey: ['players', 'jobs'] });

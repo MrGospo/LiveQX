@@ -325,3 +325,158 @@ TEST_F(CertWatchTest, TheThreadLooksOnceSoonAfterStartAndStopsPromptly) {
     w.stop();
     EXPECT_LT(std::chrono::steady_clock::now() - t0, std::chrono::seconds(2)) << "stop must not wait out the hour";
 }
+
+// ─── renewal failing across the fleet is one fault, announced when it begins and when it ends ───
+namespace {
+
+class RenewAlarmTest : public CertWatchTest {
+protected:
+    // Reports of the screens: on, and whether their last renewal failed.
+    void report(const std::string& id, bool failing) {
+        StatusRow st;
+        st.player_id  = id;
+        st.updated_at = kT0;
+        st.online     = true;
+        st.payload_json = failing ? json{{"last_renew_error", "handshake failed"}}.dump() : json::object().dump();
+        ASSERT_TRUE(db_->applyStatuses({st}));
+    }
+    std::vector<liveqx::events::Event> alarms() {
+        std::vector<liveqx::events::Event> out;
+        for (auto& e : sub_->drain(std::chrono::milliseconds(0)))
+            if (e.type == EventType::PlayersRenewAlarm) out.push_back(std::move(e));
+        return out;
+    }
+};
+
+}  // namespace
+
+TEST_F(RenewAlarmTest, TheAlarmIsAnnouncedOnceWhenItBeginsAndOnceWhenItEnds) {
+    std::vector<std::pair<bool, std::int64_t>> audited;
+    CertWatchOptions o;
+    o.events = &bus_;
+    o.now    = [this] { return clock_; };
+    o.on_renew_alarm = [&](bool active, const ScreenCertSummary& s) { audited.emplace_back(active, s.failing); };
+    CertWatch w(*db_, std::move(o));
+
+    std::vector<std::string> ids;
+    for (int i = 0; i < 4; ++i) ids.push_back(boundScreen("s" + std::to_string(i), 40));   // inside the renewal window
+    report(ids[0], true);
+    report(ids[1], true);
+    report(ids[2], false);
+    report(ids[3], false);                                             // all four are on
+    w.scan();
+    EXPECT_TRUE(alarms().empty()) << "two of four is not enough screens to call it the fleet's fault";
+
+    report(ids[2], true);
+    w.scan();
+    auto begun = alarms();
+    ASSERT_EQ(begun.size(), 1u);
+    EXPECT_EQ(begun[0].payload["active"], true);
+    EXPECT_EQ(begun[0].payload["failing"], 3);
+    EXPECT_EQ(begun[0].payload["online"], 4);
+    ASSERT_EQ(audited.size(), 1u);
+    EXPECT_TRUE(audited[0].first);
+
+    w.scan();
+    EXPECT_TRUE(alarms().empty()) << "the same fault is not announced again";
+    EXPECT_EQ(audited.size(), 1u);
+
+    for (const auto& id : ids) report(id, false);
+    w.scan();
+    auto ended = alarms();
+    ASSERT_EQ(ended.size(), 1u);
+    EXPECT_EQ(ended[0].payload["active"], false);
+    ASSERT_EQ(audited.size(), 2u);
+    EXPECT_FALSE(audited[1].first);
+
+    w.scan();
+    EXPECT_TRUE(alarms().empty());
+}
+
+TEST_F(RenewAlarmTest, NoAlarmForScreensOutsideTheWindowOrOff) {
+    for (int i = 0; i < 5; ++i) {
+        const auto id = boundScreen("far" + std::to_string(i), 200);       // not renewing yet: an old error means nothing
+        report(id, true);
+    }
+    auto w = watch();
+    w->scan();
+    EXPECT_TRUE(alarms().empty());
+}
+
+// ─── the server's own certificates, in the same steps ───────────────────────────
+namespace {
+
+class ServerCertWatchTest : public CertWatchTest {
+protected:
+    std::vector<ServerCertEntry> certs_;
+    struct Heard { std::string name; CertStage stage, previous; std::int64_t days_left; };
+    std::vector<Heard> heard_;
+
+    std::unique_ptr<CertWatch> serverWatch() {
+        CertWatchOptions o;
+        o.events = &bus_;
+        o.now    = [this] { return clock_; };
+        o.server_certs = [this] { return certs_; };
+        o.on_server_cert = [this](const ServerCertEntry& c, CertStage s, CertStage p, std::int64_t d) {
+            heard_.push_back({c.name, s, p, d});
+        };
+        return std::make_unique<CertWatch>(*db_, std::move(o));
+    }
+    std::vector<liveqx::events::Event> serverNews() {
+        std::vector<liveqx::events::Event> out;
+        for (auto& e : sub_->drain(std::chrono::milliseconds(0)))
+            if (e.type == EventType::PlayersServerCert) out.push_back(std::move(e));
+        return out;
+    }
+};
+
+}  // namespace
+
+TEST_F(ServerCertWatchTest, EachStepOfACertificateOfTheServerIsAnnouncedOnceAndTheEndOfTheListOfRevocationsIsOne) {
+    certs_ = {{"api_tls", kT0 + 300 * kDay, ""}, {"crl", kT0 + 80 * kDay, ""}};
+    auto w = serverWatch();
+    w->scan();
+    EXPECT_TRUE(serverNews().empty()) << "both are fine";
+
+    clock_ = kT0 + 55 * kDay;                                       // the list has 25 days left: it was not renewed in time
+    w->scan();
+    auto news = serverNews();
+    ASSERT_EQ(news.size(), 1u);
+    EXPECT_EQ(news[0].payload["name"], "crl");
+    EXPECT_EQ(news[0].payload["stage"], "soon30");
+    EXPECT_EQ(news[0].payload["previous"], "ok");
+    EXPECT_EQ(news[0].payload["days_left"], 25);
+    ASSERT_EQ(heard_.size(), 1u);
+    EXPECT_EQ(heard_[0].name, "crl");
+    EXPECT_EQ(heard_[0].stage, CertStage::Soon30);
+
+    w->scan();
+    EXPECT_TRUE(serverNews().empty()) << "the same step is not announced again";
+
+    certs_[1].not_after = kT0 + 55 * kDay + 90 * kDay;              // the list is rewritten
+    w->scan();
+    news = serverNews();
+    ASSERT_EQ(news.size(), 1u);
+    EXPECT_EQ(news[0].payload["stage"], "ok");
+    EXPECT_EQ(news[0].payload["previous"], "soon30");
+
+    clock_ = kT0 + 301 * kDay;                                      // the web certificate ran out
+    w->scan();
+    bool api_expired = false;
+    for (const auto& h : heard_) if (h.name == "api_tls" && h.stage == CertStage::Expired) api_expired = true;
+    EXPECT_TRUE(api_expired);
+}
+
+TEST_F(ServerCertWatchTest, ACertificateWithoutADateIsLeftToThePageToExplain) {
+    certs_ = {{"broker_tls", 0, "missing"}};
+    auto w = serverWatch();
+    w->scan();
+    EXPECT_TRUE(serverNews().empty());
+    EXPECT_TRUE(heard_.empty());
+}
+
+TEST_F(ServerCertWatchTest, NothingIsWatchedWithoutASource) {
+    auto w = watch();
+    w->scan();
+    EXPECT_TRUE(serverNews().empty());
+}

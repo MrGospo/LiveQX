@@ -72,6 +72,8 @@ bool sseEventVisibleTo(const liveqx::auth::RequestContext& ctx,
             return by != e.payload.end() && by->is_number_integer() && by->get<std::int64_t>() == ctx.user_id;
         }
         case EventType::PlayersBrokerStatus:           // the state of the broker is an administrator's page
+        case EventType::PlayersRenewAlarm:             // and so is a fault that is the whole fleet's, not a place's
+        case EventType::PlayersServerCert:             // and the end of the server's own certificates
             return ctx.role == Role::Admin;
         case EventType::PluginStatusChange:
         case EventType::StressRunStarted:

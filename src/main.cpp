@@ -1164,12 +1164,6 @@ int main(int argc, char* argv[]) {
                 }
             });
 
-            {
-                liveqx::players::CertWatchOptions cw;
-                cw.events = &event_bus;
-                cert_watch = std::make_unique<liveqx::players::CertWatch>(players_db, std::move(cw));
-                cert_watch->start();
-            }
 
             // Retention of the players' own journals: once a day, a minute after start
             // (so a long-neglected database is cleaned soon, but not during boot).
@@ -1596,6 +1590,76 @@ int main(int argc, char* argv[]) {
 
         std::atomic<bool> tls_reload_pending{false};
 
+        // The end dates of the server's own certificates: the one that ends takes every screen with it.
+        // Read afresh on each ask (a file and a few fields), so the page, the scrape and the watch see what
+        // is now. It runs on threads that outlive a reload of the TLS bindings, so it keeps its own copies.
+        const auto api_tls_cert = tls_bindings.cert_path;
+        auto server_certs = [api_tls_cert, device_ca_provider, &broker_tls, &crl_publisher]() {
+            std::vector<liveqx::players::ServerCertEntry> v;
+            auto push = [&v](const char* name, std::int64_t not_after, std::string error) {
+                v.push_back({name, not_after > 0 && error.empty() ? not_after : 0, std::move(error)});
+            };
+            if (!api_tls_cert.empty()) {
+                const auto ci = liveqx::tls::readCertInfo(api_tls_cert);
+                push("api_tls", ci.not_after_unix, ci.subject.empty() ? "unreadable" : "");
+            }
+            if (device_ca_provider) {
+                if (auto ca = device_ca_provider()) {
+                    const auto ci = liveqx::tls::readCertInfoFromPem(ca->certPem());
+                    push("device_ca", ci.not_after_unix, ci.subject.empty() ? "unreadable" : "");
+                    if (ca->twoTier()) {
+                        const auto root = liveqx::tls::readCertInfoFromPem(ca->rootPem());
+                        push("device_ca_root", root.not_after_unix, root.subject.empty() ? "unreadable" : "");
+                    }
+                }
+            }
+            if (broker_tls) {
+                const auto t = broker_tls->state();
+                push("broker_tls", t.not_after, t.error);
+            }
+            if (crl_publisher) {
+                const auto c = crl_publisher->status();
+                if (c.valid_until > 0) push("crl", c.valid_until, "");
+            }
+            return v;
+        };
+
+        // Announces screens whose certificate nears its end, a renewal that fails across the fleet, and the
+        // steps of the server's own certificates (including the revocation list's end).
+        if (players_service) {
+            liveqx::players::CertWatchOptions cw;
+            cw.events = &event_bus;
+            // A fault of the whole fleet belongs to no place, so only administrators see its row.
+            cw.on_renew_alarm = [&audit_logger](bool active, const liveqx::players::ScreenCertSummary& s) {
+                sad::AuditEvent ev;
+                ev.category       = sad::Category::Player;
+                ev.action         = active ? "player.renew_alarm" : "player.renew_alarm_cleared";
+                ev.actor_username = "system";
+                ev.summary        = active ? "certificate renewal fails across the fleet"
+                                           : "certificate renewal no longer fails across the fleet";
+                ev.details_json   = json{{"failing", s.failing}, {"online", s.renewing_online},
+                                         {"renewing", s.renewing}}.dump();
+                audit_logger.log(std::move(ev));
+            };
+            cw.server_certs = server_certs;
+            cw.on_server_cert = [&audit_logger](const liveqx::players::ServerCertEntry& c, liveqx::players::CertStage stage,
+                                                liveqx::players::CertStage previous, std::int64_t days_left) {
+                sad::AuditEvent ev;
+                ev.category       = sad::Category::System;
+                ev.action         = "tls.cert_stage";
+                ev.actor_username = "system";
+                ev.target_type    = "tls";
+                ev.target_id      = c.name;
+                ev.summary        = "server certificate " + c.name + ": " + liveqx::players::certStageName(stage);
+                ev.details_json   = json{{"name", c.name}, {"stage", liveqx::players::certStageName(stage)},
+                                         {"previous", liveqx::players::certStageName(previous)},
+                                         {"not_after", c.not_after}, {"days_left", days_left}}.dump();
+                audit_logger.log(std::move(ev));
+            };
+            cert_watch = std::make_unique<liveqx::players::CertWatch>(players_db, std::move(cw));
+            cert_watch->start();
+        }
+
         // The server's own certificate (tls.mode auto) is renewed while the server runs, not only at start:
         // a server that is not restarted for a year would otherwise be left with one that has ended. When a
         // new one has been issued the listener is rebuilt exactly as after "regenerate" in the interface, and
@@ -1647,37 +1711,6 @@ int main(int argc, char* argv[]) {
                 tls_reload_pending.store(true, std::memory_order_release);
                 g_running.store(false, std::memory_order_release);
             });
-            // The end dates of the server's own certificates: the one that ends takes every screen with it.
-            // Read afresh on each ask (a file and a few fields), so the page and the scrape show what is now.
-            auto server_certs = [&]() {
-                std::vector<liveqx::players::ServerCertEntry> v;
-                auto push = [&v](const char* name, std::int64_t not_after, std::string error) {
-                    v.push_back({name, not_after > 0 && error.empty() ? not_after : 0, std::move(error)});
-                };
-                if (!tls_bindings.cert_path.empty()) {
-                    const auto ci = liveqx::tls::readCertInfo(tls_bindings.cert_path);
-                    push("api_tls", ci.not_after_unix, ci.subject.empty() ? "unreadable" : "");
-                }
-                if (device_ca_provider) {
-                    if (auto ca = device_ca_provider()) {
-                        const auto ci = liveqx::tls::readCertInfoFromPem(ca->certPem());
-                        push("device_ca", ci.not_after_unix, ci.subject.empty() ? "unreadable" : "");
-                        if (ca->twoTier()) {
-                            const auto root = liveqx::tls::readCertInfoFromPem(ca->rootPem());
-                            push("device_ca_root", root.not_after_unix, root.subject.empty() ? "unreadable" : "");
-                        }
-                    }
-                }
-                if (broker_tls) {
-                    const auto t = broker_tls->state();
-                    push("broker_tls", t.not_after, t.error);
-                }
-                if (crl_publisher) {
-                    const auto c = crl_publisher->status();
-                    if (c.valid_until > 0) push("crl", c.valid_until, "");
-                }
-                return v;
-            };
             if (players_service) {
                 api.setServerCertsProvider(server_certs);
                 metrics.setExtraPrometheus([&players_db, server_certs]() {

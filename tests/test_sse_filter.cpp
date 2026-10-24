@@ -52,6 +52,16 @@ TEST(SseFilter, TheBrokerStatusIsForAdministratorsOnly) {
     EXPECT_FALSE(sseEventVisibleTo(ctxFor(Role::Viewer), evtFor(EventType::PlayersBrokerStatus)));
 }
 
+TEST(SseFilter, TheRenewalAlarmIsForAdministratorsOnlyAndInTheDefaultStream) {
+    EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Admin), evtFor(EventType::PlayersRenewAlarm)));
+    EXPECT_FALSE(sseEventVisibleTo(ctxFor(Role::Operator), evtFor(EventType::PlayersRenewAlarm)));
+    EXPECT_FALSE(sseEventVisibleTo(ctxFor(Role::Viewer), evtFor(EventType::PlayersRenewAlarm)));
+    EXPECT_TRUE(liveqx::api::sseEventInDefaultSubscription(EventType::PlayersRenewAlarm));
+    EXPECT_TRUE(sseEventVisibleTo(ctxFor(Role::Admin), evtFor(EventType::PlayersServerCert)));
+    EXPECT_FALSE(sseEventVisibleTo(ctxFor(Role::Operator), evtFor(EventType::PlayersServerCert)));
+    EXPECT_FALSE(sseEventVisibleTo(ctxFor(Role::Viewer), evtFor(EventType::PlayersServerCert)));
+}
+
 TEST(SseFilter, AJobsNewsGoesToAdministratorsAndToWhoeverStartedIt) {
     auto job = [](std::int64_t by) {
         Event e = evtFor(EventType::PlayerCommandJob);

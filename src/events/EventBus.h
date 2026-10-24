@@ -54,6 +54,8 @@ enum class EventType {
     PlayerCertStage,       // {player_id, name, stage, previous, not_after?, days_left?}  a screen's certificate moved to another step
     PlayerCommandJob,      // {job_id, state, created_by}            a command job started, sent a batch or finished
     PlayersBrokerStatus,   // {}                                      the broker link or the revocation file changed (administrators)
+    PlayersServerCert,     // {name, stage, previous, not_after, days_left}  a certificate of the server itself moved to another step (administrators)
+    PlayersRenewAlarm,     // {active, failing, online, window_days}  certificate renewal fails across the fleet, or stopped failing (administrators)
     AuditEvent,            // enterprise audit trail — one row inserted:
                            // {category, action, target_type, target_id,
                            //  actor_username, http_method, http_path,

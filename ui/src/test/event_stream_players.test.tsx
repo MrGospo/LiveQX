@@ -59,6 +59,16 @@ describe('the event stream and the screens pages', () => {
     expect(keysInvalidated()).toEqual([JSON.stringify(['players']), JSON.stringify(['players-cert'])]);
   });
 
+  it('refreshes only the summary of certificates when renewal starts or stops failing across the fleet', () => {
+    frame('players_renew_alarm');
+    expect(keysInvalidated()).toEqual([JSON.stringify(['players-cert'])]);
+  });
+
+  it('refreshes the summary of certificates when a certificate of the server moves to another step', () => {
+    frame('players_server_cert');
+    expect(keysInvalidated()).toEqual([JSON.stringify(['players-cert'])]);
+  });
+
   it('does not look at everything on the first connection', () => {
     captured!.onOpen!();
     expect(keysInvalidated()).toEqual([]);

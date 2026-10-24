@@ -95,6 +95,46 @@ std::size_t CertWatch::scan() {
             LOG_WARN("Certificate of screen '{}' ends in {} day(s) and it has not renewed", p.name,
                      end ? certDaysLeft(*end, now) : 0);
     }
+
+    // Renewal failing across the fleet is one fault, not one per screen: say so once, and when it ends.
+    const ScreenCertSummary fleet = summarizeScreens(db_, now);
+    if (fleet.systemic != alarm_) {
+        alarm_ = fleet.systemic;
+        if (opts_.events)
+            opts_.events->publish(events::EventType::PlayersRenewAlarm, -1,
+                                  {{"active", alarm_}, {"failing", fleet.failing},
+                                   {"online", fleet.renewing_online}, {"window_days", kRenewWindowDays}});
+        if (alarm_)
+            LOG_ERROR("Certificate renewal is failing on {} of {} screens that are on: a common fault, not single screens",
+                      fleet.failing, fleet.renewing_online);
+        else
+            LOG_INFO("Certificate renewal is no longer failing across the fleet");
+        if (opts_.on_renew_alarm) opts_.on_renew_alarm(alarm_, fleet);
+    }
+
+    if (opts_.server_certs) {
+        for (const auto& c : opts_.server_certs()) {
+            if (c.not_after <= 0) continue;                  // no date (missing or unreadable): the page says why
+            const CertStage stage = certStageOf(c.not_after, now);
+            auto [it, fresh] = server_stage_.emplace(c.name, CertStage::Ok);
+            const CertStage previous = it->second;
+            (void)fresh;
+            if (stage == previous) continue;
+            it->second = stage;
+            const std::int64_t left = certDaysLeft(c.not_after, now);
+            if (opts_.events)
+                opts_.events->publish(events::EventType::PlayersServerCert, -1,
+                                      {{"name", c.name}, {"stage", certStageName(stage)}, {"previous", certStageName(previous)},
+                                       {"not_after", c.not_after}, {"days_left", left}});
+            if (stage == CertStage::Expired)
+                LOG_ERROR("Certificate of the server ({}) has run out", c.name);
+            else if (certNeedsAttention(stage))
+                LOG_WARN("Certificate of the server ({}) ends in {} day(s)", c.name, left);
+            else
+                LOG_INFO("Certificate of the server ({}) is fine again", c.name);
+            if (opts_.on_server_cert) opts_.on_server_cert(c, stage, previous, left);
+        }
+    }
     return changed;
 }
 
