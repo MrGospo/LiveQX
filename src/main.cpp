@@ -55,6 +55,7 @@
 #endif
 #include "players/AuditScope.h"
 #include "players/BrokerSettings.h"
+#include "players/CertSummary.h"
 #include "players/CertWatch.h"
 #include "players/CommandService.h"
 #include "players/BrokerTls.h"
@@ -1606,6 +1607,45 @@ int main(int argc, char* argv[]) {
                 tls_reload_pending.store(true, std::memory_order_release);
                 g_running.store(false, std::memory_order_release);
             });
+            // The end dates of the server's own certificates: the one that ends takes every screen with it.
+            // Read afresh on each ask (a file and a few fields), so the page and the scrape show what is now.
+            auto server_certs = [&]() {
+                std::vector<liveqx::players::ServerCertEntry> v;
+                auto push = [&v](const char* name, std::int64_t not_after, std::string error) {
+                    v.push_back({name, not_after > 0 && error.empty() ? not_after : 0, std::move(error)});
+                };
+                if (!tls_bindings.cert_path.empty()) {
+                    const auto ci = liveqx::tls::readCertInfo(tls_bindings.cert_path);
+                    push("api_tls", ci.not_after_unix, ci.subject.empty() ? "unreadable" : "");
+                }
+                if (device_ca_provider) {
+                    if (auto ca = device_ca_provider()) {
+                        const auto ci = liveqx::tls::readCertInfoFromPem(ca->certPem());
+                        push("device_ca", ci.not_after_unix, ci.subject.empty() ? "unreadable" : "");
+                        if (ca->twoTier()) {
+                            const auto root = liveqx::tls::readCertInfoFromPem(ca->rootPem());
+                            push("device_ca_root", root.not_after_unix, root.subject.empty() ? "unreadable" : "");
+                        }
+                    }
+                }
+                if (broker_tls) {
+                    const auto t = broker_tls->state();
+                    push("broker_tls", t.not_after, t.error);
+                }
+                if (crl_publisher) {
+                    const auto c = crl_publisher->status();
+                    if (c.valid_until > 0) push("crl", c.valid_until, "");
+                }
+                return v;
+            };
+            if (players_service) {
+                api.setServerCertsProvider(server_certs);
+                metrics.setExtraPrometheus([&players_db, server_certs]() {
+                    const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
+                    return liveqx::players::certMetricsText(
+                        liveqx::players::summarizeScreens(players_db, now), server_certs(), now);
+                });
+            }
             // fix35 A3.5–A3.9 — mount static UI (or 503-stub if headless).
             api.setBrokerHooks(
                 [&]() {

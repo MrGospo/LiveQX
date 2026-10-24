@@ -36,6 +36,7 @@
 #include "auth/MasterKey.h"
 #include "auth/RbacMiddleware.h"
 #include "players/AuditScope.h"
+#include "players/CertSummary.h"
 #include "players/PlayersDb.h"
 #include "players/PlayersService.h"
 #include "utils/Tls.h"
@@ -786,4 +787,66 @@ TEST(PlayerScopeRest, TheCertificateStepsCountOnlyWhatThePersonIsAllowedToSee) {
     EXPECT_EQ(all["cert_counts"]["expired"], 1);
     EXPECT_EQ(all["cert_counts"]["soon14"], 1);
     EXPECT_EQ(all["cert_counts"]["ok"], 1);
+}
+
+// ─── The lifecycle summary follows the same rights, and the server part is for administrators ───
+TEST(PlayerScopeRest, TheLifecycleSummaryIsNarrowedToThePlaceAndHidesTheServerPartFromOthers) {
+    ScopeFixture f(kBasePort + 29);
+    f.api->stop();                                     // the provider must be set before the server runs
+    f.api.reset();
+    f.api = std::make_unique<ControlApi>(
+        f.port, f.manager, nullptr, LivezOptions{}, nullptr, f.svc.get(), nullptr, nullptr, f.rbac.get(),
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, TlsBindings{}, nullptr, nullptr, nullptr,
+        f.audit_logger.get(), nullptr, f.players.get());
+    f.api->setServerCertsProvider([] {
+        return std::vector<ServerCertEntry>{{"api_tls", static_cast<std::int64_t>(std::time(nullptr)) + 100 * 86400, ""}};
+    });
+    f.api->start();
+    {
+        httplib::Client c("127.0.0.1", f.port);
+        for (int i = 0; i < 100; ++i) { auto r = c.Get("/healthz"); if (r && r->status == 200) break; std::this_thread::sleep_for(20ms); }
+    }
+    const std::int64_t now = std::time(nullptr);
+    int n = 0;
+    for (const auto& [id, left] : {std::pair{f.P11, -3 * 86400}, std::pair{f.P12, 10 * 86400 + 3600},
+                                   std::pair{f.P21, 300 * 86400}}) {
+        auto token = f.pdb->reissueToken(id, 3600);
+        ASSERT_TRUE(token.has_value());
+        auto c = f.pdb->claimToken(id, token->token);
+        ASSERT_TRUE(c.ok);
+        CertRow cert;
+        cert.serial_hex = "L" + std::to_string(++n);
+        cert.generation = 1;
+        cert.player_id  = id;
+        cert.issued_at  = now - 400 * 86400;
+        cert.not_before = now - 400 * 86400;
+        cert.not_after  = now + left;
+        ASSERT_TRUE(f.pdb->finishEnrollment(c.token_id, cert));
+    }
+    auto admin = f.person("root", sa::Role::Admin);
+    auto op    = f.person("op", sa::Role::Operator);
+    auto nobody = f.person("nobody", sa::Role::Viewer);
+    ASSERT_EQ(f.putGrants(admin, op.id, json::array({ScopeFixture::grant("group", f.G12)}))->status, 200);
+
+    auto cli = f.client();
+    const auto all = json::parse(cli.Get("/api/players/lifecycle", bearer(admin.token))->body);
+    EXPECT_EQ(all["screens"]["bound"], 3);
+    EXPECT_EQ(all["screens"]["counts"]["expired"], 1);
+    ASSERT_TRUE(all.contains("server"));
+    EXPECT_EQ(all["server"][0]["name"], "api_tls");
+
+    auto mine = cli.Get("/api/players/lifecycle", bearer(op.token));
+    ASSERT_TRUE(mine);
+    ASSERT_EQ(mine->status, 200) << mine->body;
+    const auto seen = json::parse(mine->body);
+    EXPECT_EQ(seen["screens"]["bound"], 1) << "only the group they were given";
+    EXPECT_EQ(seen["screens"]["counts"]["expired"], 0);
+    EXPECT_EQ(seen["screens"]["counts"]["soon14"], 1);
+    EXPECT_EQ(seen["screens"]["earliest"]["name"], "screen-12");
+    EXPECT_FALSE(seen.contains("server")) << "the server's certificates are for administrators";
+
+    const auto none = json::parse(cli.Get("/api/players/lifecycle", bearer(nobody.token))->body);
+    EXPECT_EQ(none["screens"]["bound"], 0) << "fail closed";
+    EXPECT_FALSE(none.contains("server"));
+    EXPECT_EQ(cli.Get("/api/players/lifecycle")->status, 401);
 }

@@ -489,6 +489,8 @@ std::string MetricsCollector::renderPrometheus(
         out << "liveqx_mounts_failed " << failed << '\n';
     }
 
+    if (!scope && extra_prometheus_) out << extra_prometheus_();
+
     return out.str();
 }
 

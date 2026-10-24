@@ -262,6 +262,7 @@ set(SOURCES
     src/players/CommandService.cpp
     src/players/CertLifecycle.cpp
     src/players/CertWatch.cpp
+    src/players/CertSummary.cpp
     src/mqtt/BrokerAdmin.cpp
     src/mqtt/BrokerLink.cpp
     src/mqtt/BrokerReload.cpp

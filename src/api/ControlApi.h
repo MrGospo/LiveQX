@@ -24,7 +24,7 @@ namespace liveqx::preview { class PreviewManager; }
 namespace liveqx::stress  { class StressService; }
 namespace liveqx::plugins { class PluginManager; }
 namespace liveqx::mounts  { class MountManager; }
-namespace liveqx::players { class PlayersService; class EnrollService; class CommandService; }
+namespace liveqx::players { class PlayersService; class EnrollService; class CommandService; struct ServerCertEntry; }
 namespace liveqx::audit   {
 class AuditLogger;
 class AuditRateLimiter;
@@ -149,6 +149,11 @@ public:
     struct BrokerUpdate { int status{200}; std::string body; std::string audit; };
     void setBrokerHooks(std::function<std::string()> status, std::function<void()> sync,
                         std::function<BrokerUpdate(const std::string& body)> update = {});
+
+    // The end dates of the server's own certificates (the API's TLS, the device CA, the broker's
+    // certificate and revocation list), shown to administrators on the lifecycle summary. Set
+    // before start(); without it the summary has no server part.
+    void setServerCertsProvider(std::function<std::vector<liveqx::players::ServerCertEntry>()> provider);
 
     // The size of the pool of worker threads of the HTTP server, and how many long-lived responses
     // (event, log and host-metrics streams) may be open at once, in all and per user. A stream holds

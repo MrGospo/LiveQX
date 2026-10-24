@@ -127,6 +127,9 @@ ServerCertResult issueServerCertTo(const std::filesystem::path& ca_dir,
 // malformed (caller checks subject.empty()).
 CertInfo readCertInfo(const std::filesystem::path& cert_path);
 
+// The same for the first certificate in a PEM text (empty subject when there is none or it is not valid PEM).
+CertInfo readCertInfoFromPem(std::string_view pem);
+
 // True iff the private key at key_path is the counterpart of the
 // public key in cert_path's leaf certificate, AND the cert is within
 // its validity window. Used at boot for `provided` mode and on every

@@ -5172,6 +5172,45 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/players/lifecycle:
+    get:
+      tags: [Players]
+      summary: Certificates of the fleet, as a whole
+      description: |
+        Viewer+. Сводка по сроку сертификатов привязанных экранов в пределах того, что
+        человеку выдано (права читаются при каждом запросе): сколько экранов на какой
+        ступени, у кого срок кончится раньше всех, и какие экраны должны были бы уже
+        продлеваться, но не могут.
+
+        `renew` — экраны в окне продления (последние `window_days` дней срока, пока он не
+        вышел): `online` — из них включённые и присылающие состояние, `offline` — выключенные
+        или молчащие (продлить они не могут, это другая причина), `failing` — включённые,
+        у которых последнее продление не удалось (`failures` — до 20 штук, раньше всех
+        кончающиеся первыми, с текстом ошибки самого экрана). `systemic` — одна общая
+        тревога вместо тревоги по каждому экрану: упавших не меньше трёх и не меньше
+        половины включённых экранов окна.
+
+        `server` — только у администратора: сроки собственных сертификатов сервера
+        (`api_tls`, `device_ca`, `device_ca_root` при двухуровневом центре, `broker_tls`,
+        `crl` — когда истекает список отзыва). Их конец выводит из строя весь парк.
+        Если даты нет, вместо неё `error`.
+      responses:
+        '200':
+          description: The summary.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayersLifecycle' }
+        '401':
+          description: Not signed in.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Модуль плееров не подключён (`players_not_configured`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/players/broker:
     get:
       tags: [Players]
@@ -5943,6 +5982,70 @@ components:
         stage: { type: string, enum: [ok, soon30, soon14, soon3, expired] }
         not_after: { type: integer, format: int64, description: 'Конец самого позднего действующего сертификата; нет, если действующих нет.' }
         days_left: { type: integer, format: int64, description: 'Целых дней осталось, вниз; ниже нуля, когда срок вышел.' }
+
+    PlayersLifecycle:
+      type: object
+      required: [now, screens]
+      properties:
+        now: { type: integer, format: int64, description: 'Время сервера, секунды Unix: от него считаны сроки.' }
+        screens:
+          type: object
+          required: [bound, counts, earliest, renew]
+          properties:
+            bound: { type: integer, description: 'Привязанных экранов в пределах прав.' }
+            counts:
+              type: object
+              required: [ok, soon30, soon14, soon3, expired]
+              properties:
+                ok: { type: integer }
+                soon30: { type: integer }
+                soon14: { type: integer }
+                soon3: { type: integer }
+                expired: { type: integer }
+            earliest:
+              type: object
+              nullable: true
+              description: 'Чей срок кончится раньше всех среди ещё не вышедших; `null`, если таких нет.'
+              required: [player_id, name, not_after, days_left]
+              properties:
+                player_id: { type: string, format: uuid }
+                name: { type: string }
+                not_after: { type: integer, format: int64 }
+                days_left: { type: integer, format: int64 }
+            renew:
+              type: object
+              required: [window_days, renewing, online, offline, failing, systemic, failures]
+              properties:
+                window_days: { type: integer, description: 'За сколько дней до конца включённый экран начинает продлевать.' }
+                renewing: { type: integer, description: 'Экранов в окне продления.' }
+                online: { type: integer }
+                offline: { type: integer }
+                failing: { type: integer }
+                systemic: { type: boolean }
+                failures:
+                  type: array
+                  items:
+                    type: object
+                    required: [player_id, name, stage, error]
+                    properties:
+                      player_id: { type: string, format: uuid }
+                      name: { type: string }
+                      stage: { type: string, enum: [ok, soon30, soon14, soon3, expired] }
+                      error: { type: string }
+                      not_after: { type: integer, format: int64 }
+                      days_left: { type: integer, format: int64 }
+        server:
+          type: array
+          description: 'Только у администратора.'
+          items:
+            type: object
+            required: [name]
+            properties:
+              name: { type: string, enum: [api_tls, device_ca, device_ca_root, broker_tls, crl] }
+              not_after: { type: integer, format: int64 }
+              days_left: { type: integer, format: int64 }
+              stage: { type: string, enum: [ok, soon30, soon14, soon3, expired] }
+              error: { type: string }
 
     PlayerCertificate:
       type: object

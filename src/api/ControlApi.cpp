@@ -1,6 +1,7 @@
 #include "api/ControlApi.h"
 #include "api/StreamLimiter.h"
 #include "players/CertLifecycle.h"
+#include "players/CertSummary.h"
 
 #include <algorithm>
 #include <ctime>
@@ -110,6 +111,7 @@ struct ControlApi::Impl {
     TlsBindings                                    tls_bindings;
     liveqx::net::TrustedProxies                    proxies;
     std::function<void()>                          on_tls_reload;
+    std::function<std::vector<liveqx::players::ServerCertEntry>()> server_certs;
     std::function<std::string()>                   broker_status;
     std::function<void()>                          broker_sync;
     std::function<ControlApi::BrokerUpdate(const std::string&)> broker_update;
@@ -457,6 +459,7 @@ void registerRbacRules(liveqx::auth::RbacMiddleware& rbac) {
     // EnrollService (uniform 401, rate limits).
     rbac.registerEndpoint("POST /api/players/enroll",               rbacOpen());
     rbac.registerEndpoint("GET /api/players",                       rbacRole(RbacRole::Viewer));
+    rbac.registerEndpoint("GET /api/players/lifecycle",             rbacRole(RbacRole::Viewer));
     rbac.registerEndpoint("GET /api/players/{id}",                  rbacRole(RbacRole::Viewer));
     rbac.registerEndpoint("POST /api/players",                      rbacRole(RbacRole::Admin));
     rbac.registerEndpoint("DELETE /api/players/{id}",               rbacRole(RbacRole::Admin));
@@ -4284,6 +4287,29 @@ ControlApi::ControlApi(int port, ChannelManager& manager,
                                  {"cert_counts", cert_counts}});
     });
 
+    // Where the certificates of the fleet stand, as a whole: the steps, the soonest end, the screens
+    // that fail to renew; and, for administrators, the server's own certificates. Registered before
+    // the route with an {id}, which would otherwise take "lifecycle" for a screen.
+    s.Get("/api/players/lifecycle",
+          [impl, pls, players_unavailable, loadHierarchy, accessFor, placeOf]
+          (const httplib::Request& req, httplib::Response& res) {
+        if (!pls) { players_unavailable(res); return; }
+        auto access = accessFor(req);
+        if (!access) { writeJson(res, 401, {{"error", "unauthorized"}}); return; }
+        const std::int64_t now_s = static_cast<std::int64_t>(std::time(nullptr));
+        const bool restricted = !access->isAdmin();
+        const auto hier = loadHierarchy(pls->db());
+        const auto sum = liveqx::players::summarizeScreens(
+            pls->db(), now_s, [&](const liveqx::players::PlayerRow& p) {
+                return !restricted || access->canView(placeOf(p, hier));
+            });
+        json out = {{"now", now_s}, {"screens", liveqx::players::screenSummaryJson(sum, now_s)}};
+        // The server's certificates say nothing about a place; they are for those who run the server.
+        if (!restricted && impl->server_certs)
+            out["server"] = liveqx::players::serverCertsJson(impl->server_certs(), now_s);
+        writeJson(res, 200, out);
+    });
+
     s.Get(R"(/api/players/([^/]+))",
           [pls, players_unavailable, playerJson, certJson, loadHierarchy, accessFor, placeOf]
           (const httplib::Request& req, httplib::Response& res) {
@@ -6661,6 +6687,10 @@ void ControlApi::stop() {
     if (impl_->stopped.exchange(true)) return;
     if (impl_->server) impl_->server->stop();
     if (impl_->thread.joinable()) impl_->thread.join();
+}
+
+void ControlApi::setServerCertsProvider(std::function<std::vector<liveqx::players::ServerCertEntry>()> provider) {
+    impl_->server_certs = std::move(provider);
 }
 
 void ControlApi::setBrokerHooks(std::function<std::string()> status, std::function<void()> sync,

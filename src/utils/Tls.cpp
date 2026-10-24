@@ -468,11 +468,9 @@ ServerCertResult issueServerCertTo(const fs::path& ca_dir,
     return r;
 }
 
-CertInfo readCertInfo(const fs::path& cert_path) {
+namespace {
+CertInfo infoOfCert(const X509_ptr& cert) {
     CertInfo info;
-    std::string err;
-    auto cert = loadCert(cert_path, err);
-    if (!cert) return info;
 
     info.subject              = nameToString(X509_get_subject_name(cert.get()));
     info.issuer               = nameToString(X509_get_issuer_name (cert.get()));
@@ -499,6 +497,21 @@ CertInfo readCertInfo(const fs::path& cert_path) {
     info.is_ca       = isCa(cert.get());
     info.self_signed = info.subject == info.issuer;
     return info;
+}
+}  // namespace
+
+CertInfo readCertInfo(const fs::path& cert_path) {
+    std::string err;
+    auto cert = loadCert(cert_path, err);
+    return cert ? infoOfCert(cert) : CertInfo{};
+}
+
+CertInfo readCertInfoFromPem(std::string_view pem) {
+    if (pem.empty() || pem.size() > (1u << 20)) return CertInfo{};
+    BIO_ptr bio(BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())));
+    if (!bio) return CertInfo{};
+    X509* c = PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr);     // the first certificate of the text
+    return c ? infoOfCert(X509_ptr(c)) : CertInfo{};
 }
 
 VerifyResult verifyKeyPair(const fs::path& cert_path, const fs::path& key_path) {

@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -48,6 +49,10 @@ public:
     std::string renderPrometheus(
         const liveqx::api::ChannelScope* scope = nullptr) const;
 
+    // Further families, appended to the full view only (never to a view narrowed to some
+    // channels): they describe the whole installation. Set before the server starts.
+    void setExtraPrometheus(std::function<std::string()> render) { extra_prometheus_ = std::move(render); }
+
     // /api/version response body. Static build identity + runtime feature
     // flags. fix19/21/22/28/29 each flip their own flag as they land.
     nlohmann::json renderVersion() const;
@@ -69,4 +74,5 @@ private:
     const liveqx::stress::StressService*   stress_;
     const liveqx::plugins::PluginManager*  plugins_;
     liveqx::mounts::MountManager*          mounts_;
+    std::function<std::string()>           extra_prometheus_;
 };

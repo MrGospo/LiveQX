@@ -175,8 +175,10 @@ add_executable(liveqx-tests
     ../src/players/CommandService.cpp
     ../src/players/CertLifecycle.cpp
     ../src/players/CertWatch.cpp
+    ../src/players/CertSummary.cpp
     test_command_service.cpp
     test_cert_lifecycle.cpp
+    test_cert_summary.cpp
     ../src/mqtt/BrokerAdmin.cpp
     ../src/mqtt/BrokerLink.cpp
     ../src/mqtt/BrokerReload.cpp
@@ -488,6 +490,7 @@ add_executable(liveqx-itests
     ../src/players/CommandService.cpp
     ../src/players/CertLifecycle.cpp
     ../src/players/CertWatch.cpp
+    ../src/players/CertSummary.cpp
     ../src/mqtt/BrokerAdmin.cpp
     ../src/players/EnrollService.cpp
     ../src/players/PlayerAccess.cpp

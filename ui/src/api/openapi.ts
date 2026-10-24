@@ -8016,6 +8016,79 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/players/lifecycle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Certificates of the fleet, as a whole
+         * @description Viewer+. Сводка по сроку сертификатов привязанных экранов в пределах того, что
+         *     человеку выдано (права читаются при каждом запросе): сколько экранов на какой
+         *     ступени, у кого срок кончится раньше всех, и какие экраны должны были бы уже
+         *     продлеваться, но не могут.
+         *
+         *     `renew` — экраны в окне продления (последние `window_days` дней срока, пока он не
+         *     вышел): `online` — из них включённые и присылающие состояние, `offline` — выключенные
+         *     или молчащие (продлить они не могут, это другая причина), `failing` — включённые,
+         *     у которых последнее продление не удалось (`failures` — до 20 штук, раньше всех
+         *     кончающиеся первыми, с текстом ошибки самого экрана). `systemic` — одна общая
+         *     тревога вместо тревоги по каждому экрану: упавших не меньше трёх и не меньше
+         *     половины включённых экранов окна.
+         *
+         *     `server` — только у администратора: сроки собственных сертификатов сервера
+         *     (`api_tls`, `device_ca`, `device_ca_root` при двухуровневом центре, `broker_tls`,
+         *     `crl` — когда истекает список отзыва). Их конец выводит из строя весь парк.
+         *     Если даты нет, вместо неё `error`.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The summary. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlayersLifecycle"];
+                    };
+                };
+                /** @description Not signed in. */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Модуль плееров не подключён (`players_not_configured`). */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/players/broker": {
         parameters: {
             query?: never;
@@ -9162,6 +9235,68 @@ export interface components {
              * @description Целых дней осталось, вниз; ниже нуля, когда срок вышел.
              */
             days_left?: number;
+        };
+        PlayersLifecycle: {
+            /**
+             * Format: int64
+             * @description Время сервера, секунды Unix: от него считаны сроки.
+             */
+            now: number;
+            screens: {
+                /** @description Привязанных экранов в пределах прав. */
+                bound: number;
+                counts: {
+                    ok: number;
+                    soon30: number;
+                    soon14: number;
+                    soon3: number;
+                    expired: number;
+                };
+                /** @description Чей срок кончится раньше всех среди ещё не вышедших; `null`, если таких нет. */
+                earliest: {
+                    /** Format: uuid */
+                    player_id: string;
+                    name: string;
+                    /** Format: int64 */
+                    not_after: number;
+                    /** Format: int64 */
+                    days_left: number;
+                } | null;
+                renew: {
+                    /** @description За сколько дней до конца включённый экран начинает продлевать. */
+                    window_days: number;
+                    /** @description Экранов в окне продления. */
+                    renewing: number;
+                    online: number;
+                    offline: number;
+                    failing: number;
+                    systemic: boolean;
+                    failures: {
+                        /** Format: uuid */
+                        player_id: string;
+                        name: string;
+                        /** @enum {string} */
+                        stage: "ok" | "soon30" | "soon14" | "soon3" | "expired";
+                        error: string;
+                        /** Format: int64 */
+                        not_after?: number;
+                        /** Format: int64 */
+                        days_left?: number;
+                    }[];
+                };
+            };
+            /** @description Только у администратора. */
+            server?: {
+                /** @enum {string} */
+                name: "api_tls" | "device_ca" | "device_ca_root" | "broker_tls" | "crl";
+                /** Format: int64 */
+                not_after?: number;
+                /** Format: int64 */
+                days_left?: number;
+                /** @enum {string} */
+                stage?: "ok" | "soon30" | "soon14" | "soon3" | "expired";
+                error?: string;
+            }[];
         };
         PlayerCertificate: {
             serial: string;

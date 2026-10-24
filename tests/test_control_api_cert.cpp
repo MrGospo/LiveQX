@@ -16,6 +16,7 @@
 #include <chrono>
 #include <ctime>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <set>
 #include <thread>
@@ -27,6 +28,10 @@
 
 #include "api/ChannelManager.h"
 #include "api/ControlApi.h"
+#include "api/MetricsCollector.h"
+#include "api/RbacScope.h"
+#include "metrics/ProcessMetrics.h"
+#include "players/CertSummary.h"
 #include "players/PlayersDb.h"
 #include "players/PlayersService.h"
 #include "utils/Tls.h"
@@ -51,7 +56,8 @@ struct CertApiFixture {
     int                             port;
     int                             serial{0};
 
-    explicit CertApiFixture(int p) : manager(nullptr, fs::path{}), port(p) {
+    using ServerCerts = std::function<std::vector<ServerCertEntry>()>;
+    explicit CertApiFixture(int p, ServerCerts server_certs = {}) : manager(nullptr, fs::path{}), port(p) {
         static std::atomic<int> seq{0};
         tmp = fs::temp_directory_path() /
               ("lqx-certapi-" + std::to_string(::getpid()) + "-" + std::to_string(seq++));
@@ -67,6 +73,7 @@ struct CertApiFixture {
             port, manager, nullptr, LivezOptions{}, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
             nullptr, nullptr, nullptr, nullptr, nullptr, TlsBindings{}, nullptr, nullptr, nullptr, nullptr,
             nullptr, svc.get());
+        if (server_certs) api->setServerCertsProvider(std::move(server_certs));
         api->start();
         httplib::Client cli("127.0.0.1", port);
         for (int i = 0; i < 100; ++i) {
@@ -239,4 +246,80 @@ TEST(ControlApiCert, TheCardShowsTheStepToo) {
     ASSERT_TRUE(p);
     ASSERT_EQ(p->status, 200);
     EXPECT_FALSE(json::parse(p->body).contains("cert"));
+}
+
+TEST(ControlApiCert, TheLifecycleSummaryCountsTheFleetAndNamesTheScreensThatFailToRenew) {
+    CertApiFixture f(kBasePort + 6);
+    f.fleet();
+    // The 10-day screen is on and says its renewal failed.
+    const auto soon = f.db->listPlayers({});
+    std::string id14;
+    for (const auto& p : soon) if (p.name == "s-soon14") id14 = p.id;
+    StatusRow st;
+    st.player_id = id14;
+    st.updated_at = CertApiFixture::now();
+    st.online = true;
+    st.payload_json = json{{"last_renew_error", "tls handshake failed"}}.dump();
+    ASSERT_TRUE(f.db->applyStatuses({st}));
+
+    auto cli = f.client();
+    auto r = cli.Get("/api/players/lifecycle");
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    const json j = json::parse(r->body);
+    EXPECT_EQ(j["screens"]["bound"], 5);
+    EXPECT_EQ(j["screens"]["counts"]["expired"], 1);
+    EXPECT_EQ(j["screens"]["counts"]["soon3"], 1);
+    EXPECT_EQ(j["screens"]["earliest"]["name"], "s-soon3");
+    EXPECT_EQ(j["screens"]["renew"]["failing"], 1);
+    ASSERT_EQ(j["screens"]["renew"]["failures"].size(), 1u);
+    EXPECT_EQ(j["screens"]["renew"]["failures"][0]["error"], "tls handshake failed");
+    EXPECT_EQ(j["screens"]["renew"]["failures"][0]["stage"], "soon14");
+    EXPECT_FALSE(j.contains("server")) << "no server certificates were given";
+}
+
+TEST(ControlApiCert, TheLifecycleRouteIsNotTakenForAScreenCalledLifecycle) {
+    CertApiFixture f(kBasePort + 7);
+    auto cli = f.client();
+    auto r = cli.Get("/api/players/lifecycle");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 200) << "the summary, not a 404 'no such screen'";
+    EXPECT_TRUE(json::parse(r->body).contains("screens"));
+}
+
+TEST(ControlApiCert, ServerCertificatesAreShownWhenTheServerGivesThem) {
+    CertApiFixture f(kBasePort + 8, [] {
+        const std::int64_t now = std::time(nullptr);
+        return std::vector<ServerCertEntry>{{"api_tls", now + 200 * kDay, ""}, {"crl", now + 2 * kDay, ""},
+                                            {"broker_tls", 0, "missing"}};
+    });
+    auto cli = f.client();
+    auto r = cli.Get("/api/players/lifecycle");
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    const json server = json::parse(r->body)["server"];
+    ASSERT_EQ(server.size(), 3u);
+    EXPECT_EQ(server[0]["name"], "api_tls");
+    EXPECT_EQ(server[0]["stage"], "ok");
+    EXPECT_EQ(server[1]["name"], "crl");
+    EXPECT_EQ(server[1]["stage"], "soon3");
+    EXPECT_EQ(server[2]["error"], "missing");
+    EXPECT_FALSE(server[2].contains("stage"));
+}
+
+TEST(ControlApiCert, ThePrometheusScrapeGetsTheFleetFamiliesOnlyInTheFullView) {
+    ChannelManager mgr(nullptr);
+    ProcessMetrics pm(/*start=*/1234567890);
+    BuildInfo b{"1.0.0", "abc", "2026-05-10T10:00:00Z", "Release"};
+    MetricsCollector mc(mgr, pm, b);
+    EXPECT_EQ(mc.renderPrometheus().find("liveqx_players_cert_stage"), std::string::npos)
+        << "nothing is added until the server says so";
+
+    mc.setExtraPrometheus([] { return std::string("liveqx_players_cert_stage{stage=\"ok\"} 7\n"); });
+    EXPECT_NE(mc.renderPrometheus().find("liveqx_players_cert_stage{stage=\"ok\"} 7\n"), std::string::npos);
+
+    liveqx::api::ChannelScope narrowed;                     // a person who may see only some channels
+    narrowed.show_all = false;
+    EXPECT_EQ(mc.renderPrometheus(&narrowed).find("liveqx_players_cert_stage"), std::string::npos)
+        << "fleet-wide numbers are not for a view narrowed to some channels";
 }
