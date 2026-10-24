@@ -529,6 +529,38 @@ TEST_F(PlayersDbTest, CrlNumbersOnlyGoUpPerGenerationAndSurviveARestart) {
     EXPECT_EQ(db_->nextCrlNumber(1), 3);
 }
 
+TEST_F(PlayersDbTest, PurgingDeadTokensRemovesUsedAndRunOutOnesAndNeverOneThatCanStillBeClaimed) {
+    const std::int64_t kDay = 86400;
+    // Used long ago: the token of a screen that is enrolled.
+    const auto used = create("used");
+    auto cu = db_->claimToken(used.player.id, used.token, kT0 + 1);
+    ASSERT_TRUE(cu.ok);
+    ASSERT_TRUE(db_->finishEnrollment(cu.token_id, cert(used.player.id, "AF01", 1), kT0 + 2));
+    // Never used, ran out long ago: a package that was never taken to a screen.
+    const auto lapsed = db_->createPlayer("lapsed", std::nullopt, "strict", 3600, kT0, std::nullopt);
+    ASSERT_TRUE(lapsed.has_value());
+    // Never used, still good a hundred days on (a token lives a year at most).
+    const auto fresh = db_->createPlayer("fresh", std::nullopt, "strict", 300 * kDay, kT0, std::nullopt);
+    ASSERT_TRUE(fresh.has_value());
+
+    const std::int64_t cutoff = kT0 + 100 * kDay;
+    EXPECT_EQ(db_->purgeDeadTokens(cutoff), 2u) << "the used one and the one that ran out";
+    EXPECT_EQ(db_->purgeDeadTokens(cutoff), 0u) << "nothing more to remove";
+
+    // What is left still behaves: the live token can be claimed, the removed ones are simply unknown.
+    EXPECT_TRUE(db_->claimToken(fresh->player.id, fresh->token, cutoff).ok);
+    EXPECT_EQ(db_->claimToken(lapsed->player.id, lapsed->token, cutoff).reason, ClaimFailure::NoMatch);
+}
+
+TEST_F(PlayersDbTest, ATokenIsKeptUntilTheMarginHasPassedSoALateAttemptIsStillClassified) {
+    const std::int64_t kDay = 86400;
+    const auto p = db_->createPlayer("p", std::nullopt, "strict", 3600, kT0, std::nullopt);
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(db_->purgeDeadTokens(kT0 + 3600 - 1), 0u) << "not run out yet";
+    EXPECT_EQ(db_->purgeDeadTokens(kT0 + 3600 - kDay), 0u);
+    EXPECT_EQ(db_->claimToken(p->player.id, p->token, kT0 + 3600 + 10).reason, ClaimFailure::Expired);
+}
+
 TEST_F(PlayersDbTest, PurgingExpiredCertificatesKeepsTheLiveOnes) {
     const auto id = enrolled("AE01");
     ASSERT_TRUE(db_->recordRenewal(cert(id, "AE02", 1, kT0, kT0 + 1000), kT0 + 5));

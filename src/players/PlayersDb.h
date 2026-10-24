@@ -333,6 +333,11 @@ public:
     // Deletes certificate records whose notAfter is before `now`. Returns how many.
     std::size_t          purgeExpiredCerts(std::int64_t now = 0);
 
+    // Removes pairing tokens that are of no use any more: used ones claimed before `before`, and unused ones
+    // that ran out before `before`. A token that can still be claimed is never touched. (A caller leaves a
+    // margin so a late attempt with an old token is still told "expired" or "used" in the audit trail.)
+    std::size_t          purgeDeadTokens(std::int64_t before);
+
     // ── objects and groups ───────────────────────────────────────────────
     // Names are trimmed, 1..120 bytes, no control characters. An object name is
     // unique everywhere, a group name within its object. Ids are never reused

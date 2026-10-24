@@ -979,6 +979,15 @@ std::size_t PlayersDb::purgeExpiredCerts(std::int64_t now) {
     return s.exec() ? static_cast<std::size_t>(s.changes()) : 0;
 }
 
+std::size_t PlayersDb::purgeDeadTokens(std::int64_t before) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_) return 0;
+    Stmt s(db_, "DELETE FROM enroll_tokens WHERE (used_at IS NOT NULL AND used_at < ?) "
+                "OR (used_at IS NULL AND expires_at < ?)");
+    s.i64(1, before).i64(2, before);
+    return s.exec() ? static_cast<std::size_t>(s.changes()) : 0;
+}
+
 // ─── objects and groups ─────────────────────────────────────────────────────
 namespace {
 void setResult(GroupResult* out, GroupResult r) { if (out) *out = r; }

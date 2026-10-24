@@ -201,6 +201,9 @@ RetentionReport PlayersService::applyRetention(std::int64_t now) {
     // A certificate that expired is no use to anyone; a month's margin keeps the
     // record around for any question about a connection that was refused for it.
     r.certificates = db_.purgeExpiredCerts(now - 30 * kDay);
+    // A pairing token is used once or runs out; the same month's margin keeps a late attempt with an old
+    // one classifiable (expired / used) in the audit trail.
+    r.tokens       = db_.purgeDeadTokens(now - 30 * kDay);
     return r;
 }
 

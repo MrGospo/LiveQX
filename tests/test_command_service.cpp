@@ -934,6 +934,15 @@ TEST_F(RetentionTest, OldEventsGoAndRecentOnesStay) {
     EXPECT_EQ(left, (std::set<std::string>{"edge-offline", "recent-online"}));
 }
 
+TEST_F(RetentionTest, PairingTokensOfEnrolledScreensAreRemovedAfterAMonthAndReportedSeparately) {
+    const auto a = screen();                                  // enrolled: its token was used at kT0
+    const std::int64_t now = kT0 + 100 * kDay;
+    const auto r = players_->applyRetention(now);
+    EXPECT_EQ(r.tokens, 1u);
+    EXPECT_EQ(players_->applyRetention(now).tokens, 0u);
+    EXPECT_TRUE(db_->findPlayer(a).has_value()) << "the screen itself is untouched";
+}
+
 TEST_F(RetentionTest, SettledCommandsOlderThanTheLimitGoAndUnsettledOnesNeverDoWhateverTheirAge) {
     const auto a = screen();
     const std::int64_t now = kT0 + 1000 * kDay;

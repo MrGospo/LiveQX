@@ -59,7 +59,8 @@ struct RetentionReport {
     std::size_t commands{0};
     std::size_t jobs{0};
     std::size_t certificates{0};
-    std::size_t total() const { return events + commands + jobs + certificates; }
+    std::size_t tokens{0};
+    std::size_t total() const { return events + commands + jobs + certificates + tokens; }
 };
 
 struct PlayersServiceOptions {

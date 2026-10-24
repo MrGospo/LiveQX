@@ -1182,8 +1182,8 @@ int main(int argc, char* argv[]) {
                 while (!st.stop_requested()) {
                     const auto r = svc->applyRetention();
                     if (r.total() > 0)
-                        LOG_INFO("Players: retention removed {} event(s), {} command(s), {} job(s), {} expired certificate record(s)",
-                                 r.events, r.commands, r.jobs, r.certificates);
+                        LOG_INFO("Players: retention removed {} event(s), {} command(s), {} job(s), {} expired certificate record(s), {} pairing token(s)",
+                                 r.events, r.commands, r.jobs, r.certificates, r.tokens);
                     nap(86400);
                 }
             });
