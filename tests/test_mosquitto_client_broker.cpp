@@ -828,24 +828,77 @@ TEST(MosquittoShippedConfig, TheBrokerStartsOnTheInstallersTemplateAndOnlyWhatTh
     posix_spawn_file_actions_destroy(&fa);
     ASSERT_TRUE(waitFor([&] { return liveqx::testing::portAccepts(port); }, 8000)) << liveqx::testing::readFileText(dir / "broker.out");
 
-    // The server connects under its own identity and checks the broker's name against the certificate the server wrote.
+    // The server's standing connection (the real link) checks the broker's name against the certificate
+    // the server wrote, and gives the player its place on the broker.
     liveqx::tls::BrokerIdentity identity;
     ASSERT_TRUE(liveqx::tls::DeviceCa::ensureBrokerIdentity(dir / "device_ca", mk, *device_ca, identity, err)) << err;
-    mqtt::ClientOptions so;
-    so.host = "127.0.0.1";
-    so.port = port;
-    so.client_id = "liveqx-server";
-    so.ca_pem = liveqx::testing::readFileText(dir / "tls" / "ca.crt");
-    so.cert_chain_pem = identity.cert_chain_pem;
-    so.key_pem = identity.key_pem;
-    so.verify_hostname = true;
-    mqtt::MosquittoClient server(so);
-    ASSERT_TRUE(server.start());
-    EXPECT_TRUE(waitFor([&] { return server.connected(); }, 10000)) << server.lastError() << "\n" << liveqx::testing::readFileText(dir / "broker.out");
+    const std::string server_root = liveqx::testing::readFileText(dir / "tls" / "ca.crt");
+    const std::string player_id = liveqx::testing::randomUuidV4();
+    mqtt::BrokerLinkOptions lo;
+    lo.host = "127.0.0.1";
+    lo.port = port;
+    lo.retry_s = 1;
+    lo.reconcile_interval_s = 30;
+    lo.identity = [&](mqtt::BrokerIdentityPem& id, std::string&) {
+        id.cert_chain_pem = identity.cert_chain_pem;
+        id.key_pem = identity.key_pem;
+        id.serial = identity.serial_hex;
+        return true;
+    };
+    lo.trust_pem = [&] { return server_root; };
+    lo.wanted = [&] { return std::set<std::string>{player_id}; };
+    lo.make_client = [](const mqtt::ClientOptions& co) -> std::unique_ptr<mqtt::IMqttClient> {
+        return std::make_unique<mqtt::MosquittoClient>(co);
+    };
+    mqtt::BrokerLink link(std::move(lo));
+    link.start();
+    ASSERT_TRUE(waitFor([&] { return link.status().last_reconcile_ok; }, 20000))
+        << link.status().detail << "\n" << liveqx::testing::readFileText(dir / "broker.out");
+    EXPECT_EQ(link.status().last_report.issued, 1u);
 
-    // The server's SIGHUP reaches the broker by the pid file the template names, and nothing is lost.
+    // A screen as the player makes it: the certificate its CSR got, the session it asks for
+    // (persistent, never expiring on its own: the broker's `persistent_client_expiration` rules).
+    std::string player_key, cert_err;
+    const std::string csr = liveqx::testing::makeCsrAndKey(player_key);
+    liveqx::tls::IssuedClientCert player_cert;
+    ASSERT_TRUE(device_ca->signClientCsr(csr, player_id, 365, player_cert, cert_err)) << cert_err;
+    mqtt::ClientOptions po;
+    po.host = "127.0.0.1";
+    po.port = port;
+    po.client_id = player_id;
+    po.ca_pem = server_root;
+    po.cert_chain_pem = player_cert.cert_pem + player_cert.chain_pem;
+    po.key_pem = player_key;
+    po.clean_start = false;
+    po.session_expiry_s = 0xFFFFFFFFu;
+    const std::string topic = "liveqx/v1/players/" + player_id + "/commands";
+    {
+        mqtt::MosquittoClient screen(po);
+        screen.subscribe(topic, 1);
+        ASSERT_TRUE(screen.start());
+        ASSERT_TRUE(waitFor([&] { return screen.connected(); }, 10000)) << screen.lastError();
+        screen.stop();                                              // the screen is switched off
+    }
+
+    // The server reloads the broker's files, as it does after every new list, while the screen is away.
     EXPECT_EQ(mqtt::reloadBrokerFromPidFile(run_dir / "mosquitto.pid"), "");
     std::this_thread::sleep_for(std::chrono::seconds(1));
-    EXPECT_TRUE(server.connected()) << "a reload does not cut the open connections";
-    server.stop();
+    EXPECT_EQ(link.status().state, "connected") << "a reload does not cut the open connections";
+
+    // A command sent meanwhile waits for the screen and is there when it comes back.
+    mqtt::Message cmd;
+    cmd.topic = topic;
+    cmd.payload = "restart_player";
+    cmd.expiry_s = 300;
+    ASSERT_EQ(link.publish(cmd), mqtt::PublishResult::Ok);
+    std::mutex got_mu;
+    std::vector<std::string> got;
+    mqtt::MosquittoClient back(po);
+    back.setMessageHandler([&](const mqtt::Message& m) { std::lock_guard<std::mutex> lk(got_mu); got.push_back(m.payload); });
+    back.subscribe(topic, 1);
+    ASSERT_TRUE(back.start());
+    EXPECT_TRUE(waitFor([&] { std::lock_guard<std::mutex> lk(got_mu); return !got.empty(); }, 8000))
+        << "the command queued for the switched-off screen arrived when it returned";
+    back.stop();
+    link.stop();
 }
