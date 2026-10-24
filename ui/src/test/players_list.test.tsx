@@ -63,7 +63,7 @@ const tree = (): PlayerObject[] => [
 
 // What the server answers for a list: the page, how many match, and the count by status.
 const setPage = (players: Player[], counts: PlayerPage['counts'], total = players.length) => {
-  listState.data = { players, total, counts };
+  listState.data = { players, total, counts, cert_counts: { ok: 0, soon30: 0, soon14: 0, soon3: 0, expired: 0 } };
 };
 
 const renderList = (url = '/players') =>
@@ -104,6 +104,56 @@ describe('PlayersPage', () => {
     expect(within(off).getByText('Offline')).toBeInTheDocument();
     expect(within(screen.getByRole('link', { name: 'Window left' }).closest('tr')!).getByText('Awaiting enrolment')).toBeInTheDocument();
     expect(within(screen.getByRole('link', { name: 'Old one' }).closest('tr')!).getByText('Revoked')).toBeInTheDocument();
+  });
+
+  it('shows how long each certificate has left, and only for screens that are bound', () => {
+    setPage([
+      mk('a', 'Fine', { cert: { stage: 'ok', not_after: nowSec() + 300 * 86400, days_left: 300 } }),
+      mk('b', 'Close', { cert: { stage: 'soon14', not_after: nowSec() + 10 * 86400, days_left: 10 } }),
+      mk('c', 'Today', { cert: { stage: 'soon3', not_after: nowSec() + 3600, days_left: 0 } }),
+      mk('d', 'Gone', { cert: { stage: 'expired', days_left: -4 } }),
+      mk('e', 'Waiting', { state: 'pending', status: undefined }),
+    ], { online: 4, offline: 0, pending: 1, revoked: 0 });
+    renderList();
+    const cell = (name: string) => screen.getByRole('link', { name }).closest('tr')!;
+    expect(within(cell('Fine')).getByText('300 days left')).toBeInTheDocument();
+    expect(within(cell('Close')).getByText('10 days left')).toBeInTheDocument();
+    expect(within(cell('Today')).getByText('less than a day')).toBeInTheDocument();
+    expect(within(cell('Gone')).getByText('ended')).toBeInTheDocument();
+    expect(within(cell('Waiting')).queryByText(/left|ended/)).not.toBeInTheDocument();
+  });
+
+  it('offers the certificate buttons only when some certificate is close to its end', () => {
+    renderList();
+    expect(screen.queryByRole('group', { name: 'Filter by certificate end' })).not.toBeInTheDocument();
+
+    listState.data = { ...listState.data!, cert_counts: { ok: 5, soon30: 2, soon14: 1, soon3: 0, expired: 1 } };
+    renderList();
+    expect(screen.getByRole('button', { name: 'Ends soon · 3' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: 'Ended · 1' })).toBeInTheDocument();
+  });
+
+  it('asks the server for the certificate step, reads it from the address, and turns it off by a second press', async () => {
+    const user = userEvent.setup();
+    listState.data = { ...listState.data!, cert_counts: { ok: 5, soon30: 2, soon14: 0, soon3: 0, expired: 1 } };
+    renderList('/players?cert=expired');
+    expect(lastCall()).toMatchObject({ cert: 'expired' });
+    expect(screen.getByRole('button', { name: 'Ended · 1' })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(screen.getByRole('button', { name: 'Ends soon · 2' }));
+    expect(lastCall()).toMatchObject({ cert: 'soon' });
+    await user.click(screen.getByRole('button', { name: 'Ends soon · 2' }));
+    expect(lastCall().cert).toBeUndefined();
+  });
+
+  it('keeps the buttons while the filter leaves nothing, so it can be turned off, and ignores a damaged value', () => {
+    listState.data = { players: [], total: 0, counts: { online: 1, offline: 0, pending: 0, revoked: 0 },
+                       cert_counts: { ok: 1, soon30: 0, soon14: 0, soon3: 0, expired: 0 } };
+    renderList('/players?cert=expired');
+    expect(screen.getByRole('button', { name: 'Ended · 0' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('Nothing found')).toBeInTheDocument();
+
+    renderList('/players?cert=bogus');
+    expect(lastCall().cert).toBeUndefined();
   });
 
   it('shows the order the server gave and does not sort again', () => {
@@ -297,6 +347,46 @@ describe('PlayerDetailPage', () => {
     expect(within(screen.getByText('soon').closest('tr')!).getByText('ends soon')).toBeInTheDocument();
     expect(within(screen.getByText('gone').closest('tr')!).getByText('expired')).toBeInTheDocument();
     expect(within(screen.getByText('rev').closest('tr')!).getByText('revoked')).toBeInTheDocument();
+  });
+
+  it('tells what to do about a certificate that has ended', () => {
+    oneState.data = details({ cert: { stage: 'expired', days_left: -3 } });
+    renderDetail();
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent("The screen's certificate has ended");
+    expect(alert).toHaveTextContent('Bind again');
+  });
+
+  it('tells a screen that is on and one that is off apart when its certificate is close to the end', () => {
+    oneState.data = details({ cert: { stage: 'soon14', not_after: nowSec() + 10 * 86400, days_left: 10 } });
+    const { unmount } = renderDetail();
+    expect(screen.getByRole('status')).toHaveTextContent('10 days left');
+    expect(screen.getByRole('status')).toHaveTextContent('has not');
+    unmount();
+    oneState.data = details({ cert: { stage: 'soon14', not_after: nowSec() + 10 * 86400, days_left: 10 },
+                              status: { online: false, version: '1.4.1', updated_at: nowSec() - 7200 } });
+    renderDetail();
+    expect(screen.getAllByRole('status').some(n => /off or out of touch/.test(n.textContent ?? ''))).toBe(true);
+  });
+
+  it('shows no certificate callout while the certificate is fine or the screen is not bound', () => {
+    oneState.data = details({ cert: { stage: 'ok', not_after: nowSec() + 300 * 86400, days_left: 300 } });
+    const { unmount } = renderDetail();
+    expect(screen.queryByText(/certificate has ended|certificate ends/i)).not.toBeInTheDocument();
+    unmount();
+    oneState.data = details({ state: 'pending', status: undefined });
+    renderDetail();
+    expect(screen.queryByText(/certificate has ended|certificate ends/i)).not.toBeInTheDocument();
+  });
+
+  it('writes the certificate steps of the journal in words', () => {
+    oneState.data = details({ events: [
+      { id: 2, ts: nowSec(), kind: 'cert_stage', details: JSON.stringify({ stage: 'expired', previous: 'soon3' }) },
+      { id: 1, ts: nowSec(), kind: 'cert_stage', details: JSON.stringify({ stage: 'soon14', previous: 'soon30', not_after: 1_900_000_000 }) },
+    ] });
+    renderDetail();
+    expect(screen.getByText('Certificate: ended')).toBeInTheDocument();
+    expect(screen.getByText(/^Certificate: under 14 days \(until /)).toBeInTheDocument();
   });
 
   it('explains a screen that is not enrolled yet', () => {

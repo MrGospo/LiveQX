@@ -1,7 +1,7 @@
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { AlertTriangle, MonitorSmartphone } from 'lucide-react';
-import { useBrokerStatus, useCommandJobs, usePlayersSummary } from '@/api/queries/players';
+import { useBrokerStatus, useCommandJobs, usePlayersLifecycle, usePlayersSummary } from '@/api/queries/players';
 import { Block } from '@/components/Block';
 import { useAuthStore } from '@/stores/auth';
 
@@ -18,6 +18,7 @@ export function PlayersSummary() {
   const summary = usePlayersSummary();
   const broker = useBrokerStatus({ enabled: isAdmin });
   const jobs = useCommandJobs({ enabled: mayCommand });
+  const lifecycle = usePlayersLifecycle();
 
   // The module off, or an error: say nothing here rather than a failure on the main page.
   if (summary.isLoading || summary.isError || !summary.data) return null;
@@ -27,6 +28,14 @@ export function PlayersSummary() {
 
   const running = (jobs.data ?? []).filter(j => j.state === 'running').length;
   const brokerDown = isAdmin && !!broker.data && broker.data.enabled && broker.data.state !== 'connected';
+  // Certificates: screens that are over or close to it, a renewal that fails across the fleet, and
+  // (administrators) the server's own certificates, whose end takes every screen down with it.
+  const lc = lifecycle.data;
+  const certExpired = lc?.screens.counts.expired ?? 0;
+  const certSoon = lc ? lc.screens.counts.soon30 + lc.screens.counts.soon14 + lc.screens.counts.soon3 : 0;
+  const renewAlarm = !!lc?.screens.renew.systemic;
+  const serverCerts = (lc?.server ?? []).filter(c => (c.stage ? c.stage !== 'ok' : !!c.error));
+  const needsLook = counts.offline > 0 || running > 0 || brokerDown || certExpired > 0 || certSoon > 0 || renewAlarm || serverCerts.length > 0;
   const cells: { key: 'online' | 'offline' | 'pending' | 'revoked'; tone: string }[] = [
     { key: 'online',  tone: 'text-[var(--success)]' },
     { key: 'offline', tone: counts.offline > 0 ? 'text-[var(--danger)]' : 'text-[var(--text-primary)]' },
@@ -57,7 +66,7 @@ export function PlayersSummary() {
         </dl>
       )}
 
-      {(counts.offline > 0 || running > 0 || brokerDown) && (
+      {needsLook && (
         <ul className="list-none m-0 mt-4 p-0 flex flex-col gap-1.5 text-sm" aria-label={t('players.summary.attention')}>
           {counts.offline > 0 && total > 0 && (
             <li className="text-[var(--text-muted)]">
@@ -69,6 +78,36 @@ export function PlayersSummary() {
             <li className="text-[var(--text-muted)]">
               {t('players.summary.jobs', { count: running })}{' '}
               <Link to="/players/jobs" className="text-[var(--accent)] hover:underline">{t('players.summary.show')}</Link>
+            </li>
+          )}
+          {serverCerts.map(c => (
+            <li key={c.name} className="flex items-center gap-1.5 text-[var(--danger)]">
+              <AlertTriangle size={14} aria-hidden />
+              {c.stage === 'expired'
+                ? t('players.summary.serverCertExpired', { name: t(`players.cert.server.${c.name}`) })
+                : c.stage
+                  ? t('players.summary.serverCertSoon', { name: t(`players.cert.server.${c.name}`), count: Math.max(c.days_left ?? 0, 0) })
+                  : t('players.summary.serverCertBroken', { name: t(`players.cert.server.${c.name}`) })}{' '}
+              <Link to="/players/broker" className="text-[var(--accent)] hover:underline">{t('players.summary.show')}</Link>
+            </li>
+          ))}
+          {renewAlarm && lc && (
+            <li className="flex items-center gap-1.5 text-[var(--danger)]">
+              <AlertTriangle size={14} aria-hidden />
+              {t('players.summary.renewAlarm', { failing: lc.screens.renew.failing, online: lc.screens.renew.online })}{' '}
+              <Link to="/players?cert=soon" className="text-[var(--accent)] hover:underline">{t('players.summary.show')}</Link>
+            </li>
+          )}
+          {certExpired > 0 && (
+            <li className="text-[var(--danger)]">
+              {t('players.summary.certExpired', { count: certExpired })}{' '}
+              <Link to="/players?cert=expired" className="text-[var(--accent)] hover:underline">{t('players.summary.show')}</Link>
+            </li>
+          )}
+          {certSoon > 0 && (
+            <li className="text-[var(--warning)]">
+              {t('players.summary.certSoon', { count: certSoon })}{' '}
+              <Link to="/players?cert=soon" className="text-[var(--accent)] hover:underline">{t('players.summary.show')}</Link>
             </li>
           )}
           {brokerDown && (

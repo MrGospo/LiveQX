@@ -59,6 +59,13 @@ export function describeEvent(ev: PlayerEvent, t: TFunction): string {
       return t('players.events.offline', {
         reason: t(`players.events.offlineReason.${str(d.reason)}`, { defaultValue: str(d.reason) }),
       });
+    case 'cert_stage': {
+      const stage = str(d.stage);
+      const label = t(`players.cert.stage.${stage}`, { defaultValue: stage });
+      const until = typeof d.not_after === 'number' ? new Date(d.not_after * 1000).toLocaleDateString() : '';
+      return until && stage !== 'expired' ? t('players.events.cert_stage_until', { stage: label, until })
+                                          : t('players.events.cert_stage', { stage: label });
+    }
     case 'version_changed':
       return t('players.events.version_changed', { from: str(d.from) || '—', to: str(d.to) || '—' });
     case 'command_sent':

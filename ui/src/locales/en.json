@@ -1530,6 +1530,14 @@
       "jobs_one": "{{count}} command job is running.",
       "jobs_other": "{{count}} command jobs are running.",
       "brokerDown": "The server is not connected to the command broker: commands will not reach screens.",
+      "certExpired_one": "{{count}} screen's certificate has ended: it has to be bound again.",
+      "certExpired_other": "{{count}} screens' certificates have ended: they have to be bound again.",
+      "certSoon_one": "{{count}} screen's certificate ends in under 30 days: the screen has not renewed it.",
+      "certSoon_other": "{{count}} screens' certificates end in under 30 days: they have not renewed them.",
+      "renewAlarm": "Certificate renewal is failing on {{failing}} of {{online}} screens that are on. This is a common fault, not single screens.",
+      "serverCertExpired": "A server certificate has ended ({{name}}): screens will not be able to connect.",
+      "serverCertSoon": "A server certificate ends soon ({{name}}): {{count}} day(s) left.",
+      "serverCertBroken": "Could not read the end date of a server certificate ({{name}}).",
       "show": "Show"
     },
     "audit": {
@@ -1825,6 +1833,7 @@
       "search": "Name or place",
       "statusFilter": "Filter by status",
       "allStatuses": "All",
+      "certFilter": "Filter by certificate end",
       "treeFailed": "Could not load the list of places.",
       "loadFailed": "Could not load the list of screens.",
       "noPlace": "no group",
@@ -1833,7 +1842,7 @@
       "prev": "Previous",
       "next": "Next",
       "pages": "List pages",
-      "col": { "name": "Name", "place": "Place", "status": "Status", "version": "Version", "lastSignal": "Last signal" },
+      "col": { "name": "Name", "place": "Place", "status": "Status", "cert": "Certificate", "version": "Version", "lastSignal": "Last signal" },
       "empty": {
         "title": "No screens yet",
         "text": "The screens you have access to appear here. If you expect a screen and it is missing, ask an administrator for rights on its object or group."
@@ -1913,7 +1922,45 @@
       "command_executed": "Command done: {{type}}",
       "command_failed": "Command failed: {{type}} — {{result}}",
       "command_timeout": "No confirmation of the command: {{type}}",
-      "command_released": "Command released by an administrator: {{type}}"
+      "command_released": "Command released by an administrator: {{type}}",
+      "cert_stage": "Certificate: {{stage}}",
+      "cert_stage_until": "Certificate: {{stage}} (until {{until}})"
+    },
+    "cert": {
+      "expired": "ended",
+      "lessThanDay": "less than a day",
+      "daysLeft_one": "{{count}} day left",
+      "daysLeft_other": "{{count}} days left",
+      "stage": {
+        "ok": "fine",
+        "soon30": "under 30 days",
+        "soon14": "under 14 days",
+        "soon3": "under 3 days",
+        "expired": "ended"
+      },
+      "filter": { "soon": "Ends soon", "expired": "Ended" },
+      "callout": {
+        "expiredTitle": "The screen's certificate has ended",
+        "expiredText": "The screen can no longer renew it by itself and will not connect to the server. The only way is \"Bind again\" (the button above, which an administrator sees): bind the screen with a new package. Its name, group and history are kept.",
+        "soonTitle": "The certificate ends {{when}}",
+        "soonOnline": "A screen that is on renews its certificate by itself 60 days before the end, and this one has not. The reason is usually shown below, in \"Certificate renewal error\"; most often the screen's clock is wrong.",
+        "soonOffline": "The screen is off or out of touch, so it cannot renew. Switch it on before the end and it renews by itself. If the date passes, the screen has to be bound again."
+      },
+      "serverTitle": "Server certificates",
+      "serverHint": "When one of these ends, not one screen stops working but all of them. The device authority and any certificate you uploaded yourself are renewed by an administrator; the server issues the rest itself.",
+      "serverCol": { "name": "Certificate", "until": "Valid until", "left": "Left" },
+      "server": {
+        "api_tls": "web interface and API",
+        "device_ca": "device authority",
+        "device_ca_root": "device authority root",
+        "broker_tls": "broker",
+        "crl": "revocation list for the broker"
+      },
+      "serverError": {
+        "unreadable": "the file cannot be read",
+        "missing": "there is no certificate",
+        "unknown": "end date unknown"
+      }
     },
     "objects": {
       "title": "Objects and groups",

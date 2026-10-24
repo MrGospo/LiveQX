@@ -54,9 +54,9 @@ describe('the event stream and the screens pages', () => {
     expect(keysInvalidated()).toEqual([JSON.stringify(['players'])]);
   });
 
-  it('refreshes the lists of screens when a certificate moves to another step', () => {
+  it('refreshes the lists and the summary of certificates when a certificate moves to another step', () => {
     frame('player_cert_stage');
-    expect(keysInvalidated()).toEqual([JSON.stringify(['players'])]);
+    expect(keysInvalidated()).toEqual([JSON.stringify(['players']), JSON.stringify(['players-cert'])]);
   });
 
   it('does not look at everything on the first connection', () => {

@@ -15,7 +15,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ApiClientError } from '@/api/client';
-import type { PlayersSettings, BrokerStatus } from '@/api/queries/players';
+import type { PlayersSettings, BrokerStatus, PlayersLifecycle } from '@/api/queries/players';
 
 // ─── Stores ───────────────────────────────────────────────────────────────────
 const toast = vi.fn();
@@ -30,6 +30,7 @@ vi.mock('@/stores/ui', () => ({
 const settingsState: { data?: PlayersSettings; isLoading: boolean; isError: boolean } = { isLoading: false, isError: false };
 const save = vi.fn();
 const brokerState: { data?: BrokerStatus; isLoading: boolean; isError: boolean } = { isLoading: false, isError: false };
+const lifecycleState: { data?: Partial<PlayersLifecycle>; isLoading: boolean; isError: boolean } = { isLoading: false, isError: false };
 const update = vi.fn();
 const reconcile = vi.fn();
 let updateVariables: unknown;
@@ -41,6 +42,7 @@ vi.mock('@/api/queries/players', async (orig) => {
     usePlayersSettings: () => settingsState,
     useSavePlayersSettings: () => ({ mutateAsync: save, isPending: false }),
     useBrokerStatus: () => brokerState,
+    usePlayersLifecycle: () => lifecycleState,
     useBrokerUpdate: () => ({ mutateAsync: update, isPending: false, variables: updateVariables }),
     useBrokerReconcile: () => ({ mutateAsync: reconcile, isPending: false }),
     usePlayerTree: () => ({ data: [], isLoading: false, isError: false }),
@@ -77,6 +79,7 @@ beforeEach(() => {
   updateVariables = undefined;
   settingsState.data = { ...baseSettings }; settingsState.isLoading = false; settingsState.isError = false;
   brokerState.data = baseBroker(); brokerState.isLoading = false; brokerState.isError = false;
+  lifecycleState.data = undefined; lifecycleState.isLoading = false; lifecycleState.isError = false;
 });
 
 // ═════════════════════════════ settings ═══════════════════════════════════════
@@ -347,5 +350,31 @@ describe('BrokerPage', () => {
       expect(screen.getByText('generation_1: cannot be opened')).toBeInTheDocument();
       expect(screen.getByText('The list is not written')).toBeInTheDocument();
     });
+  });
+});
+
+// ═════════════════════════ the server's own certificates ═════════════════════
+describe('BrokerPage: certificates of the server', () => {
+  it('lists each certificate with its end and what is left, and the broken one with its reason', () => {
+    lifecycleState.data = { now: 0, server: [
+      { name: 'api_tls', stage: 'ok', days_left: 200, not_after: nowSec() + 200 * 86400 },
+      { name: 'device_ca', stage: 'soon14', days_left: 9, not_after: nowSec() + 9 * 86400 },
+      { name: 'crl', stage: 'expired', days_left: -2, not_after: nowSec() - 2 * 86400 },
+      { name: 'broker_tls', error: 'missing' },
+    ] };
+    renderPage(<BrokerPage />);
+    const table = screen.getByRole('table');
+    const row = (name: RegExp) => within(table).getByText(name).closest('tr')!;
+    expect(within(row(/web interface and API/)).getByText('200 days left')).toBeInTheDocument();
+    expect(within(row(/device authority$/)).getByText('9 days left')).toBeInTheDocument();
+    expect(within(row(/revocation list/)).getByText('ended')).toBeInTheDocument();
+    expect(within(row(/^broker$/)).getByText('there is no certificate')).toBeInTheDocument();
+    expect(screen.getByText('Server certificates')).toBeInTheDocument();
+  });
+
+  it('shows no block while there is nothing to show, e.g. the answer has no server part', () => {
+    lifecycleState.data = { now: 0 };
+    renderPage(<BrokerPage />);
+    expect(screen.queryByText('Server certificates')).not.toBeInTheDocument();
   });
 });

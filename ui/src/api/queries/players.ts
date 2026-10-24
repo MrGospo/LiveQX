@@ -243,6 +243,16 @@ export interface PlayerStatus {
   state?:     PlayerReport;
 }
 
+// How close a screen's certificate is to its end. A screen that is on renews by itself well
+// before, so "soon30" means it has NOT renewed in a month; "expired" can only be bound again.
+export type CertStageName = 'ok' | 'soon30' | 'soon14' | 'soon3' | 'expired';
+
+export interface PlayerCert {
+  stage:       CertStageName;
+  not_after?:  number;               // absent when the screen has no valid certificate left
+  days_left?:  number;               // whole days, negative once over
+}
+
 export interface Player {
   id:             string;
   name:           string;
@@ -258,6 +268,7 @@ export interface Player {
   revoked_at?:    number;
   revoke_reason?: string;
   status?:        PlayerStatus;
+  cert?:          PlayerCert;         // bound screens only
   // What THIS person may do with the screen (the card only).
   can?:           { move: boolean; command: boolean };
 }
@@ -297,10 +308,14 @@ export interface PlayerCommand {
 
 export type ScreenStatusFilter = 'online' | 'offline' | 'pending' | 'revoked';
 
+// `soon` is any of the three "soon" steps; the list is cut by the server.
+export type CertFilter = 'soon' | 'expired';
+
 export interface PlayerListQuery {
   objectId?: number;
   groupId?:  number;
   status?:   ScreenStatusFilter;
+  cert?:     CertFilter;
   q?:        string;
   page:      number;               // 1-based
 }
@@ -311,13 +326,14 @@ export interface PlayerPage {
   players: Player[];
   total:   number;                                    // matching every filter, before the page is cut
   counts:  Record<ScreenStatusFilter, number>;        // by status, for the place and the search (not the status filter)
+  cert_counts: Record<CertStageName, number>;         // bound screens by certificate step, same set as `counts`
 }
 
 // Filtering, search, counting and paging are the server's work, so a page of a
 // large park is complete and the counts are true for all of it.
 export const usePlayers = (f: PlayerListQuery) =>
   useQuery({
-    queryKey: ['players', 'list', f.objectId ?? null, f.groupId ?? null, f.status ?? null, f.q ?? '', f.page],
+    queryKey: ['players', 'list', f.objectId ?? null, f.groupId ?? null, f.status ?? null, f.cert ?? null, f.q ?? '', f.page],
     queryFn: () => {
       const q = new URLSearchParams({
         limit: String(PLAYER_PAGE_SIZE), offset: String((f.page - 1) * PLAYER_PAGE_SIZE),
@@ -325,6 +341,7 @@ export const usePlayers = (f: PlayerListQuery) =>
       if (f.groupId  != null) q.set('group_id',  String(f.groupId));
       if (f.objectId != null) q.set('object_id', String(f.objectId));
       if (f.status) q.set('status', f.status);
+      if (f.cert) q.set('cert', f.cert);
       if (f.q) q.set('q', f.q);
       return api.get<PlayerPage>(`/api/players?${q}`);
     },
@@ -579,4 +596,55 @@ export const usePlayersSummary = () =>
       return { counts: r.counts, total: r.total };
     },
     staleTime: 10_000,
+  });
+
+// ─── Certificates of the fleet and of the server (GET /api/players/lifecycle) ─────────────────
+
+export type ServerCertName = 'api_tls' | 'device_ca' | 'device_ca_root' | 'broker_tls' | 'crl';
+
+export interface ServerCert {
+  name:       ServerCertName;
+  not_after?: number;
+  days_left?: number;
+  stage?:     CertStageName;          // absent when the date is unknown; `error` says why
+  error?:     string;
+}
+
+export interface RenewFailure {
+  player_id:  string;
+  name:       string;
+  stage:      CertStageName;
+  error:      string;
+  not_after?: number;
+  days_left?: number;
+}
+
+export interface PlayersLifecycle {
+  now: number;
+  screens: {
+    bound:    number;
+    counts:   Record<CertStageName, number>;
+    earliest: { player_id: string; name: string; not_after: number; days_left: number } | null;
+    renew: {
+      window_days: number;
+      renewing:    number;
+      online:      number;
+      offline:     number;
+      failing:     number;
+      systemic:    boolean;          // renewals fail across the fleet, not on single screens
+      failures:    RenewFailure[];
+    };
+  };
+  server?: ServerCert[];             // administrators only
+}
+
+// The numbers change with the clock, and with a screen's report, rarely with an event; so they are
+// asked for again from time to time and when a screen moves to another step or is bound.
+export const usePlayersLifecycle = (o?: { enabled?: boolean }) =>
+  useQuery({
+    queryKey: ['players-cert', 'lifecycle'],
+    queryFn: () => api.get<PlayersLifecycle>('/api/players/lifecycle'),
+    staleTime: 30_000,
+    refetchInterval: 5 * 60_000,
+    enabled: o?.enabled ?? true,
   });

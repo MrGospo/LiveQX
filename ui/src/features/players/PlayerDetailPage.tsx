@@ -16,6 +16,7 @@ import { PlayersSubNav } from './PlayersSubNav';
 import { absoluteTime, formatDuration, relativeFromNow } from './format';
 import { PlayerActions } from './PlayerActions';
 import { StatusBadge, screenStatus, describeEvent, commandTypeLabel } from './status';
+import { CertCell } from './cert';
 
 // One screen: where it stands now, its certificates, the commands sent to it and
 // its journal; the buttons above them (move, new token, revoke, delete) are
@@ -189,6 +190,28 @@ export default function PlayerDetailPage() {
             {t('players.detail.revokedNote', { when: absoluteTime(p.revoked_at) })}
             {p.revoke_reason ? ` ${t('players.detail.revokedReason', { reason: t(`players.revokeReasons.${p.revoke_reason}`, { defaultValue: p.revoke_reason }) })}` : ''}
           </p>
+        </div>
+      )}
+
+      {p.cert && p.cert.stage === 'expired' && (
+        <div role="alert" className="flex gap-3 rounded-xl border border-[var(--danger)] bg-[var(--danger)]/10 p-4">
+          <AlertTriangle size={18} className="text-[var(--danger)] shrink-0 mt-0.5" />
+          <div className="text-sm text-[var(--text-primary)]">
+            <p className="m-0 font-medium">{t('players.cert.callout.expiredTitle')}</p>
+            <p className="m-0 mt-1">{t('players.cert.callout.expiredText')}</p>
+          </div>
+        </div>
+      )}
+      {p.cert && p.cert.stage !== 'ok' && p.cert.stage !== 'expired' && (
+        <div role="status" className="flex gap-3 rounded-xl border border-[var(--warning)] bg-[var(--warning)]/10 p-4">
+          <AlertTriangle size={18} className="text-[var(--warning)] shrink-0 mt-0.5" />
+          <div className="text-sm text-[var(--text-primary)]">
+            <p className="m-0 font-medium">
+              {t('players.cert.callout.soonTitle', { when: p.cert.not_after ? absoluteTime(p.cert.not_after) : '—' })}
+              {' '}<CertCell cert={p.cert} />
+            </p>
+            <p className="m-0 mt-1">{t(p.status?.online ? 'players.cert.callout.soonOnline' : 'players.cert.callout.soonOffline')}</p>
+          </div>
         </div>
       )}
 

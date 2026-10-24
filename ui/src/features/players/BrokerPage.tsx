@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import { Radio, CheckCircle2, XCircle, RefreshCw, AlertTriangle, Loader2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import {
-  useBrokerStatus, useBrokerReconcile, useBrokerUpdate,
+  useBrokerStatus, useBrokerReconcile, useBrokerUpdate, usePlayersLifecycle,
   type BrokerState, type BrokerConnection, type BrokerConnectionPatch,
   type BrokerCheckResult, type BrokerApplyResult,
 } from '@/api/queries/players';
@@ -15,6 +15,7 @@ import { useToast } from '@/hooks/useToast';
 import { PlayersSubNav } from './PlayersSubNav';
 import { TextField, NumberField, Toggle, SectionTitle } from './fields';
 import { absoluteTime, relativeFromNow } from './format';
+import { CERT_TONE, useDaysLeftText } from './cert';
 
 // The MQTT broker: where the link stands, what it is missing, and how the server
 // reaches the broker. Written for an administrator who is not an MQTT expert: each
@@ -33,6 +34,41 @@ const HOST_RE = /^[A-Za-z0-9._:][A-Za-z0-9._:-]*$/;
 const PREPARE_ERRORS = ['broker_certificate_missing'];
 const RELOAD_ERRORS = ['pid_file_unreadable', 'bad_pid', 'process_not_running', 'not_the_broker', 'signal_failed', 'pid_file_not_configured'];
 const SOON_SECONDS = 7 * 86400;                // a revocation list this close to its end is worth a warning
+
+// The server's own certificates and when each ends. One that ends takes every screen down with it,
+// so they are listed together here, in the place an administrator goes when the screens do not connect.
+function ServerCertificates() {
+  const { t } = useTranslation();
+  const lifecycle = usePlayersLifecycle();
+  const daysText = useDaysLeftText();
+  const certs = lifecycle.data?.server ?? [];
+  if (certs.length === 0) return null;
+  return (
+    <Block>
+      <SectionTitle title={t('players.cert.serverTitle')} hint={t('players.cert.serverHint')} />
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-left text-xs text-[var(--text-muted)] border-b border-[var(--border-subtle)]">
+            <th className="font-medium py-2 pr-4">{t('players.cert.serverCol.name')}</th>
+            <th className="font-medium py-2 pr-4">{t('players.cert.serverCol.until')}</th>
+            <th className="font-medium py-2">{t('players.cert.serverCol.left')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {certs.map(c => (
+            <tr key={c.name} className="border-b border-[var(--border-subtle)] last:border-b-0">
+              <td className="py-2 pr-4">{t(`players.cert.server.${c.name}`)}</td>
+              <td className="py-2 pr-4 text-[var(--text-muted)]">{c.not_after ? absoluteTime(c.not_after) : '—'}</td>
+              <td className={clsx('py-2', c.stage ? CERT_TONE[c.stage] : 'text-[var(--danger)]')}>
+                {c.stage ? daysText(c.stage, c.days_left) : t(`players.cert.serverError.${c.error ?? 'unknown'}`, { defaultValue: c.error ?? '' })}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Block>
+  );
+}
 
 type Form = { host: string; port: number | ''; verify_hostname: boolean; reconcile_interval_s: number | '' };
 
@@ -318,6 +354,8 @@ export default function BrokerPage() {
           )}
         </Block>
       )}
+
+      <ServerCertificates />
 
       {/* ── How the server reaches the broker ─────────────────────────────── */}
       <Block>

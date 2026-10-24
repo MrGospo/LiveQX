@@ -5,7 +5,7 @@ import { MonitorSmartphone, Building2, Layers, Search, Plus, Send } from 'lucide
 import { clsx } from 'clsx';
 import {
   usePlayers, usePlayerTree, PLAYER_PAGE_SIZE,
-  type Player, type PlayerObject,
+  type Player, type PlayerObject, type CertFilter,
 } from '@/api/queries/players';
 import { Block } from '@/components/Block';
 import { EmptyState } from '@/components/EmptyState';
@@ -18,6 +18,7 @@ import { AddPlayerDialog } from './AddPlayerDialog';
 import { BulkCommandDialog } from './CommandDialogs';
 import { typesForTarget } from './commands';
 import { StatusBadge, screenStatus, type ScreenStatus } from './status';
+import { CertCell } from './cert';
 
 // The list of screens. On the left the tree "all → object → group" picks the
 // place; on the right the screens of that place. The place, the status filter
@@ -26,6 +27,7 @@ import { StatusBadge, screenStatus, type ScreenStatus } from './status';
 // the tree and the list already arrive cut to their rights.
 
 const STATUSES: ScreenStatus[] = ['online', 'offline', 'pending', 'revoked'];
+const CERT_FILTERS: CertFilter[] = ['soon', 'expired'];
 
 interface Selection { objectId?: number; groupId?: number }
 
@@ -86,6 +88,8 @@ export default function PlayersPage() {
   const selection: Selection = { objectId: num('object'), groupId: num('group') };
   const statusParam = params.get('status');
   const statusFilter = (STATUSES as string[]).includes(statusParam ?? '') ? (statusParam as ScreenStatus) : null;
+  const certParam = params.get('cert');
+  const certFilter = (CERT_FILTERS as string[]).includes(certParam ?? '') ? (certParam as CertFilter) : null;
   const query = params.get('q') ?? '';
   const pageParam = params.get('page');
   const page = pageParam && /^\d+$/.test(pageParam) && Number(pageParam) > 0 ? Number(pageParam) : 1;
@@ -111,7 +115,7 @@ export default function PlayersPage() {
   }, [typed]);                                         // eslint-disable-line react-hooks/exhaustive-deps
 
   const tree = usePlayerTree();
-  const list = usePlayers({ ...selection, status: statusFilter ?? undefined, q: query.trim() || undefined, page });
+  const list = usePlayers({ ...selection, status: statusFilter ?? undefined, cert: certFilter ?? undefined, q: query.trim() || undefined, page });
 
   // Where a command from this page would go: the group or object picked in the tree, or everyone
   // (administrators, when nothing is picked), and what this person may send there.
@@ -140,7 +144,13 @@ export default function PlayersPage() {
   const total = list.data?.total ?? 0;
   const counts = list.data?.counts ?? { online: 0, offline: 0, pending: 0, revoked: 0 };
   const everything = counts.online + counts.offline + counts.pending + counts.revoked;
-  const filtered = !!statusFilter || !!query.trim();
+  const filtered = !!statusFilter || !!certFilter || !!query.trim();
+  // The certificate pills appear when there is something to look at (or one is on, so it can be turned off).
+  const certCounts = list.data?.cert_counts;
+  const certSoon = certCounts ? certCounts.soon30 + certCounts.soon14 + certCounts.soon3 : 0;
+  const certExpired = certCounts?.expired ?? 0;
+  const certNumbers: Record<CertFilter, number> = { soon: certSoon, expired: certExpired };
+  const showCertPills = !!certFilter || certSoon > 0 || certExpired > 0;
 
   // A page past the end (the list shrank meanwhile): go back to the first one.
   React.useEffect(() => {
@@ -201,6 +211,16 @@ export default function PlayersPage() {
                 </button>
               ))}
             </div>
+            {showCertPills && (
+              <div role="group" aria-label={t('players.list.certFilter')} className="flex flex-wrap gap-1">
+                {CERT_FILTERS.map(c => (
+                  <button key={c} type="button" aria-pressed={certFilter === c}
+                          onClick={() => patch({ cert: certFilter === c ? null : c })} className={pill(certFilter === c)}>
+                    {t(`players.cert.filter.${c}`)} · {certNumbers[c]}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           {list.isLoading ? (
@@ -224,6 +244,7 @@ export default function PlayersPage() {
                     <th className="font-medium px-4 py-2.5">{t('players.list.col.name')}</th>
                     <th className="font-medium px-4 py-2.5">{t('players.list.col.place')}</th>
                     <th className="font-medium px-4 py-2.5">{t('players.list.col.status')}</th>
+                    <th className="font-medium px-4 py-2.5">{t('players.list.col.cert')}</th>
                     <th className="font-medium px-4 py-2.5">{t('players.list.col.version')}</th>
                     <th className="font-medium px-4 py-2.5">{t('players.list.col.lastSignal')}</th>
                   </tr>
@@ -240,6 +261,7 @@ export default function PlayersPage() {
                       </td>
                       <td className="px-4 py-2.5 text-[var(--text-muted)]">{placeText(p) || t('players.list.noPlace')}</td>
                       <td className="px-4 py-2.5"><StatusBadge status={screenStatus(p)} /></td>
+                      <td className="px-4 py-2.5"><CertCell cert={p.cert} /></td>
                       <td className="px-4 py-2.5 text-[var(--text-muted)] font-mono text-xs">{p.status?.version || '—'}</td>
                       <td className="px-4 py-2.5 text-[var(--text-muted)]"
                           title={p.status ? absoluteTime(p.status.updated_at) : undefined}>

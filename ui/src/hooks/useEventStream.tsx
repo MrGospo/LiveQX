@@ -150,16 +150,20 @@ export function EventBusProvider({ children }: { children: React.ReactNode }) {
             qc.invalidateQueries({ queryKey: ['audit-trail'] });
             break;
           // Screens (players): a screen came or went, changed version, got a command or
-          // settled one, or a certificate moved to another step. Only the lists of screens are refetched; the settings and broker
+          // settled one. Only the lists of screens are refetched; the settings and broker
           // pages sit under their own query root and are not touched by a screen's comings
           // and goings.
           case 'player_registered':
           case 'player_online':
           case 'player_offline':
           case 'player_version_changed':
-          case 'player_cert_stage':
           case 'player_command':
             qc.invalidateQueries({ queryKey: ['players'] });
+            break;
+          // A certificate moved to another step: the lists (the column, the counts) and the summary of certificates.
+          case 'player_cert_stage':
+            qc.invalidateQueries({ queryKey: ['players'] });
+            qc.invalidateQueries({ queryKey: ['players-cert'] });
             break;
           // A command job started, sent a batch or finished.
           case 'player_command_job':
