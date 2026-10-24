@@ -205,38 +205,56 @@ TEST_F(MosquittoBrokerTest, AfterTheBrokerIsKilledOutrightAndStartedAgainTheClie
     server.stop();
 }
 
-TEST_F(MosquittoBrokerTest, RereadingItsSettingsLeavesTheSessionsOfOfflineClientsAlone) {
-    // The stock 2.0.18 "disconnects" every offline persistent session again at a reload, which puts
-    // it in its expiry list twice and later kills the broker. The patched build leaves them be.
-    if (!liveqx::testing::brokerIsPatched())
-        GTEST_SKIP() << "needs the patched broker: packaging/mosquitto/build.sh";
+TEST_F(MosquittoBrokerTest, RereadingItsSettingsWhileASessionWaitsForItsClientDoesNotKillTheBrokerWhenTheSessionExpires) {
+    // Mosquitto before 2.0.23 "disconnects" every offline persistent session again at a reload, which puts
+    // it in its expiry list twice and, once the session expires, kills the broker (use after free). The
+    // server rereads the broker's settings after every revocation list it writes, and screens that are
+    // switched off keep their sessions on purpose, so this must be survived.
+    if (!liveqx::testing::brokerIsOurBuild())
+        GTEST_SKIP() << "needs a broker of 2.0.23 or newer: packaging/mosquitto/build.sh";
     auto player = broker_->enrollPlayer();
-    mqtt::MosquittoClient dev(broker_->playerOptions(player));
+    auto opts = broker_->playerOptions(player);
+    opts.session_expiry_s = 3;                           // short, so the expiry happens inside the test
+    mqtt::MosquittoClient dev(opts);
     dev.subscribe(commandsOf(player), 1);
     ASSERT_TRUE(dev.start());
     ASSERT_TRUE(waitFor([&] { return dev.connected(); })) << broker_->log();
-    dev.stop();                                          // the screen is switched off; its session stays
-
-    auto goodbyes = [&] {
-        std::size_t n = 0;
-        const std::string log = broker_->log();
-        for (std::size_t at = log.find("Client " + player.id + " disconnected"); at != std::string::npos;
-             at = log.find("Client " + player.id + " disconnected", at + 1))
-            ++n;
-        return n;
-    };
-    ASSERT_TRUE(waitFor([&] { return goodbyes() == 1; })) << broker_->log();
+    dev.stop();                                          // the screen is switched off; its session stays for now
 
     for (int i = 0; i < 3; ++i) {
         broker_->reload();
-        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
     }
-    EXPECT_EQ(goodbyes(), 1u) << "an offline session was disconnected again by a reload\n" << broker_->log();
+    // The session runs out (3 s, plus the broker's own check interval). Then the list is walked.
+    std::this_thread::sleep_for(std::chrono::seconds(8));
 
     mqtt::MosquittoClient server(broker_->serverOptions());
     ASSERT_TRUE(server.start());
-    EXPECT_TRUE(waitFor([&] { return server.connected(); })) << "the broker is not answering after the reloads";
+    EXPECT_TRUE(waitFor([&] { return server.connected(); })) << "the broker is not answering after the session expired\n" << broker_->log();
     server.stop();
+}
+
+TEST(MosquittoBrokerCertificate, ARenewedCertificateOfTheBrokerIsServedAfterAReloadWithoutARestart) {
+    // The server renews the broker's certificate 30 days before its end and then tells the broker to
+    // reread its settings (SIGHUP). That only works while the broker is set to check a revocation list
+    // (as it always is in production): then a reload also rebuilds the listener's TLS context.
+    if (auto why = TestBroker::unavailable()) GTEST_SKIP() << *why;
+    TestBroker broker({"localhost"}, {"127.0.0.1"}, /*with_crl=*/true);
+    ASSERT_TRUE(broker.ok()) << broker.problem();
+    const std::string before = liveqx::testing::servedCertSerial(broker.port());
+    ASSERT_FALSE(before.empty()) << broker.log();
+
+    liveqx::tls::SanList sans;
+    sans.dns_names = {"localhost"};
+    sans.ip_v4 = {"127.0.0.1"};
+    ASSERT_TRUE(liveqx::tls::issueServerCert(broker.brokerCertDir(), "localhost", sans).ok());
+    EXPECT_EQ(liveqx::testing::servedCertSerial(broker.port()), before) << "the file alone changes nothing";
+
+    broker.reload();
+    EXPECT_TRUE(waitFor([&] {
+        const std::string now = liveqx::testing::servedCertSerial(broker.port());
+        return !now.empty() && now != before;
+    })) << "the broker still shows the old certificate after the reload\n" << broker.log();
 }
 
 TEST_F(MosquittoBrokerTest, APersistentSessionKeepsAMessageForAnOfflineClientAndDropsAnExpiredOne) {
@@ -809,7 +827,7 @@ TEST(MosquittoShippedConfig, TheBrokerStartsOnTheInstallersTemplateAndOnlyWhatTh
     fill("@PLUGIN@", liveqx::testing::findDynsecPlugin()->string());
     EXPECT_EQ(conf.find('@'), std::string::npos) << "every place in the template was filled in";
     liveqx::testing::writeFileText(dir / "mosquitto.conf", conf, 0644);
-    const auto init = liveqx::testing::runProcess({"mosquitto_ctrl", "dynsec", "init",
+    const auto init = liveqx::testing::runProcess({liveqx::testing::ctrlBinary()->string(), "dynsec", "init",
                                                    (broker_dir / "dynamic-security.json").string(),
                                                    "liveqx-server", "unused-password"}, dir);
     ASSERT_EQ(init.code, 0) << init.output;

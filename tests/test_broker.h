@@ -25,6 +25,7 @@
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
+#include <openssl/ssl.h>
 #include <openssl/x509.h>
 
 #include <arpa/inet.h>
@@ -81,29 +82,33 @@ inline std::optional<fs::path> findExecutable(const std::string& name) {
     return std::nullopt;
 }
 
-// The broker the tests run. The stock Mosquitto 2.0.18 can corrupt its own session list when it
-// rereads its settings (see packaging/mosquitto/README.md), so the patched build is used when it
-// has been made (packaging/mosquitto/build.sh); otherwise whatever `mosquitto` is on the PATH.
-inline std::optional<fs::path> brokerBinary() {
+// The broker the tests run. Releases of Mosquitto before 2.0.23 can corrupt their own session list when
+// they reread their settings (see packaging/mosquitto/README.md), and the distribution's package is
+// older, so the build made by packaging/mosquitto/build.sh is used when it exists — broker, Dynamic
+// Security plugin and mosquitto_ctrl, all from the same release; otherwise whatever is installed.
+inline std::optional<fs::path> ourBuildFile(const char* name) {
 #ifdef LIVEQX_MOSQUITTO_PREFIX
-    {
-        const fs::path patched = fs::path(LIVEQX_MOSQUITTO_PREFIX) / "sbin" / "mosquitto";
-        std::error_code ec;
-        if (fs::exists(patched, ec) && ::access(patched.c_str(), X_OK) == 0) return patched;
-    }
+    const fs::path f = fs::path(LIVEQX_MOSQUITTO_PREFIX) / "libexec" / name;
+    std::error_code ec;
+    if (fs::exists(f, ec) && ::access(f.c_str(), R_OK) == 0) return f;
+#else
+    (void)name;
 #endif
+    return std::nullopt;
+}
+inline bool brokerIsOurBuild() { return ourBuildFile("mosquitto").has_value(); }
+inline std::optional<fs::path> brokerBinary() {
+    if (auto ours = ourBuildFile("mosquitto")) return ours;
     return findExecutable("mosquitto");
 }
-inline bool brokerIsPatched() {
-#ifdef LIVEQX_MOSQUITTO_PREFIX
-    const auto b = brokerBinary();
-    return b && b->parent_path().parent_path() == fs::path(LIVEQX_MOSQUITTO_PREFIX);
-#else
-    return false;
-#endif
+// mosquitto_ctrl of the same release as the broker (the one of the build when the build is used).
+inline std::optional<fs::path> ctrlBinary() {
+    if (auto ours = ourBuildFile("mosquitto_ctrl")) return ours;
+    return findExecutable("mosquitto_ctrl");
 }
 
 inline std::optional<fs::path> findDynsecPlugin() {
+    if (auto ours = ourBuildFile("mosquitto_dynamic_security.so")) return ours;     // must match the broker
     for (const char* r : {"/usr/lib", "/usr/local/lib", "/usr/lib64"}) {
         std::error_code ec;
         const fs::path root(r);
@@ -171,6 +176,41 @@ inline int freeLoopbackPort() {
     const int port = ntohs(a.sin_port);
     ::close(s);
     return port;
+}
+
+// The serial number (hex) of the certificate a TLS server on the loopback port presents, or "" when the
+// handshake does not get that far. No client certificate is offered and nothing is verified: this only
+// looks at what the server shows.
+inline std::string servedCertSerial(int port) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return {};
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = htons(static_cast<uint16_t>(port));
+    timeval tv{3, 0};
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    std::string serial;
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0) {
+        SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+        SSL* ssl = ctx ? SSL_new(ctx) : nullptr;
+        if (ssl) {
+            SSL_set_fd(ssl, fd);
+            SSL_connect(ssl);                                  // the broker may refuse us afterwards; the certificate is already seen
+            if (X509* cert = SSL_get_peer_certificate(ssl)) {
+                if (BIGNUM* bn = ASN1_INTEGER_to_BN(X509_get_serialNumber(cert), nullptr)) {
+                    if (char* hex = BN_bn2hex(bn)) { serial = hex; OPENSSL_free(hex); }
+                    BN_free(bn);
+                }
+                X509_free(cert);
+            }
+            SSL_free(ssl);
+        }
+        if (ctx) SSL_CTX_free(ctx);
+    }
+    ::close(fd);
+    return serial;
 }
 
 inline bool portAccepts(int port) {
@@ -245,7 +285,7 @@ public:
     // nullopt when a broker can be started here; otherwise why not.
     static std::optional<std::string> unavailable() {
         if (!findExecutable("mosquitto")) return "mosquitto is not installed";
-        if (!findExecutable("mosquitto_ctrl")) return "mosquitto_ctrl is not installed";
+        if (!ctrlBinary()) return "mosquitto_ctrl is not installed";
         if (!findDynsecPlugin()) return "the Dynamic Security plugin is not installed";
         return std::nullopt;
     }
@@ -330,7 +370,7 @@ public:
 
     // The administrative tool, speaking as the server (certificate identity).
     std::string ctrl(const std::vector<std::string>& args) {
-        std::vector<std::string> argv = {"mosquitto_ctrl", "--cafile", (dir_ / "ctrl-ca.crt").string(),
+        std::vector<std::string> argv = {ctrlBinary()->string(), "--cafile", (dir_ / "ctrl-ca.crt").string(),
                                          "--cert", (dir_ / "ctrl.crt").string(),
                                          "--key", (dir_ / "ctrl.key").string(), "--insecure",
                                          "-h", "127.0.0.1", "-p", std::to_string(port_), "dynsec"};
@@ -339,6 +379,8 @@ public:
     }
 
     fs::path crlFile() const { return dir_ / "crl.pem"; }
+    // The directory of the CA that signs the broker's own certificate (server.crt / server.key in it).
+    fs::path brokerCertDir() const { return dir_ / "server_ca"; }
     fs::path pidFile() const { return dir_ / "broker.pid"; }
     fs::path caDir() const { return dir_ / "ca"; }
     const auth::MasterKey& masterKey() const { return *mk_; }
@@ -460,7 +502,7 @@ private:
         writeFileText(dir_ / "mosquitto.conf", conf.str());
 
         // Dynamic Security: the server's own identity is the administrator.
-        auto init = runProcess({"mosquitto_ctrl", "dynsec", "init", (dir_ / "dynamic-security.json").string(),
+        auto init = runProcess({ctrlBinary()->string(), "dynsec", "init", (dir_ / "dynamic-security.json").string(),
                                 kBrokerName, "unused-password"}, dir_);
         if (init.code != 0 || !fs::exists(dir_ / "dynamic-security.json")) { problem_ = "dynsec init: " + init.output; return false; }
         if (!start()) return false;

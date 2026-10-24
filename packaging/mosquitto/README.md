@@ -1,57 +1,57 @@
 # Mosquitto for LiveQX
 
-LiveQX talks to its screens through a Mosquitto 2.0.18 broker with the Dynamic Security
-plugin. The stock 2.0.18 broker has a bug that LiveQX triggers in normal operation, so the
-broker has to be built with the patch in `patches/`.
+LiveQX talks to its screens through a Mosquitto broker with the Dynamic Security plugin. We build
+it ourselves from the unmodified upstream release (`build.sh`): the broker, the plugin and
+`mosquitto_ctrl` from one source, so they always match. The distribution's package is not used,
+for two reasons.
 
-## The bug
+**Old releases can kill the broker.** Up to and including 2.0.22, when the broker rereads its
+settings (SIGHUP) it walks every client context, including persistent sessions whose client is
+offline. With `use_identity_as_username` such a context has no TLS connection, so the broker
+"disconnects" it a second time. That puts the context into the session expiry list twice; the first
+entry is left pointing at the context, which is freed when the session expires, and the broker reads
+freed memory and dies with SIGSEGV. LiveQX sends SIGHUP after every publication of the certificate
+revocation list (server start, daily refresh, every revocation), and screens that are switched off
+(every night) keep persistent sessions on purpose: commands for them wait in the broker. So such a
+release is not safe here. Ubuntu 24.04 ships 2.0.18.
 
-When the broker rereads its settings (SIGHUP) it walks every client context, including
-persistent sessions whose client is offline. With `use_identity_as_username` such a context
-has no TLS connection, so the broker "disconnects" it a second time. That puts the context
-into the session expiry list twice; the first entry is left pointing at the context, which is
-freed later, and `session_expiry__check()` reads freed memory. The broker dies with SIGSEGV
-some time after the reload.
+Reproduction without LiveQX: one MQTT 5 client with a client certificate, clean start off and a
+session expiry of a few seconds, disconnect it, send SIGHUP to the broker, wait for the session to
+expire (found with AddressSanitizer on 2.0.18; checked again on 2.0.22's code).
 
-LiveQX sends SIGHUP after every publication of the certificate revocation list (server start,
-daily refresh, every revocation), and screens that are switched off (every night) keep
-persistent sessions on purpose: commands for them wait in the broker. So the stock broker is
-not safe here.
+**It is fixed upstream in 2.0.23** (2026-01-14): a context is put into the expiry list at most once.
+That is what `build.sh` builds, with no local patch. (2.0.23 still "disconnects" an offline session
+again at every reload — a spurious line in the broker's log, nothing more.) The test
+`RereadingItsSettingsWhileASessionWaitsForItsClientDoesNotKillTheBrokerWhenTheSessionExpires` guards
+against going back: it fails on 2.0.18. `packaging/check.sh` refuses a `build.sh` older than 2.0.23.
 
-Minimal reproduction without LiveQX: connect one MQTT 5 client with clean start off and a
-session expiry above zero, disconnect it, send SIGHUP to the broker. Found with
-AddressSanitizer. The affected code is the same in 2.0.22.
-
-## The fix
-
-`patches/0001-…patch` (two small changes, explained in its header):
-
-* an unconnected context is skipped when settings are reread — it is judged when it connects;
-* a context is put into the session expiry list at most once.
+The second reason is the plugin: it has to be of the same release as the broker, and the distribution
+carries only its own. Building all three from one source removes the question.
 
 ## Building
 
     packaging/mosquitto/build.sh [PREFIX]
 
-Downloads the upstream 2.0.18 source (checksum pinned), applies the patches, builds only the
-broker and installs `PREFIX/sbin/mosquitto` (default `build/mosquitto-patched`). The Dynamic
-Security plugin and `mosquitto_ctrl` come from the distribution's mosquitto package, which must
-be the same version.
+Needs `curl`, a C compiler, `make`, `libssl-dev` and `libcjson-dev`. Downloads the upstream source
+(checksum pinned in the script — take it from a trusted copy when you move to a newer release,
+or verify the detached `.asc` signature of the tarball), builds the broker, the Dynamic Security
+plugin and `mosquitto_ctrl`, and installs them side by side in `PREFIX/libexec` (default
+`build/mosquitto`); `mosquitto_ctrl` finds its `libmosquitto.so.1` next to itself.
 
-The test suite uses `build/mosquitto-patched/sbin/mosquitto` when it exists. The test
-`RereadingItsSettingsLeavesTheSessionsOfOfflineClientsAlone` checks the fix and is skipped
-without the patched broker (it fails on the stock one).
+The test suite uses this build when it exists (broker, plugin and tool together), otherwise
+whatever `mosquitto` is installed — the test about the reload is then skipped.
 
 ## Installing and running it
 
 `packaging/install.sh` does all of this (`--broker=local`, the default answer; `--broker=none` for an
-external broker). The distribution's `mosquitto` and `mosquitto-clients` packages are installed for
-the Dynamic Security plugin and `mosquitto_ctrl` only; their own `mosquitto.service` is not used (the
-installer stops it if it was the one that brought the package in).
+external broker). It needs the build above and installs only `libcjson1` from the distribution (the
+plugin and `mosquitto_ctrl` need it); the distribution's own `mosquitto` package is not needed and is
+not touched.
 
 | What | Where |
 |---|---|
 | the broker (our build) | `/usr/local/libexec/liveqx/mosquitto` — the file name matters, the server signals only a process called `mosquitto` |
+| its Dynamic Security plugin and `mosquitto_ctrl` | `/usr/local/libexec/liveqx/` — the same release as the broker |
 | its configuration | `/etc/liveqx/mosquitto.conf` (from `mosquitto.conf.in`; yours once it exists, a newer template is saved as `.dist`) |
 | services | `liveqx-broker.path` (enabled) starts `liveqx-broker.service` (`Restart=always`, never gives up) |
 | everything it reads or keeps | `/var/lib/liveqx/state/broker/` — owned by `liveqx`, the same user as the server |

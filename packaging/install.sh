@@ -10,7 +10,6 @@
 #
 # Usage: sudo ./packaging/install.sh [install|uninstall|check|migrate-master-key] [-y]
 #        [--master-key-store=file|creds|passphrase] [--broker=local|none] [--broker-port=N]
-#        [--allow-broker-version-mismatch]
 #
 set -euo pipefail
 IFS=$'\n\t'
@@ -43,16 +42,15 @@ DROPIN_FILE="${DROPIN_DIR}/master-key.conf"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # MQTT broker for LiveQX-Player screens (packaging/mosquitto/README.md): our own build of
-# Mosquitto, started by liveqx-broker.path once the server has written the files it reads.
+# upstream Mosquitto, started by liveqx-broker.path once the server has written the files it reads.
 BROKER_MODE="ask"                       # ask | local | none
 BROKER_PORT=8883
-ALLOW_BROKER_MISMATCH=0
 BROKER_BIN_DIR="/usr/local/libexec/liveqx"
 BROKER_BIN="${BROKER_BIN_DIR}/mosquitto"     # the name matters: the server signals only "mosquitto"
 BROKER_CONF="${CONF_DIR}/mosquitto.conf"
 BROKER_STATE_DIR="${STATE_DIR}/state/broker"
 BROKER_RUN_DIR="/run/liveqx-broker"
-BROKER_BUILD_DIR="${REPO_ROOT}/build/mosquitto-patched"
+BROKER_BUILD_DIR="${REPO_ROOT}/build/mosquitto"
 
 # ── Colored output ──────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -97,15 +95,12 @@ Options:
                     Install the MQTT broker for LiveQX-Player screens on this host (local), or
                     leave it out (none: an external broker, or no screens). Default: ask.
     --broker-port=N Port the broker listens on for screens (default $BROKER_PORT)
-    --allow-broker-version-mismatch
-                    Use the patched broker with a Dynamic Security plugin of another version
-                    than the broker (untested; the installer refuses by default)
 
 Before running install, make sure the following are built:
     build/liveqx               — main binary
     build/liveqx-mountd        — share-mount helper
     ui/dist/                   — Web UI
-    build/mosquitto-patched/   — MQTT broker (packaging/mosquitto/build.sh), unless --broker=none
+    build/mosquitto/           — MQTT broker (packaging/mosquitto/build.sh), unless --broker=none
 
 Build command:
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \\
@@ -126,7 +121,6 @@ while [[ $# -gt 0 ]]; do
         --master-key-store=*) KEY_STORE="${1#*=}"; shift ;;
         --broker=*) BROKER_MODE="${1#*=}"; shift ;;
         --broker-port=*) BROKER_PORT="${1#*=}"; shift ;;
-        --allow-broker-version-mismatch) ALLOW_BROKER_MISMATCH=1; shift ;;
         -y|--yes)  ASSUME_YES=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown argument: $1 (see --help)" ;;
@@ -286,9 +280,9 @@ UNIT
 # ════════════════════════════════════════════════════════════════════════════
 # MQTT BROKER (for LiveQX-Player screens)
 # ════════════════════════════════════════════════════════════════════════════
-# The broker is our own build of Mosquitto (packaging/mosquitto/README.md says why the
-# stock one is not safe). The distribution's package supplies only the Dynamic Security
-# plugin and mosquitto_ctrl. The server writes everything the broker reads (CA file of
+# The broker is our own build of upstream Mosquitto, with its Dynamic Security plugin and mosquitto_ctrl
+# from the same source (packaging/mosquitto/README.md says why the distribution's package is not
+# used). Nothing of the distribution's mosquitto package is needed. The server writes everything the broker reads (CA file of
 # the devices, its own certificate, the revocation list) after the device CA ceremony;
 # liveqx-broker.path starts the broker when that is done.
 
@@ -305,8 +299,11 @@ decide_broker() {
 
 check_broker_artifacts() {
     [[ "$BROKER_MODE" == "local" ]] || return 0
-    [[ -x "$BROKER_BUILD_DIR/sbin/mosquitto" ]] \
-        || die "Missing build/mosquitto-patched/sbin/mosquitto — build the broker: packaging/mosquitto/build.sh (or use --broker=none)"
+    local b
+    for b in mosquitto mosquitto_ctrl mosquitto_dynamic_security.so libmosquitto.so.1; do
+        [[ -f "$BROKER_BUILD_DIR/libexec/$b" ]] \
+            || die "Missing build/mosquitto/libexec/$b — build the broker: packaging/mosquitto/build.sh (or use --broker=none)"
+    done
     local f
     for f in packaging/liveqx-broker.service packaging/liveqx-broker.path packaging/mosquitto/mosquitto.conf.in \
              packaging/mosquitto/README.md; do
@@ -318,16 +315,6 @@ check_broker_artifacts() {
 stop_broker_units() {
     systemctl stop liveqx-broker.path    2>/dev/null || true
     systemctl stop liveqx-broker.service 2>/dev/null || true
-}
-
-find_dynsec_plugin() {
-    local p d
-    p=$(dpkg -L mosquitto 2>/dev/null | grep -m1 'mosquitto_dynamic_security\.so$' || true)
-    if [[ -n "$p" && -f "$p" ]]; then echo "$p"; return 0; fi
-    for d in /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/lib /usr/local/lib; do
-        if [[ -f "$d/mosquitto_dynamic_security.so" ]]; then echo "$d/mosquitto_dynamic_security.so"; return 0; fi
-    done
-    return 1
 }
 
 # Adds what the server needs to talk to the broker to config.json; keeps whatever is there.
@@ -354,43 +341,26 @@ provision_broker() {
     [[ "$BROKER_MODE" == "local" ]] || return 0
     step "MQTT broker for screens"
 
-    # Plugin and tools from the distribution. Its own service is not ours to run.
-    local had_package=0
-    dpkg -s mosquitto >/dev/null 2>&1 && had_package=1
-    apt-get install -y --no-install-recommends mosquitto mosquitto-clients \
-        || die "apt-get install mosquitto mosquitto-clients failed"
-    if [[ "$had_package" == "0" ]]; then
-        systemctl disable --now mosquitto.service >/dev/null 2>&1 || true
-        info "The distribution's own mosquitto.service (started by the package) is stopped and disabled: LiveQX runs its own broker"
-    fi
-    local plugin
-    plugin=$(find_dynsec_plugin) || die "The Dynamic Security plugin (mosquitto_dynamic_security.so) was not found after installing mosquitto"
-    command -v mosquitto_ctrl >/dev/null 2>&1 || die "mosquitto_ctrl not found after installing mosquitto-clients"
+    # What the plugin and mosquitto_ctrl need at run time (the broker itself needs only OpenSSL).
+    apt-get install -y --no-install-recommends libcjson1 \
+        || die "apt-get install libcjson1 failed"
 
-    # The plugin is the distribution's, the broker is ours: they must be the same release.
-    local distro_ver built_ver
-    distro_ver=$(dpkg-query -W -f='${Version}' mosquitto 2>/dev/null | sed -E 's/^[0-9]+://; s/-.*$//')
-    built_ver=$(cat "$BROKER_BUILD_DIR/VERSION" 2>/dev/null || echo unknown)
-    if [[ "$distro_ver" != "$built_ver" ]]; then
-        if [[ "$ALLOW_BROKER_MISMATCH" == "1" ]]; then
-            warn "Broker $built_ver with the plugin of Mosquitto $distro_ver (--allow-broker-version-mismatch): untested"
-        else
-            die "The broker built here is Mosquitto $built_ver, this distribution's plugin is $distro_ver. Rebuild the broker for $distro_ver (packaging/mosquitto/build.sh needs its checksum) or pass --allow-broker-version-mismatch"
-        fi
-    fi
-    ok "Mosquitto $built_ver, plugin $plugin"
-
-    # The broker binary, under the name the server signals.
+    # The broker, its plugin and mosquitto_ctrl, all from one build, side by side: the tool finds its
+    # library next to itself. The broker keeps the name the server signals.
     stop_broker_units
     install -d -o root -g root -m 0755 "$BROKER_BIN_DIR"
-    install -m 0755 "$BROKER_BUILD_DIR/sbin/mosquitto" "$BROKER_BIN"
+    local f
+    for f in mosquitto mosquitto_ctrl mosquitto_dynamic_security.so libmosquitto.so.1; do
+        install -m 0755 "$BROKER_BUILD_DIR/libexec/$f" "$BROKER_BIN_DIR/$f"
+    done
+    local plugin="$BROKER_BIN_DIR/mosquitto_dynamic_security.so" ctrl="$BROKER_BIN_DIR/mosquitto_ctrl"
     local missing
-    missing=$(ldd "$BROKER_BIN" 2>/dev/null | awk '/not found/ {print $1}' | sort -u || true)
+    missing=$(for f in "$BROKER_BIN" "$ctrl" "$plugin"; do ldd "$f" 2>/dev/null; done | awk '/not found/ {print $1}' | sort -u || true)
     if [[ -n "$missing" ]]; then
         err "Missing shared libraries for the broker:"; echo "$missing" | sed 's/^/      /'
         die "Install them with apt-get and run the installer again"
     fi
-    ok "Broker installed: $BROKER_BIN"
+    ok "Mosquitto $(cat "$BROKER_BUILD_DIR/VERSION" 2>/dev/null || echo unknown) installed in $BROKER_BIN_DIR (broker, plugin, mosquitto_ctrl)"
 
     # Directories: the server writes the broker's files here, the broker keeps its rights and sessions here.
     install -d -o "$LIVEQX_USER" -g "$LIVEQX_GROUP" -m 0750 "$STATE_DIR/state" "$BROKER_STATE_DIR" "$BROKER_STATE_DIR/data"
@@ -422,7 +392,7 @@ provision_broker() {
         local pw
         pw=$(head -c 24 /dev/urandom | base64 | tr -d '/+=\n')
         printf '%s\n%s\n' "$pw" "$pw" \
-            | runuser -u "$LIVEQX_USER" -- mosquitto_ctrl dynsec init "$dyn" liveqx-server >/dev/null 2>&1 \
+            | runuser -u "$LIVEQX_USER" -- "$ctrl" dynsec init "$dyn" liveqx-server >/dev/null 2>&1 \
             || die "mosquitto_ctrl dynsec init failed"
         chmod 0600 "$dyn"
         chown "$LIVEQX_USER:$LIVEQX_GROUP" "$dyn"
@@ -781,7 +751,7 @@ cmd_uninstall() {
     echo "    • User:     $LIVEQX_USER, group $LIVEQX_GROUP"
     echo "    • Runtime:  $RUNTIME_DIR/"
     echo
-    echo "    apt packages (cifs-utils, libsrtp2-1, mosquitto, nvidia-driver, ...) are NOT removed."
+    echo "    apt packages (cifs-utils, libsrtp2-1, libcjson1, nvidia-driver, ...) are NOT removed."
     echo
 
     if ! ask_yn "Really remove?" "n"; then

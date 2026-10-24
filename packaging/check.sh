@@ -44,6 +44,11 @@ grep -q 'brokerDir() const .*"broker"' "$here/../src/utils/Paths.h" \
 grep -q 'brokerReadyFile() const .*"ready"' "$here/../src/utils/Paths.h" \
     || bad "the server no longer calls the file the broker waits for 'ready'"
 
+# A renewed certificate of the broker is picked up by a reload (SIGHUP) only while the listener checks a
+# revocation list: the reload then rebuilds its TLS context (checked on 2.0.23 by the test
+# MosquittoBrokerCertificate). The template must keep the line.
+grep -Eq '^crlfile +@BROKER_DIR@/crl.pem$' "$tmpl" || bad "the template has no crlfile: the broker would not pick up its renewed certificate without a restart"
+
 # The server signals the broker through the pid file the template names, and only a process called mosquitto.
 grep -q '^pid_file @RUN_DIR@/mosquitto.pid$' "$tmpl" || bad "the template's pid_file is not @RUN_DIR@/mosquitto.pid"
 grep -q 'BROKER_RUN_DIR="/run/liveqx-broker"' "$here/install.sh" || bad "install.sh: the run directory is not /run/liveqx-broker"
@@ -54,8 +59,16 @@ grep -q '^ExecStart=/usr/local/libexec/liveqx/mosquitto ' "$here/liveqx-broker.s
 # The documentation the units point to is installed.
 grep -q 'DOC_DIR/BROKER.md' "$here/install.sh" || bad "install.sh does not install BROKER.md"
 
-# The checksum build.sh trusts is the one of the version it builds.
-grep -q '^VERSION="2.0.18"$' "$here/mosquitto/build.sh" || bad "build.sh: unexpected version"
+# The broker must be a release that survives rereading its settings with offline sessions (2.0.23 and
+# newer, see mosquitto/README.md); no local patches are applied on top.
+ver="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$here/mosquitto/build.sh")"
+[[ -n "$ver" && "$(printf '%s\n2.0.23\n' "$ver" | sort -V | head -1)" == "2.0.23" ]] \
+    || bad "build.sh builds Mosquitto '$ver': before 2.0.23 the broker can die when it rereads its settings"
+[[ -d "$here/mosquitto/patches" ]] && bad "packaging/mosquitto/patches exists: the broker is built from the unmodified release"
+grep -q '"\$ctrl" dynsec init' "$here/install.sh" \
+    || bad "install.sh must run the mosquitto_ctrl it installed, not one from the distribution"
+grep -E 'apt-get install' "$here/install.sh" | grep -Eq '(^|[ ])mosquitto([ ]|$)|mosquitto-clients' \
+    && bad "install.sh installs the distribution's mosquitto packages; the plugin and tools come from our build"
 
 [[ "$fail" == "0" ]] && echo "packaging checks passed"
 exit "$fail"

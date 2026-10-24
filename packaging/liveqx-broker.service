@@ -1,5 +1,5 @@
 [Unit]
-Description=LiveQX MQTT broker (Mosquitto with the LiveQX patch)
+Description=LiveQX MQTT broker (Mosquitto)
 Documentation=file:/usr/share/doc/liveqx/BROKER.md
 After=network-online.target
 Wants=network-online.target

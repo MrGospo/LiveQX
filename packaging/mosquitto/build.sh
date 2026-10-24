@@ -1,24 +1,34 @@
 #!/usr/bin/env bash
-# Builds the Mosquitto broker that LiveQX needs: the upstream release plus the
-# patches in ./patches (see README.md for why the stock broker is not enough).
+# Builds the MQTT broker LiveQX needs: upstream Mosquitto, unmodified, together with its Dynamic
+# Security plugin and `mosquitto_ctrl` from the SAME source (see README.md for why the distribution's
+# package is not used).
 #
 #   packaging/mosquitto/build.sh [PREFIX]
 #
-# PREFIX defaults to <repo>/build/mosquitto-patched. The broker binary lands in
-# PREFIX/sbin/mosquitto. The Dynamic Security plugin and mosquitto_ctrl are not
-# rebuilt: take them from the distribution's mosquitto package of the SAME
-# version (the patches touch only the broker core).
+# PREFIX defaults to <repo>/build/mosquitto. Everything lands in one directory, PREFIX/libexec/:
 #
-# Needs: curl, tar, patch, make, a C compiler, libssl-dev.
+#   mosquitto                       the broker (the name matters: the server signals only "mosquitto")
+#   mosquitto_dynamic_security.so   its Dynamic Security plugin
+#   mosquitto_ctrl                  administration tool (used once, by the installer)
+#   libmosquitto.so.1               what mosquitto_ctrl links against; found next to it (rpath $ORIGIN)
+#
+# Needs: curl, tar, make, a C compiler, libssl-dev, libcjson-dev. At run time the plugin and
+# mosquitto_ctrl need libcjson1 and libssl.
 set -euo pipefail
 
-VERSION="2.0.18"
-SHA256="d665fe7d0032881b1371a47f34169ee4edab67903b2cd2b4c083822823f4448a"
+VERSION="2.0.23"
+SHA256="47d66fc98d9f8714bdc700dfe690dbe80c9fbe93c00a21b04dc61d00e1667b34"
 URL="https://mosquitto.org/files/source/mosquitto-${VERSION}.tar.gz"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-prefix="${1:-$repo/build/mosquitto-patched}"
+prefix="${1:-$repo/build/mosquitto}"
+
+# The Dynamic Security plugin and mosquitto_ctrl are written against cJSON.
+if ! echo '#include <cjson/cJSON.h>' | ${CC:-cc} -E -x c - >/dev/null 2>&1; then
+    echo "the cJSON headers are missing: install libcjson-dev" >&2
+    exit 1
+fi
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -31,16 +41,18 @@ echo "${SHA256}  $work/src.tar.gz" | sha256sum -c - >/dev/null \
 tar xzf "$work/src.tar.gz" -C "$work"
 cd "$work/mosquitto-${VERSION}"
 
-for p in "$here"/patches/*.patch; do
-    echo "applying $(basename "$p")"
-    patch -p1 --quiet < "$p"
-done
-
 echo "building"
-make -j2 binary WITH_DOCS=no WITH_CJSON=no WITH_WEBSOCKETS=no WITH_SRV=no WITH_TLS=yes \
-     WITH_APPS=no WITH_PLUGINS=no >"$work/build.log" 2>&1 \
+# The libraries a binary needs are looked up next to it: \$$ reaches the linker as a literal $.
+make -j2 binary WITH_DOCS=no WITH_CLIENTS=no WITH_APPS=yes WITH_PLUGINS=yes WITH_CJSON=yes \
+     WITH_WEBSOCKETS=no WITH_SRV=no WITH_TLS=yes WITH_STATIC_LIBRARIES=no \
+     LDFLAGS='-Wl,-rpath,\$$ORIGIN' >"$work/build.log" 2>&1 \
     || { tail -30 "$work/build.log" >&2; exit 1; }
 
-install -D -m 0755 src/mosquitto "$prefix/sbin/mosquitto"
+dest="$prefix/libexec"
+mkdir -p "$dest"
+install -m 0755 src/mosquitto                                          "$dest/mosquitto"
+install -m 0755 plugins/dynamic-security/mosquitto_dynamic_security.so "$dest/mosquitto_dynamic_security.so"
+install -m 0755 apps/mosquitto_ctrl/mosquitto_ctrl                     "$dest/mosquitto_ctrl"
+install -m 0755 lib/libmosquitto.so.1                                  "$dest/libmosquitto.so.1"
 echo "${VERSION}" > "$prefix/VERSION"
-echo "installed $prefix/sbin/mosquitto (${VERSION})"
+echo "installed $dest (${VERSION})"
