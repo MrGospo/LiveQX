@@ -87,7 +87,7 @@ Who may send what:
 
 ## Jobs
 
-A command to a group, an object or everyone goes out in **batches** (10 screens, adjustable): the next batch goes when the previous one has confirmed. If more than 30 % of a batch do not confirm, sending **stops by itself** and the remaining screens do not get the command.
+A command to a group, an object or everyone goes out in **batches** (10 screens, adjustable): the next batch goes when the previous one has confirmed. If more than 30 % of a batch do not confirm, sending **stops by itself** and the remaining screens do not get the command. If the server is not connected to the command broker when a batch is due (it has just restarted, say), the job waits for the broker for up to five minutes and sends nothing; if the broker does not come back, the job stops and says so.
 
 **Screens → Jobs** shows your jobs (an administrator sees all): how far each got, which batch is out, what each screen answered. The page updates by itself. While a job runs you can click "Cancel the rest": what has already reached screens stays and will be carried out, the screens not yet sent to will not get it.
 

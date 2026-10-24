@@ -283,6 +283,13 @@ describe('JobDetailPage', () => {
     expect(screen.queryByRole('button', { name: 'Cancel the rest' })).not.toBeInTheDocument();
   });
 
+  it('says plainly that the job stopped because the broker stayed away, and not that the screens did not answer', () => {
+    jobState.data = job({ state: 'stopped', stop_reason: 'broker_unavailable', items: [] });
+    renderDetail();
+    expect(screen.getByRole('alert')).toHaveTextContent('could not reach the command broker for too long');
+    expect(screen.queryByText(/did not confirm/)).not.toBeInTheDocument();
+  });
+
   it('asks before cancelling the rest, and cancels only after the answer', async () => {
     const user = userEvent.setup();
     cancel.mockResolvedValue({});

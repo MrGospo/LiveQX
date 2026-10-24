@@ -96,6 +96,12 @@ export default function JobDetailPage() {
         )}
       </div>
 
+      {j.state === 'stopped' && j.stop_reason === 'broker_unavailable' && (
+        <p role="alert" className="text-sm text-[var(--text-primary)] m-0 rounded-md border border-[var(--danger)] bg-[var(--danger)]/10 p-3">
+          {t('players.jobs.stoppedBrokerAway')}
+        </p>
+      )}
+
       {j.state === 'stopped' && j.stop_reason === 'too_many_unconfirmed' && (
         <p role="alert" className="text-sm text-[var(--text-primary)] m-0 rounded-md border border-[var(--danger)] bg-[var(--danger)]/10 p-3">
           {t('players.jobs.stoppedTooMany', { percent: j.stop_percent })}

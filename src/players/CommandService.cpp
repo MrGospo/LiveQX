@@ -271,7 +271,7 @@ BulkOutcome CommandService::sendToTarget(const CommandTarget& target, const std:
 
     std::lock_guard<std::mutex> lk(jobs_mu_);
     if (!db_.createJob(job, items)) { out.error = "storage_error"; return out; }
-    advance(job, now);
+    advance(job, now, /*fresh=*/true);
     announceJob(job.id);
 
     out.job_id     = job.id;
@@ -297,13 +297,14 @@ BulkOutcome CommandService::sendToTarget(const CommandTarget& target, const std:
 
 void CommandService::endJob(const std::string& job_id, const std::string& state, const std::string& reason,
                             std::int64_t now, bool notify) {
+    waiting_for_broker_.erase(job_id);
     if (!db_.finishJob(job_id, state, reason, now)) return;
     announceJob(job_id);
     if (!notify || !opts_.on_job_end) return;
     if (auto v = jobView(job_id)) opts_.on_job_end(v->job, v->summary);
 }
 
-void CommandService::advance(JobRow job, std::int64_t now) {
+void CommandService::advance(JobRow job, std::int64_t now, bool fresh) {
     for (;;) {
         const auto items = db_.jobItems(job.id);
 
@@ -316,10 +317,13 @@ void CommandService::advance(JobRow job, std::int64_t now) {
 
         // 2. The batch that just finished: did enough of it come back?
         if (job.next_batch > 0) {
-            std::int64_t members = 0, bad = 0;
+            std::int64_t members = 0, bad = 0, broker_away = 0;
             for (const auto& it : items) {
                 if (it.batch_no != job.next_batch - 1) continue;
-                if (it.state == "failed") { ++members; ++bad; }
+                if (it.state == "failed") {
+                    ++members; ++bad;
+                    if (it.error == "broker_unavailable") ++broker_away;
+                }
                 else if (it.state == "sent") {
                     ++members;
                     auto c = db_.findCommand(it.command_id);
@@ -327,7 +331,8 @@ void CommandService::advance(JobRow job, std::int64_t now) {
                 }
             }
             if (members > 0 && bad * 100 > job.stop_percent * members) {
-                endJob(job.id, "stopped", "too_many_unconfirmed", now, true);
+                // Told apart: a batch that never left because the broker stayed away is not screens that did not answer.
+                endJob(job.id, "stopped", broker_away == bad ? "broker_unavailable" : "too_many_unconfirmed", now, true);
                 return;
             }
         }
@@ -349,8 +354,17 @@ void CommandService::advance(JobRow job, std::int64_t now) {
             }
             auto one = sendToPlayer(it.player_id, job.type, job.created_by, now);
             if (one.ok) {
+                waiting_for_broker_.erase(job.id);
                 db_.updateJobItem(job.id, it.player_id, "sent", one.row.id, "");
                 if (opts_.on_bulk_sent) opts_.on_bulk_sent(one.row, job);
+            } else if (one.error == "broker_unavailable" && !fresh) {
+                // Nothing went out, and nothing is wrong with the screen: the broker is not there yet (the
+                // server has just started, or the broker is being restarted). Failing the batch for that
+                // would stop a job that did nothing wrong, so it waits; this screen and the rest of the
+                // batch stay queued, and the next tick tries again. Past broker_wait_s it fails as before.
+                const std::int64_t since = waiting_for_broker_.try_emplace(job.id, now).first->second;
+                if (now - since < opts_.broker_wait_s) return;
+                db_.updateJobItem(job.id, it.player_id, "failed", "", one.error);
             } else {
                 db_.updateJobItem(job.id, it.player_id, "failed", "", one.error);
             }

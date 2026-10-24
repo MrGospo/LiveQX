@@ -5084,8 +5084,11 @@ paths:
         пачки (`command_batch_size`, по умолчанию 10); следующая пачка уходит, когда все команды
         предыдущей закрыты (подтверждены, отклонены, по таймауту или вручную). Если в закрытой пачке
         не вернулось больше `command_batch_stop_percent` (30) процентов — задание останавливается
-        (`stopped`, `stop_reason: too_many_unconfirmed`), остаток отменяется. Задание хранится в базе
-        и переживает перезапуск сервера.
+        (`stopped`, `stop_reason: too_many_unconfirmed`), остаток отменяется. Если, когда подошла
+        очередь пачки, сервер не соединён с брокером (только что перезапустился или брокер
+        перезапускается), пачка не проваливается, а ждёт брокера до пяти минут; не вернулся —
+        `stopped`, `stop_reason: broker_unavailable`. Задание хранится в базе и переживает
+        перезапуск сервера.
       responses:
         '200':
           description: The jobs, without their screens.
@@ -5739,7 +5742,7 @@ components:
             id: { type: integer, format: int64 }
             name: { type: string }
         state: { type: string, enum: [running, done, stopped, cancelled] }
-        stop_reason: { type: string, description: '`too_many_unconfirmed`, `cancelled_by_user` или пусто.' }
+        stop_reason: { type: string, description: '`too_many_unconfirmed`, `broker_unavailable` (брокер команд не вернулся за отведённое время, пока задание ждало очередную пачку), `cancelled_by_user` или пусто.' }
         batch_size: { type: integer }
         stop_percent: { type: integer }
         created_at: { type: integer, format: int64 }

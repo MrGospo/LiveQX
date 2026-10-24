@@ -486,6 +486,7 @@ struct JobLog {
 class BatchTest : public CommandServiceTest {
 protected:
     JobLog log_;
+    int ok_left_{-1};                      // publishes the broker still takes; -1 = no limit
     std::unique_ptr<CommandService> batcher_;
 
     void makeBatcher() {
@@ -493,7 +494,11 @@ protected:
         co.events = &bus_;
         co.publish = [this](const liveqx::mqtt::Message& m) {
             std::lock_guard<std::mutex> lk(sent_mu_);
-            if (broker_ == liveqx::mqtt::PublishResult::Ok) sent_.push_back(m);
+            if (broker_ == liveqx::mqtt::PublishResult::Ok) {
+                if (ok_left_ == 0) return liveqx::mqtt::PublishResult::NotConnected;   // the broker drops out here
+                if (ok_left_ > 0) --ok_left_;
+                sent_.push_back(m);
+            }
             return broker_;
         };
         co.on_bulk_sent = [this](const CommandRow& c, const JobRow& j) {
@@ -748,6 +753,83 @@ TEST_F(BatchTest, AJobInProgressContinuesAfterTheServerRestarts) {
     auto v = batcher_->jobView(out.job_id);
     EXPECT_EQ(v->job.state, "running");
     EXPECT_EQ(v->summary.pending, 2u);
+}
+
+TEST_F(BatchTest, ABatchThatMeetsAnAbsentBrokerWaitsForItInsteadOfFailingAndGoesOutWhenItIsBack) {
+    // Found under load: after a restart the first look at a running job comes a moment before the
+    // server has reconnected to the broker. Failing the batch for that stopped a job that had done nothing wrong.
+    ASSERT_EQ(players_->updateSettings({{"command_batch_size", "2"}}), "");
+    connected(4);
+    auto out = startGroup(4);
+    ASSERT_EQ(out.sent.size(), 2u);
+    for (const auto& s : out.sent) confirm(s.player_id, s.command_id);
+    makeBatcher();                                                  // the server restarts...
+    broker_ = liveqx::mqtt::PublishResult::NotConnected;            // ...and the broker is not there yet
+
+    batcher_->tick(kT0 + 30);
+    auto v = batcher_->jobView(out.job_id);
+    EXPECT_EQ(v->job.state, "running") << "the job waits";
+    EXPECT_EQ(v->summary.failed, 0u);
+    EXPECT_EQ(v->summary.queued, 2u) << "the second batch is untouched";
+    EXPECT_EQ(sent_.size(), 2u);
+    EXPECT_TRUE(log_.ended.empty());
+
+    batcher_->tick(kT0 + 60);                                       // still away, but within the allowance
+    EXPECT_EQ(batcher_->jobView(out.job_id)->job.state, "running");
+
+    broker_ = liveqx::mqtt::PublishResult::Ok;                      // the link is up
+    batcher_->tick(kT0 + 62);
+    EXPECT_EQ(sent_.size(), 4u) << "the second batch went out as soon as it could";
+    v = batcher_->jobView(out.job_id);
+    EXPECT_EQ(v->job.state, "running");
+    EXPECT_EQ(v->summary.pending, 2u);
+    EXPECT_EQ(v->summary.failed, 0u);
+}
+
+TEST_F(BatchTest, ABrokerThatStaysAwayEndsTheJobSayingSoAndNotThatTheScreensDidNotAnswer) {
+    ASSERT_EQ(players_->updateSettings({{"command_batch_size", "2"}}), "");
+    connected(4);
+    auto out = startGroup(4);
+    for (const auto& s : out.sent) confirm(s.player_id, s.command_id);
+    broker_ = liveqx::mqtt::PublishResult::NotConnected;
+
+    batcher_->tick(kT0 + 30);                                       // the wait begins
+    EXPECT_EQ(batcher_->jobView(out.job_id)->job.state, "running");
+    batcher_->tick(kT0 + 30 + 301);                                 // longer than the allowance (300 s)
+    auto v = batcher_->jobView(out.job_id);
+    EXPECT_EQ(v->job.state, "stopped");
+    EXPECT_EQ(v->job.stop_reason, "broker_unavailable");
+    ASSERT_EQ(log_.ended.size(), 1u);
+    EXPECT_EQ(log_.ended_reason[0], "broker_unavailable");
+    EXPECT_EQ(sent_.size(), 2u) << "nothing more went out";
+}
+
+TEST_F(BatchTest, ABrokerThatDropsOutInTheMiddleOfABatchLetsTheRestOfTheBatchFollowWhenItIsBack) {
+    ASSERT_EQ(players_->updateSettings({{"command_batch_size", "4"}}), "");
+    connected(8);
+    auto out = startGroup(8);
+    ASSERT_EQ(out.sent.size(), 4u);
+    for (const auto& s : out.sent) confirm(s.player_id, s.command_id);
+
+    ok_left_ = 1;                                                   // the second batch starts, and the broker goes
+    batcher_->tick(kT0 + 30);
+    auto v = batcher_->jobView(out.job_id);
+    EXPECT_EQ(v->job.state, "running");
+    EXPECT_EQ(v->summary.failed, 0u) << "what could not go yet is waiting, not failed";
+    EXPECT_EQ(v->summary.pending, 1u);
+    EXPECT_EQ(v->summary.queued, 3u);
+
+    ok_left_ = -1;                                                  // the broker is back
+    batcher_->tick(kT0 + 32);
+    EXPECT_EQ(batcher_->jobView(out.job_id)->summary.queued, 3u) << "the one that went out is still to be settled first";
+    const auto now_out = batcher_->jobView(out.job_id);
+    for (const auto& it : now_out->items)
+        if (it.item.state == "sent" && it.command_state == "pending") confirm(it.item.player_id, it.item.command_id);
+    batcher_->tick(kT0 + 35);
+    v = batcher_->jobView(out.job_id);
+    EXPECT_EQ(v->summary.queued, 0u);
+    EXPECT_EQ(v->summary.pending, 3u) << "the rest of the batch followed";
+    EXPECT_EQ(v->summary.failed, 0u);
 }
 
 TEST_F(BatchTest, TheBatchSizeAndTheThresholdAreSettingsWithLimits) {

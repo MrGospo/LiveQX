@@ -1664,6 +1664,7 @@
       },
       "progress": "Confirmed {{done}} of {{expected}}",
       "startedBy": "Started {{when}} by {{who}}. In batches of {{size}}.",
+      "stoppedBrokerAway": "Sending stopped: the server could not reach the command broker for too long. The remaining screens did not get the command; send it again when the broker is back.",
       "stoppedTooMany": "Sending stopped: more than {{percent}} % of the last batch did not confirm. The remaining screens did not get the command.",
       "cancelRest": "Cancel the rest",
       "cancelled": "The rest is cancelled. What has already gone out is confirmed as usual.",

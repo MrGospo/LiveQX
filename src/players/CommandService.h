@@ -18,6 +18,7 @@
 #include "players/PlayersService.h"
 
 #include <functional>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -57,6 +58,10 @@ struct CommandServiceOptions {
     std::function<void(const CommandRow&, const JobRow&)> on_bulk_sent;
     // A job ended: done, stopped, or cancelled.
     std::function<void(const JobRow&, const JobSummary&)> on_job_end;
+    // How long a running job waits for a broker that is not there when its next batch is due
+    // (the server has just restarted and has not reconnected yet, or the broker is being restarted)
+    // before it gives up. Nothing is sent meanwhile; the screens are not touched.
+    int broker_wait_s{300};
 };
 
 struct CommandOutcome {
@@ -176,7 +181,8 @@ private:
     // A job started, sent a batch or finished: the page that shows jobs looks again.
     void announceJob(const std::string& job_id);
     // Runs a job as far as it can go right now. Caller holds jobs_mu_.
-    void advance(JobRow job, std::int64_t now);
+    // `fresh`: the job has just been made by the person's request, who is told at once if the broker is away.
+    void advance(JobRow job, std::int64_t now, bool fresh = false);
     void endJob(const std::string& job_id, const std::string& state, const std::string& reason,
                 std::int64_t now, bool notify);
 
@@ -184,6 +190,9 @@ private:
     PlayersService&       players_;
     CommandServiceOptions opts_;
     std::mutex            jobs_mu_;       // one thing at a time may move jobs on
+    // Jobs whose next batch found the broker away: since when (guarded by jobs_mu_). Lost at a restart,
+    // which only gives the broker a fresh allowance of broker_wait_s.
+    std::map<std::string, std::int64_t> waiting_for_broker_;
 };
 
 }  // namespace liveqx::players
